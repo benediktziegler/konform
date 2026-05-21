@@ -1,0 +1,16 @@
+id = "konform"
+name = "Konform"
+version = "0.1.0"
+schema_version = 1
+authors = ["Benedikt Ziegler <benediktziegler@gmail.com>"]
+description = "Konform Python linter and language server"
+repository = "https://github.com/benediktziegler/konform"
+
+[lib]
+kind = "Rust"
+version = "0.2.0"
+
+[language_servers.konform]
+languages = ["Python"]
+
+[language_servers.konform.language_ids]

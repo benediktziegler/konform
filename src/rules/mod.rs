@@ -16,6 +16,7 @@ use std::sync::Arc;
 // Sub-modules
 // ---------------------------------------------------------------------------
 pub mod kis001;
+pub mod kpt;
 
 // ---------------------------------------------------------------------------
 // FileContext
@@ -137,7 +138,10 @@ pub fn has_noqa(line: &str, code: &str) -> bool {
 /// Return the full list of active rules.
 pub fn all_rules(
     probe: Arc<ModuleProbe>,
-    _config_dir: Option<std::path::PathBuf>,
+    config_dir: Option<std::path::PathBuf>,
 ) -> Vec<Box<dyn Rule>> {
-    vec![Box::new(kis001::Kis001Rule::new(probe))]
+    vec![
+        Box::new(kis001::Kis001Rule::new(probe)),
+        Box::new(kpt::KptRule::new(config_dir)),
+    ]
 }

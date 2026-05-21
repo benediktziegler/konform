@@ -1,0 +1,49 @@
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+
+default_stages:
+  - pre-commit
+
+repos:
+  - repo: local
+    hooks:
+      - id: format
+        name: Code format
+        language: system
+        entry: hatch fmt
+        pass_filenames: false
+        verbose: false
+      - id: types
+        name: Type check
+        language: system
+        entry: hatch run types:check
+        pass_filenames: false
+        verbose: false
+
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v3.29.1
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]
+
+  - repo: meta
+    hooks:
+      - id: check-hooks-apply
+      - id: check-useless-excludes
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-toml
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: detect-private-key
+
+  - repo: https://github.com/jsh9/pydoclint
+    rev: 0.8.3
+    hooks:
+      - id: pydoclint
+        args: ["--config=pyproject.toml"]

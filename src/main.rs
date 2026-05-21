@@ -1,4 +1,6 @@
 mod cache;
+mod config;
+mod git;
 mod module_probe;
 mod theme;
 mod types;

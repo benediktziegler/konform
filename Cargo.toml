@@ -1,0 +1,108 @@
+[package]
+name        = "konform"
+version     = "0.1.0"
+edition     = "2021"
+description = "Multi-rule Python linter and language server — module-only imports, pattern rules, and more"
+license     = "MIT"
+authors     = ["Benedikt Ziegler <benediktziegler@gmail.com>"]
+homepage    = "https://github.com/benediktziegler/konform"
+repository  = "https://github.com/benediktziegler/konform"
+
+[[bin]]
+name = "konform"
+path = "src/main.rs"
+
+[dependencies]
+# CLI argument parsing
+clap = { version = "4", features = ["derive", "env"] }
+
+# Serialization / deserialization
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# TOML config (pyproject.toml / konform.toml)
+toml = "0.8"
+
+# YAML output
+serde_yaml = "0.9"
+
+# Data-parallel iteration over files
+rayon = "1"
+
+# Directory walking that respects .gitignore
+ignore = "0.4"
+
+# SHA-256 for the file-level cache
+sha2 = "0.10"
+hex  = "0.4"
+
+# Terminal colours — TTY detection, NO_COLOR, TERM=dumb handled in output.rs
+owo-colors = "4"
+
+# Error handling
+anyhow    = "1"
+thiserror = "1"
+
+# Python AST parsing — published on crates.io; same version used by
+# pytest-language-server (bellini666/pytest-language-server 0.22.1)
+rustpython-parser = "0.4"
+
+# Lock-free concurrent HashMap for the in-process module-probe cache
+dashmap = "6"
+
+# Regex engine and glob matching for KPT pattern rules
+regex   = "1"
+globset = "0.4"
+
+# Unified diff rendering for `check --diff`
+similar = "2"
+
+# ---------------------------------------------------------------------------
+# Cache (ruff-style binary cache)
+# ---------------------------------------------------------------------------
+# Binary serialisation — replaces serde_json in the cache path.
+# Pinned to 2.0.1: the last working release before the project was abandoned
+# (3.0.0 is a tombstone that refuses to compile). The upstream maintainer
+# recommends `wincode` as a maintained fork; we can migrate when it
+# stabilises beyond v0.x and adopts a compatible Rust MSRV.
+bincode  = { version = "=2.0.1", features = ["derive"] }
+# Fast, deterministic hash for settings + file-cache keys
+seahash  = "4"
+# Writes CACHEDIR.TAG (backup/sync tool hint)
+cachedir = "0.3"
+# Portable mtime read for the file-cache key
+filetime = "0.2"
+
+# ---------------------------------------------------------------------------
+# LSP server (step 3)
+# ---------------------------------------------------------------------------
+# JSON-RPC framing + message types — no tokio, crossbeam-based, ~769 LoC.
+# Actively maintained by the rust-analyzer team.
+lsp-server  = "0.7"
+# LSP protocol types (Diagnostic, Position, …)
+lsp-types   = "0.97"
+# Actor-model messaging between the main-loop and worker threads.
+crossbeam-channel = "0.5"
+
+# ---------------------------------------------------------------------------
+# Watch mode (step 26)
+# ---------------------------------------------------------------------------
+# Cross-platform filesystem event notifications.
+notify = "6"
+
+[profile.release]
+lto           = "thin"  # fat (lto=true) saves ~1-2 % binary size but costs 3-5 min; thin gives 90 % of the gain
+codegen-units = 4       # 1 disables all parallelism; 4 is a good balance for a binary this size
+strip         = true
+opt-level     = 3
+
+# Fast profile used by `maturin develop` / tests — full incremental, no LTO.
+[profile.dev-release]
+inherits      = "release"
+lto           = false
+codegen-units = 16
+opt-level     = 2
+strip         = false
+
+[dev-dependencies]
+tempfile = "3"

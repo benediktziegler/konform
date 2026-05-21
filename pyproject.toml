@@ -1,0 +1,327 @@
+[build-system]
+requires      = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name    = "konform"
+version = "0.1.0"
+authors = [
+  { name = "Benedikt Ziegler", email = "benediktziegler@gmail.com" },
+]
+description     = "Multi-rule Python linter and language server — fast, configurable, CI-ready"
+readme          = "README.md"
+requires-python = ">=3.10"
+keywords        = ["konform", "python", "linter", "imports", "language-server"]
+license         = { text = "MIT" }
+classifiers     = [
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+dependencies = []
+
+[project.urls]
+Homepage      = "https://github.com/benediktziegler/konform"
+Source        = "https://github.com/benediktziegler/konform"
+"Bug Tracker" = "https://github.com/benediktziegler/konform/issues"
+
+# ---------------------------------------------------------------------------
+# maturin configuration
+# ---------------------------------------------------------------------------
+[tool.maturin]
+bindings      = "bin"
+python-source = "python"
+module-name   = "konform"
+profile       = "release"
+
+[tool.hatch.build]
+directory = "tmp/dist"
+
+# ---------------------------------------------------------------------------
+# Static analysis
+# ---------------------------------------------------------------------------
+[tool.ruff]
+extend         = "ruff_defaults.toml"
+preview        = true
+target-version = "py310"
+include        = [
+  "python/**/*.py",
+  "tests/**/*.py",
+]
+
+[tool.ruff.lint]
+extend-ignore = [
+  "EM101",
+  "EM102",
+  "G004",
+  "TRY003",
+]
+
+[tool.ruff.lint.isort]
+known-first-party      = ["konform"]
+force-single-line      = true
+single-line-exclusions = ["typing", "typing_extensions", "collections.abc"]
+required-imports       = ["from __future__ import annotations"]
+
+[tool.ruff.lint.extend-per-file-ignores]
+"tests/*" = ["SLF001"]
+
+[tool.pydoclint]
+style                        = "google"
+exclude                      = '\\.git|\\.venv|tmp'
+arg-type-hints-in-signature  = true
+arg-type-hints-in-docstring  = false
+allow-init-docstring         = true
+check-return-types           = false
+check-yield-types            = false
+
+# ---------------------------------------------------------------------------
+# Type checking
+# ---------------------------------------------------------------------------
+[tool.ty]
+# ty reads src from pyproject.toml pythonpath / include settings automatically.
+
+# ---------------------------------------------------------------------------
+# Testing
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion           = "6.0"
+log_cli              = 1
+addopts              = "-ra --color=yes -p no:legacypath"
+testpaths            = ["tests"]
+console_output_style = "progress"
+log_cli_level        = "CRITICAL"
+log_cli_format       = "[%(asctime)s] [%(process)d][%(thread)d] [%(levelname)s] [%(name)s:%(lineno)d]: %(message)s"
+log_cli_date_format  = "%Y-%m-%d %H:%M:%S"
+log_level            = "CRITICAL"
+log_format           = "[%(asctime)s] [%(process)d][%(thread)d] [%(levelname)s] [%(name)s:%(lineno)d]: %(message)s"
+log_date_format      = "%Y-%m-%d %H:%M:%S"
+junit_family         = "xunit2"
+
+[tool.coverage.run]
+source   = ["konform"]
+branch   = true
+parallel = true
+
+[tool.coverage.paths]
+source = ["python/"]
+tests  = ["tests"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "no cov",
+  "pragma: no cover",
+  "def __repr__",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
+
+[tool.coverage.html]
+directory = "tmp/report/coverage/html"
+
+[tool.coverage.xml]
+output = "tmp/report/coverage/xml/coverage.xml"
+
+# ---------------------------------------------------------------------------
+# Changelog / release metadata
+# ---------------------------------------------------------------------------
+[tool.commitizen]
+name                     = "cz_conventional_commits"
+tag_format               = "v$version"
+version_scheme           = "semver"
+version_provider         = "pep621"
+update_changelog_on_bump = true
+changelog_file           = "CHANGELOG.md"
+allowed_prefixes         = ["Merge", "Revert", "fixup!", "squash!"]
+version_files            = [
+    "python/konform/_version.py:__version__",
+    "Cargo.toml:^version",
+]
+
+#####################
+# Environment Setup #
+#####################
+
+# ---------------------------------------------------------------------------
+# hatch-test — unit tests
+# ---------------------------------------------------------------------------
+[tool.hatch.envs.hatch-test]
+default-args      = ["tests/unittest"]
+extra-args        = ["--junitxml=tmp/report/junit/report.xml"]
+dependencies      = ["maturin>=1.0,<2.0"]
+dependency-groups = ["test"]
+python            = "3.10"
+installer         = "uv"
+
+[tool.hatch.envs.hatch-test.scripts]
+run         = [
+  "maturin develop --profile dev-release",  # fast incremental build; use --release only for distribution
+  "cargo test",
+  "pytest{env:HATCH_TEST_ARGS:} {args}"
+]
+run-cov     = [
+  "maturin develop --profile dev-release",
+  "cargo llvm-cov",
+  "pytest{env:HATCH_TEST_ARGS:} {args}"
+]
+cov-combine = "coverage combine"
+cov-report  = "coverage report && coverage html && coverage xml"
+
+[[tool.hatch.envs.hatch-test.matrix]]
+python = ["3.10", "3.11"]
+
+# ---------------------------------------------------------------------------
+# hatch-static-analysis — ruff lint / format
+# ---------------------------------------------------------------------------
+[tool.hatch.envs.hatch-static-analysis]
+description       = "Static analysis environment to run linters and formatters"
+dependencies      = []
+dependency-groups = ["lint"]
+config-path       = "ruff_defaults.toml"
+python            = "3.10"
+installer         = "uv"
+
+[tool.hatch.envs.hatch-static-analysis.scripts]
+# Python + Rust format checks run together so `hatch fmt --check` covers both.
+format-check = [
+  "ruff format{env:HATCH_FMT_ARGS:} --check --diff {args:.}",
+  "cargo fmt --check",
+]
+format-fix = [
+  "ruff format{env:HATCH_FMT_ARGS:} {args:.}",
+  "cargo fmt",
+]
+# Python lint (ruff) + Rust lint (clippy, warnings-as-errors in check mode).
+lint-check = [
+  "ruff check{env:HATCH_LINT_ARGS:} {args:.}",
+  "cargo clippy -- -D warnings",
+]
+lint-fix = [
+  "ruff check{env:HATCH_LINT_ARGS:} --fix {args:.}",
+  "cargo clippy --fix --allow-dirty -- -D warnings",
+]
+
+# ---------------------------------------------------------------------------
+# default — interactive development environment
+# ---------------------------------------------------------------------------
+[tool.hatch.envs.default]
+python            = "3.10"
+installer         = "uv"
+path              = ".venv"
+dependency-groups = ["dev"]
+
+[tool.hatch.envs.default.overrides]
+env.DEVCONTAINER.path = { value = "", if = ["true"] }
+
+[tool.hatch.envs.default.scripts]
+# --profile dev-release = no LTO, 16 codegen-units, opt-level 2 → fast incremental rebuilds.
+# Use `maturin build --release` (via hatch run maturin:build) when you need a distribution wheel.
+develop = "maturin develop --profile dev-release"
+build   = "hatch run maturin:build"
+
+# ---------------------------------------------------------------------------
+# maturin — build wheels for distribution (including cross-compilation)
+# Requires: cargo-zigbuild (`pip install ziglang && cargo install cargo-zigbuild`)
+# ---------------------------------------------------------------------------
+[tool.hatch.envs.maturin]
+detached     = true
+python       = "3.10"
+installer    = "uv"
+dependencies = [
+  "maturin>=1.13.3,<2.0",
+  "ziglang",
+]
+
+[tool.hatch.envs.maturin.scripts]
+# One-time setup: install cargo-zigbuild and the cross-compilation targets.
+# Run once per machine before any cross-compilation script.
+setup = [
+  "cargo install cargo-zigbuild",
+  "rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu x86_64-apple-darwin aarch64-apple-darwin",
+]
+
+# Current host platform only (no zig, no extra setup required).
+build = "maturin build --release {args}"
+
+# Cross-compiled wheels — each script is a plain shell command (maturin invocation).
+# All use --zig which delegates to cargo-zigbuild; run `hatch run maturin:setup` first.
+build-linux-x64   = "maturin build --release --target x86_64-unknown-linux-musl  --zig"
+build-linux-arm64 = "maturin build --release --target aarch64-unknown-linux-musl --zig"
+build-windows-x64 = "maturin build --release --target x86_64-pc-windows-gnu      --zig"
+build-macos-x64   = "maturin build --release --target x86_64-apple-darwin         --zig"
+build-macos-arm64 = "maturin build --release --target aarch64-apple-darwin        --zig"
+
+# build-all runs every cross-compilation target in sequence.
+# Items in a hatch list-script are shell commands, NOT script names,
+# so the maturin command is inlined rather than referencing the names above.
+build-all = [
+  "maturin build --release --target x86_64-unknown-linux-musl  --zig",
+  "maturin build --release --target aarch64-unknown-linux-musl --zig",
+  "maturin build --release --target x86_64-pc-windows-gnu      --zig",
+  "maturin build --release --target x86_64-apple-darwin         --zig",
+  "maturin build --release --target aarch64-apple-darwin        --zig",
+]
+publish = "maturin upload tmp/dist/*.whl {args}"
+
+# ---------------------------------------------------------------------------
+# types — mypy
+# ---------------------------------------------------------------------------
+[tool.hatch.envs.types]
+dependency-groups = ["typing"]
+path              = ""
+
+[tool.hatch.envs.types.scripts]
+# Python type check (ty) + Rust type/borrow check (cargo check).
+# clippy is the linter and lives in hatch-static-analysis; cargo check is
+# the equivalent of a type-checker pass for Rust.
+check = [
+  "echo \"VERSION: `ty --version`\"",
+  "ty check {args}",
+  "cargo check",
+]
+
+# ---------------------------------------------------------------------------
+# deploy — version management and release tooling
+# ---------------------------------------------------------------------------
+[tool.hatch.envs.deploy]
+detached     = true
+python       = "3.10"
+installer    = "uv"
+dependencies = ["commitizen>=3.0"]
+
+[tool.hatch.envs.deploy.scripts]
+get-version = "cz version --project"
+bump        = "cz bump {args}"
+changelog   = "cz changelog {args}"
+
+# ---------------------------------------------------------------------------
+# Dependency groups
+# ---------------------------------------------------------------------------
+[dependency-groups]
+test = [
+  "coverage[toml]~=7.4",
+  "pytest~=8.1",
+  "pytest-mock~=3.12",
+  "pytest-xdist[psutil]~=3.8",
+  "pytest-clarity>=1.0.1,<2.0.0",
+]
+lint = [
+  "ruff==0.15.12",
+  "pydoclint~=0.8",
+]
+typing = [
+  "ty==0.0.35",
+  "pytest~=8.1",   # needed so ty can resolve imports in test files
+]
+dev = [
+  { include-group = "test" },
+  { include-group = "lint" },
+  { include-group = "typing" },
+  "ipython",
+  "maturin>=1.0,<2.0",
+]

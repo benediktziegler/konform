@@ -1,0 +1,695 @@
+# Ruff defaults shared across all konform environments.
+# To extend or override, add the corresponding section to your pyproject.toml.
+# For more information see https://hatch.pypa.io/latest/config/internal/static-analysis/#extending-config.
+
+# ruff_defaults version
+# Update this version number when you make changes to the ruff configuration.
+# version: 0.1.0
+
+line-length = 120
+indent-width = 4
+
+[format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
+[lint]
+# For a complete list of all available rules, see https://docs.astral.sh/ruff/rules/
+# The comment contains the rule's name, if it is fixable by ruff, and if it is a preview rule.
+select = [
+  "A001", # builtin-variable-shadowing - Fix is not available. -
+  "A002", # builtin-argument-shadowing - Fix is not available. -
+  "A003", # builtin-attribute-shadowing - Fix is not available. -
+  "ARG001", # unused-function-argument - Fix is not available. -
+  "ARG002", # unused-method-argument - Fix is not available. -
+  "ARG003", # unused-class-method-argument - Fix is not available. -
+  "ARG004", # unused-static-method-argument - Fix is not available. -
+  "ARG005", # unused-lambda-argument - Fix is not available. -
+  "ASYNC100", # cancel-scope-no-checkpoint - Fix is not available. -
+  "B002", # unary-prefix-increment-decrement - Fix is not available. -
+  "B003", # assignment-to-os-environ - Fix is not available. -
+  "B004", # unreliable-callable-check - Fix is sometimes available. -
+  "B005", # strip-with-multi-characters - Fix is not available. -
+  "B006", # mutable-argument-default - Fix is sometimes available. -
+  "B007", # unused-loop-control-variable - Fix is sometimes available. -
+  "B008", # function-call-in-default-argument - Fix is not available. -
+  "B009", # get-attr-with-constant - Fix is always available. -
+  "B010", # set-attr-with-constant - Fix is always available. -
+  "B011", # assert-false - Fix is always available. -
+  "B012", # jump-statement-in-finally - Fix is not available. -
+  "B013", # redundant-tuple-in-exception-handler - Fix is always available. -
+  "B014", # duplicate-handler-exception - Fix is always available. -
+  "B015", # useless-comparison - Fix is not available. -
+  "B016", # raise-literal - Fix is not available. -
+  "B017", # assert-raises-exception - Fix is not available. -
+  "B018", # useless-expression - Fix is not available. -
+  "B019", # cached-instance-method - Fix is not available. -
+  "B020", # loop-variable-overrides-iterator - Fix is not available. -
+  "B021", # f-string-docstring - Fix is not available. -
+  "B022", # useless-contextlib-suppress - Fix is not available. -
+  "B023", # function-uses-loop-variable - Fix is not available. -
+  "B024", # abstract-base-class-without-abstract-method - Fix is not available. -
+  "B025", # duplicate-try-block-exception - Fix is not available. -
+  "B026", # star-arg-unpacking-after-keyword-arg - Fix is not available. -
+  "B028", # no-explicit-stacklevel - Fix is always available. -
+  "B029", # except-with-empty-tuple - Fix is not available. -
+  "B030", # except-with-non-exception-classes - Fix is not available. -
+  "B031", # reuse-of-groupby-generator - Fix is not available. -
+  "B032", # unintentional-type-annotation - Fix is not available. -
+  "B033", # duplicate-value - Fix is sometimes available. -
+  "B034", # re-sub-positional-args - Fix is not available. -
+  "B035", # static-key-dict-comprehension - Fix is not available. -
+  "B904", # raise-without-from-inside-except - Fix is not available. -
+  "B905", # zip-without-explicit-strict - Fix is always available. -
+  "B909", # loop-iterator-mutation - Fix is not available. - Preview
+  "BLE001", # blind-except - Fix is not available. -
+  "C400", # unnecessary-generator-list - Fix is always available. -
+  "C401", # unnecessary-generator-set - Fix is always available. -
+  "C402", # unnecessary-generator-dict - Fix is always available. -
+  "C403", # unnecessary-list-comprehension-set - Fix is always available. -
+  "C404", # unnecessary-list-comprehension-dict - Fix is always available. -
+  "C405", # unnecessary-literal-set - Fix is always available. -
+  "C406", # unnecessary-literal-dict - Fix is always available. -
+  "C408", # unnecessary-collection-call - Fix is always available. -
+  "C409", # unnecessary-literal-within-tuple-call - Fix is always available. -
+  "C410", # unnecessary-literal-within-list-call - Fix is always available. -
+  "C411", # unnecessary-list-call - Fix is always available. -
+  "C413", # unnecessary-call-around-sorted - Fix is always available. -
+  "C414", # unnecessary-double-cast-or-process - Fix is always available. -
+  "C415", # unnecessary-subscript-reversal - Fix is not available. -
+  "C416", # unnecessary-comprehension - Fix is always available. -
+  "C417", # unnecessary-map - Fix is sometimes available. -
+  "C418", # unnecessary-literal-within-dict-call - Fix is always available. -
+  "C419", # unnecessary-comprehension-in-call - Fix is sometimes available. -
+  "C901", # complex-structure - Fix is not available. -
+  "COM818", # trailing-comma-on-bare-tuple - Fix is not available. -
+  "DTZ001", # call-datetime-without-tzinfo - Fix is not available. -
+  "DTZ002", # call-datetime-today - Fix is not available. -
+  "DTZ003", # call-datetime-utcnow - Fix is not available. -
+  "DTZ004", # call-datetime-utcfromtimestamp - Fix is not available. -
+  "DTZ005", # call-datetime-now-without-tzinfo - Fix is not available. -
+  "DTZ006", # call-datetime-fromtimestamp - Fix is not available. -
+  "DTZ007", # call-datetime-strptime-without-zone - Fix is not available. -
+  "DTZ011", # call-date-today - Fix is not available. -
+  "DTZ012", # call-date-fromtimestamp - Fix is not available. -
+  "E101", # mixed-spaces-and-tabs - Fix is not available. -
+  "E112", # no-indented-block - Fix is not available. - Preview
+  "E113", # unexpected-indentation - Fix is not available. - Preview
+  "E115", # no-indented-block-comment - Fix is not available. - Preview
+  "E116", # unexpected-indentation-comment - Fix is not available. - Preview
+  "E201", # whitespace-after-open-bracket - Fix is always available. - Preview
+  "E202", # whitespace-before-close-bracket - Fix is always available. - Preview
+  "E203", # whitespace-before-punctuation - Fix is always available. - Preview
+  "E211", # whitespace-before-parameters - Fix is always available. - Preview
+  "E221", # multiple-spaces-before-operator - Fix is always available. - Preview
+  "E222", # multiple-spaces-after-operator - Fix is always available. - Preview
+  "E223", # tab-before-operator - Fix is always available. - Preview
+  "E224", # tab-after-operator - Fix is always available. - Preview
+  "E225", # missing-whitespace-around-operator - Fix is always available. - Preview
+  "E226", # missing-whitespace-around-arithmetic-operator - Fix is always available. - Preview
+  "E227", # missing-whitespace-around-bitwise-or-shift-operator - Fix is always available. - Preview
+  "E228", # missing-whitespace-around-modulo-operator - Fix is always available. - Preview
+  "E231", # missing-whitespace - Fix is always available. - Preview
+  "E241", # multiple-spaces-after-comma - Fix is always available. - Preview
+  "E242", # tab-after-comma - Fix is always available. - Preview
+  "E251", # unexpected-spaces-around-keyword-parameter-equals - Fix is always available. - Preview
+  "E252", # missing-whitespace-around-parameter-equals - Fix is always available. - Preview
+  "E261", # too-few-spaces-before-inline-comment - Fix is always available. - Preview
+  "E262", # no-space-after-inline-comment - Fix is always available. - Preview
+  "E265", # no-space-after-block-comment - Fix is always available. - Preview
+  "E266", # multiple-leading-hashes-for-block-comment - Fix is always available. - Preview
+  "E271", # multiple-spaces-after-keyword - Fix is always available. - Preview
+  "E272", # multiple-spaces-before-keyword - Fix is always available. - Preview
+  "E273", # tab-after-keyword - Fix is always available. - Preview
+  "E274", # tab-before-keyword - Fix is always available. - Preview
+  "E275", # missing-whitespace-after-keyword - Fix is always available. - Preview
+  "E401", # multiple-imports-on-one-line - Fix is sometimes available. -
+  "E402", # module-import-not-at-top-of-file - Fix is not available. -
+  "E502", # redundant-backslash - Fix is always available. - Preview
+  "E701", # multiple-statements-on-one-line-colon - Fix is not available. -
+  "E702", # multiple-statements-on-one-line-semicolon - Fix is not available. -
+  "E703", # useless-semicolon - Fix is always available. -
+  "E711", # none-comparison - Fix is always available. -
+  "E712", # true-false-comparison - Fix is always available. -
+  "E713", # not-in-test - Fix is always available. -
+  "E714", # not-is-test - Fix is always available. -
+  "E721", # type-comparison - Fix is not available. -
+  "E722", # bare-except - Fix is not available. -
+  "E731", # lambda-assignment - Fix is sometimes available. -
+  "E741", # ambiguous-variable-name - Fix is not available. -
+  "E742", # ambiguous-class-name - Fix is not available. -
+  "E743", # ambiguous-function-name - Fix is not available. -
+  "E902", # io-error - Fix is not available. -
+  "EM101", # raw-string-in-exception - Fix is sometimes available. -
+  "EM102", # f-string-in-exception - Fix is sometimes available. -
+  "EM103", # dot-format-in-exception - Fix is sometimes available. -
+  "EXE001", # shebang-not-executable - Fix is not available. -
+  "EXE002", # shebang-missing-executable-file - Fix is not available. -
+  "EXE003", # shebang-missing-python - Fix is not available. -
+  "EXE004", # shebang-leading-whitespace - Fix is always available. -
+  "EXE005", # shebang-not-first-line - Fix is not available. -
+  "F401", # unused-import - Fix is sometimes available. -
+  "F402", # import-shadowed-by-loop-var - Fix is not available. -
+  "F403", # undefined-local-with-import-star - Fix is not available. -
+  "F404", # late-future-import - Fix is not available. -
+  "F405", # undefined-local-with-import-star-usage - Fix is not available. -
+  "F406", # undefined-local-with-nested-import-star-usage - Fix is not available. -
+  "F407", # future-feature-not-defined - Fix is not available. -
+  "F501", # percent-format-invalid-format - Fix is not available. -
+  "F502", # percent-format-expected-mapping - Fix is not available. -
+  "F503", # percent-format-expected-sequence - Fix is not available. -
+  "F504", # percent-format-extra-named-arguments - Fix is always available. -
+  "F505", # percent-format-missing-argument - Fix is not available. -
+  "F506", # percent-format-mixed-positional-and-named - Fix is not available. -
+  "F507", # percent-format-positional-count-mismatch - Fix is not available. -
+  "F508", # percent-format-star-requires-sequence - Fix is not available. -
+  "F509", # percent-format-unsupported-format-character - Fix is not available. -
+  "F521", # string-dot-format-invalid-format - Fix is not available. -
+  "F522", # string-dot-format-extra-named-arguments - Fix is sometimes available. -
+  "F523", # string-dot-format-extra-positional-arguments - Fix is sometimes available. -
+  "F524", # string-dot-format-missing-arguments - Fix is not available. -
+  "F525", # string-dot-format-mixing-automatic - Fix is not available. -
+  "F541", # f-string-missing-placeholders - Fix is always available. -
+  "F601", # multi-value-repeated-key-literal - Fix is sometimes available. -
+  "F602", # multi-value-repeated-key-variable - Fix is sometimes available. -
+  "F621", # expressions-in-star-assignment - Fix is not available. -
+  "F622", # multiple-starred-expressions - Fix is not available. -
+  "F631", # assert-tuple - Fix is not available. -
+  "F632", # is-literal - Fix is always available. -
+  "F633", # invalid-print-syntax - Fix is not available. -
+  "F634", # if-tuple - Fix is not available. -
+  "F701", # break-outside-loop - Fix is not available. -
+  "F702", # continue-outside-loop - Fix is not available. -
+  "F704", # yield-outside-function - Fix is not available. -
+  "F706", # return-outside-function - Fix is not available. -
+  "F707", # default-except-not-last - Fix is not available. -
+  "F722", # forward-annotation-syntax-error - Fix is not available. -
+  "F811", # redefined-while-unused - Fix is sometimes available. -
+  "F821", # undefined-name - Fix is not available. -
+  "F822", # undefined-export - Fix is not available. -
+  "F823", # undefined-local - Fix is not available. -
+  "F841", # unused-variable - Fix is sometimes available. -
+  "F842", # unused-annotation - Fix is not available. -
+  "F901", # raise-not-implemented - Fix is sometimes available. -
+  "FA100", # future-rewritable-type-annotation - Fix is always available. -
+  "FA102", # future-required-type-annotation - Fix is always available. -
+  "FBT001", # boolean-type-hint-positional-argument - Fix is not available. -
+  "FBT002", # boolean-default-value-positional-argument - Fix is not available. -
+  "FLY002", # static-join-to-f-string - Fix is always available. -
+  "FURB105", # print-empty-string - Fix is sometimes available. -
+  "FURB110", # if-exp-instead-of-or-operator - Fix is sometimes available. - Preview
+  "FURB113", # repeated-append - Fix is sometimes available. - Preview
+  "FURB116", # f-string-number-format - Fix is sometimes available. -
+  "FURB118", # reimplemented-operator - Fix is sometimes available. - Preview
+  "FURB129", # readlines-in-for - Fix is always available. -
+  "FURB131", # delete-full-slice - Fix is sometimes available. - Preview
+  "FURB132", # check-and-remove-from-set - Fix is always available. -
+  "FURB136", # if-expr-min-max - Fix is sometimes available. -
+  "FURB142", # for-loop-set-mutations - Fix is always available. - Preview
+  "FURB145", # slice-copy - Fix is sometimes available. - Preview
+  "FURB148", # unnecessary-enumerate - Fix is sometimes available. - Preview
+  "FURB152", # math-constant - Fix is sometimes available. - Preview
+  "FURB157", # verbose-decimal-constructor - Fix is always available. -
+  "FURB161", # bit-count - Fix is always available. -
+  "FURB163", # redundant-log-base - Fix is sometimes available. -
+  "FURB164", # unnecessary-from-float - Fix is sometimes available. - Preview
+  "FURB166", # int-on-sliced-str - Fix is always available. -
+  "FURB167", # regex-flag-alias - Fix is always available. -
+  "FURB168", # isinstance-type-none - Fix is sometimes available. -
+  "FURB169", # type-none-comparison - Fix is always available. -
+  "FURB171", # single-item-membership-test - Fix is sometimes available. - Preview
+  "FURB177", # implicit-cwd - Fix is sometimes available. -
+  "FURB180", # meta-class-abc-meta - Fix is always available. - Preview
+  "FURB181", # hashlib-digest-hex - Fix is sometimes available. -
+  "FURB187", # list-reverse-copy - Fix is always available. -
+  "FURB192", # sorted-min-max - Fix is sometimes available. - Preview
+  "G001", # logging-string-format - Fix is not available. -
+  "G002", # logging-percent-format - Fix is not available. -
+  "G003", # logging-string-concat - Fix is not available. -
+  "G004", # logging-f-string - Fix is sometimes available. -
+  "G010", # logging-warn - Fix is always available. -
+  "G101", # logging-extra-attr-clash - Fix is not available. -
+  "G201", # logging-exc-info - Fix is not available. -
+  "G202", # logging-redundant-exc-info - Fix is not available. -
+  "I001", # unsorted-imports - Fix is sometimes available. -
+  "I002", # missing-required-import - Fix is always available. -
+  "ICN001", # unconventional-import-alias - Fix is sometimes available. -
+  "ICN002", # banned-import-alias - Fix is not available. -
+  "ICN003", # banned-import-from - Fix is not available. -
+  "INP001", # implicit-namespace-package - Fix is not available. -
+  "INT001", # f-string-in-get-text-func-call - Fix is not available. -
+  "INT002", # format-in-get-text-func-call - Fix is not available. -
+  "INT003", # printf-in-get-text-func-call - Fix is not available. -
+  "ISC003", # explicit-string-concatenation - Fix is sometimes available. -
+  "LOG001", # direct-logger-instantiation - Fix is sometimes available. -
+  "LOG002", # invalid-get-logger-argument - Fix is sometimes available. -
+  "LOG007", # exception-without-exc-info - Fix is not available. -
+  "LOG009", # undocumented-warn - Fix is sometimes available. -
+  "N801", # invalid-class-name - Fix is not available. -
+  "N802", # invalid-function-name - Fix is not available. -
+  "N803", # invalid-argument-name - Fix is not available. -
+  "N804", # invalid-first-argument-name-for-class-method - Fix is sometimes available. -
+  "N805", # invalid-first-argument-name-for-method - Fix is sometimes available. -
+  "N806", # non-lowercase-variable-in-function - Fix is not available. -
+  "N807", # dunder-function-name - Fix is not available. -
+  "N811", # constant-imported-as-non-constant - Fix is not available. -
+  "N812", # lowercase-imported-as-non-lowercase - Fix is not available. -
+  "N813", # camelcase-imported-as-lowercase - Fix is not available. -
+  "N814", # camelcase-imported-as-constant - Fix is not available. -
+  "N815", # mixed-case-variable-in-class-scope - Fix is not available. -
+  "N816", # mixed-case-variable-in-global-scope - Fix is not available. -
+  "N817", # camelcase-imported-as-acronym - Fix is not available. -
+  "N818", # error-suffix-on-exception-name - Fix is not available. -
+  "N999", # invalid-module-name - Fix is not available. -
+  "PERF101", # unnecessary-list-cast - Fix is always available. -
+  "PERF102", # incorrect-dict-iterator - Fix is always available. -
+  "PERF401", # manual-list-comprehension - Fix is sometimes available. -
+  "PERF402", # manual-list-copy - Fix is not available. -
+  "PERF403", # manual-dict-comprehension - Fix is sometimes available. -
+  "PGH005", # invalid-mock-access - Fix is not available. -
+  "PIE790", # unnecessary-placeholder - Fix is always available. -
+  "PIE794", # duplicate-class-field-definition - Fix is always available. -
+  "PIE796", # non-unique-enums - Fix is not available. -
+  "PIE800", # unnecessary-spread - Fix is sometimes available. -
+  "PIE804", # unnecessary-dict-kwargs - Fix is sometimes available. -
+  "PIE807", # reimplemented-container-builtin - Fix is sometimes available. -
+  "PIE808", # unnecessary-range-start - Fix is always available. -
+  "PIE810", # multiple-starts-ends-with - Fix is always available. -
+  "PLC0105", # type-name-incorrect-variance - Fix is not available. -
+  "PLC0131", # type-bivariance - Fix is not available. -
+  "PLC0132", # type-param-name-mismatch - Fix is not available. -
+  "PLC0205", # single-string-slots - Fix is not available. -
+  "PLC0208", # iteration-over-set - Fix is always available. -
+  "PLC0414", # useless-import-alias - Fix is sometimes available. -
+  "PLC0415", # import-outside-top-level - Fix is not available. -
+  "PLC1901", # compare-to-empty-string - Fix is not available. - Preview
+  "PLC2401", # non-ascii-name - Fix is not available. -
+  "PLC2403", # non-ascii-import-name - Fix is not available. -
+  "PLC2701", # import-private-name - Fix is not available. - Preview
+  "PLC2801", # unnecessary-dunder-call - Fix is sometimes available. - Preview
+  "PLC3002", # unnecessary-direct-lambda-call - Fix is not available. -
+  "PLE0100", # yield-in-init - Fix is not available. -
+  "PLE0101", # return-in-init - Fix is not available. -
+  "PLE0115", # nonlocal-and-global - Fix is not available. -
+  "PLE0116", # continue-in-finally - Fix is not available. -
+  "PLE0117", # nonlocal-without-binding - Fix is not available. -
+  "PLE0118", # load-before-global-declaration - Fix is not available. -
+  "PLE0237", # non-slot-assignment - Fix is not available. -
+  "PLE0241", # duplicate-bases - Fix is sometimes available. -
+  "PLE0302", # unexpected-special-method-signature - Fix is not available. -
+  "PLE0303", # invalid-length-return-type - Fix is not available. -
+  "PLE0304", # invalid-bool-return-type - Fix is not available. - Preview
+  "PLE0305", # invalid-index-return-type - Fix is not available. -
+  "PLE0307", # invalid-str-return-type - Fix is not available. -
+  "PLE0308", # invalid-bytes-return-type - Fix is not available. -
+  "PLE0309", # invalid-hash-return-type - Fix is not available. -
+  "PLE0604", # invalid-all-object - Fix is not available. -
+  "PLE0605", # invalid-all-format - Fix is not available. -
+  "PLE0643", # potential-index-error - Fix is not available. -
+  "PLE0704", # misplaced-bare-raise - Fix is not available. -
+  "PLE1132", # repeated-keyword-argument - Fix is not available. -
+  "PLE1141", # dict-iter-missing-items - Fix is always available. - Preview
+  "PLE1142", # await-outside-async - Fix is not available. -
+  "PLE1205", # logging-too-many-args - Fix is not available. -
+  "PLE1206", # logging-too-few-args - Fix is not available. -
+  "PLE1300", # bad-string-format-character - Fix is not available. -
+  "PLE1307", # bad-string-format-type - Fix is not available. -
+  "PLE1310", # bad-str-strip-call - Fix is not available. -
+  "PLE1507", # invalid-envvar-value - Fix is not available. -
+  "PLE1519", # singledispatch-method - Fix is sometimes available. -
+  "PLE1520", # singledispatchmethod-function - Fix is sometimes available. -
+  "PLE1700", # yield-from-in-async-function - Fix is not available. -
+  "PLE2502", # bidirectional-unicode - Fix is not available. -
+  "PLE2510", # invalid-character-backspace - Fix is sometimes available. -
+  "PLE2512", # invalid-character-sub - Fix is sometimes available. -
+  "PLE2513", # invalid-character-esc - Fix is sometimes available. -
+  "PLE2514", # invalid-character-nul - Fix is sometimes available. -
+  "PLE2515", # invalid-character-zero-width-space - Fix is sometimes available. -
+  "PLE4703", # modified-iterating-set - Fix is always available. - Preview
+  "PLR0124", # comparison-with-itself - Fix is not available. -
+  "PLR0133", # comparison-of-constant - Fix is not available. -
+  "PLR0202", # no-classmethod-decorator - Fix is always available. - Preview
+  "PLR0203", # no-staticmethod-decorator - Fix is always available. - Preview
+  "PLR0206", # property-with-parameters - Fix is not available. -
+  "PLR0402", # manual-from-import - Fix is sometimes available. -
+  "PLR1704", # redefined-argument-from-local - Fix is not available. -
+  "PLR1711", # useless-return - Fix is always available. -
+  "PLR1714", # repeated-equality-comparison - Fix is always available. -
+  "PLR1722", # sys-exit-alias - Fix is sometimes available. -
+  "PLR1730", # if-stmt-min-max - Fix is sometimes available. -
+  "PLR1733", # unnecessary-dict-index-lookup - Fix is always available. -
+  "PLR1736", # unnecessary-list-index-lookup - Fix is always available. -
+  "PLR2004", # magic-value-comparison - Fix is not available. -
+  "PLR2044", # empty-comment - Fix is always available. -
+  "PLR5501", # collapsible-else-if - Fix is sometimes available. -
+  "PLR6104", # non-augmented-assignment - Fix is always available. - Preview
+  "PLR6201", # literal-membership - Fix is always available. - Preview
+  "PLR6301", # no-self-use - Fix is not available. - Preview
+  "PLW0108", # unnecessary-lambda - Fix is sometimes available. - Preview
+  "PLW0120", # useless-else-on-loop - Fix is sometimes available. -
+  "PLW0127", # self-assigning-variable - Fix is not available. -
+  "PLW0128", # redeclared-assigned-name - Fix is not available. -
+  "PLW0129", # assert-on-string-literal - Fix is not available. -
+  "PLW0131", # named-expr-without-context - Fix is not available. -
+  "PLW0133", # useless-exception-statement - Fix is sometimes available. -
+  "PLW0177", # nan-comparison - Fix is not available. -
+  "PLW0211", # bad-staticmethod-argument - Fix is not available. -
+  "PLW0245", # super-without-brackets - Fix is always available. -
+  "PLW0406", # import-self - Fix is not available. -
+  "PLW0602", # global-variable-not-assigned - Fix is not available. -
+  "PLW0603", # global-statement - Fix is not available. -
+  "PLW0604", # global-at-module-level - Fix is not available. -
+  "PLW0642", # self-or-cls-assignment - Fix is not available. -
+  "PLW0711", # binary-op-exception - Fix is not available. -
+  "PLW1501", # bad-open-mode - Fix is not available. -
+  "PLW1508", # invalid-envvar-default - Fix is not available. -
+  "PLW1509", # subprocess-popen-preexec-fn - Fix is not available. -
+  "PLW1510", # subprocess-run-without-check - Fix is always available. -
+  "PLW1514", # unspecified-encoding - Fix is always available. - Preview
+  "PLW1641", # eq-without-hash - Fix is not available. -
+  "PLW2101", # useless-with-lock - Fix is not available. -
+  "PLW2901", # redefined-loop-name - Fix is not available. -
+  "PLW3201", # bad-dunder-method-name - Fix is not available. - Preview
+  "PLW3301", # nested-min-max - Fix is sometimes available. -
+  "PT001", # pytest-fixture-incorrect-parentheses-style - Fix is always available. -
+  "PT002", # pytest-fixture-positional-args - Fix is not available. -
+  "PT003", # pytest-extraneous-scope-function - Fix is always available. -
+  "PT006", # pytest-parametrize-names-wrong-type - Fix is sometimes available. -
+  "PT007", # pytest-parametrize-values-wrong-type - Fix is sometimes available. -
+  "PT008", # pytest-patch-with-lambda - Fix is not available. -
+  "PT009", # pytest-unittest-assertion - Fix is sometimes available. -
+  "PT010", # pytest-raises-without-exception - Fix is not available. -
+  "PT011", # pytest-raises-too-broad - Fix is not available. -
+  "PT012", # pytest-raises-with-multiple-statements - Fix is not available. -
+  "PT013", # pytest-incorrect-pytest-import - Fix is not available. -
+  "PT014", # pytest-duplicate-parametrize-test-cases - Fix is sometimes available. -
+  "PT015", # pytest-assert-always-false - Fix is not available. -
+  "PT016", # pytest-fail-without-message - Fix is not available. -
+  "PT017", # pytest-assert-in-except - Fix is not available. -
+  "PT018", # pytest-composite-assertion - Fix is sometimes available. -
+  "PT019", # pytest-fixture-param-without-value - Fix is not available. -
+  "PT020", # pytest-deprecated-yield-fixture - Fix is not available. -
+  "PT021", # pytest-fixture-finalizer-callback - Fix is not available. -
+  "PT022", # pytest-useless-yield-fixture - Fix is always available. -
+  "PT023", # pytest-incorrect-mark-parentheses-style - Fix is always available. -
+  "PT024", # pytest-unnecessary-asyncio-mark-on-fixture - Fix is always available. -
+  "PT025", # pytest-erroneous-use-fixtures-on-fixture - Fix is always available. -
+  "PT026", # pytest-use-fixtures-without-parameters - Fix is always available. -
+  "PT027", # pytest-unittest-raises-assertion - Fix is sometimes available. -
+  "PYI001", # unprefixed-type-param - Fix is not available. -
+  "PYI002", # complex-if-statement-in-stub - Fix is not available. -
+  "PYI003", # unrecognized-version-info-check - Fix is not available. -
+  "PYI004", # patch-version-comparison - Fix is not available. -
+  "PYI005", # wrong-tuple-length-version-comparison - Fix is not available. -
+  "PYI006", # bad-version-info-comparison - Fix is not available. -
+  "PYI007", # unrecognized-platform-check - Fix is not available. -
+  "PYI008", # unrecognized-platform-name - Fix is not available. -
+  "PYI009", # pass-statement-stub-body - Fix is always available. -
+  "PYI010", # non-empty-stub-body - Fix is always available. -
+  "PYI011", # typed-argument-default-in-stub - Fix is always available. -
+  "PYI012", # pass-in-class-body - Fix is always available. -
+  "PYI013", # ellipsis-in-non-empty-class-body - Fix is sometimes available. -
+  "PYI014", # argument-default-in-stub - Fix is always available. -
+  "PYI015", # assignment-default-in-stub - Fix is always available. -
+  "PYI016", # duplicate-union-member - Fix is sometimes available. -
+  "PYI017", # complex-assignment-in-stub - Fix is not available. -
+  "PYI018", # unused-private-type-var - Fix is sometimes available. -
+  "PYI019", # custom-type-var-for-self - Fix is sometimes available. -
+  "PYI020", # quoted-annotation-in-stub - Fix is always available. -
+  "PYI021", # docstring-in-stub - Fix is always available. -
+  "PYI024", # collections-named-tuple - Fix is not available. -
+  "PYI025", # unaliased-collections-abc-set-import - Fix is sometimes available. -
+  "PYI026", # type-alias-without-annotation - Fix is always available. -
+  "PYI029", # str-or-repr-defined-in-stub - Fix is always available. -
+  "PYI030", # unnecessary-literal-union - Fix is sometimes available. -
+  "PYI032", # any-eq-ne-annotation - Fix is always available. -
+  "PYI033", # type-comment-in-stub - Fix is not available. -
+  "PYI034", # non-self-return-type - Fix is sometimes available. -
+  "PYI035", # unassigned-special-variable-in-stub - Fix is not available. -
+  "PYI036", # bad-exit-annotation - Fix is sometimes available. -
+  "PYI041", # redundant-numeric-union - Fix is sometimes available. -
+  "PYI042", # snake-case-type-alias - Fix is not available. -
+  "PYI043", # t-suffixed-type-alias - Fix is not available. -
+  "PYI044", # future-annotations-in-stub - Fix is sometimes available. -
+  "PYI045", # iter-method-return-iterable - Fix is not available. -
+  "PYI046", # unused-private-protocol - Fix is not available. -
+  "PYI047", # unused-private-type-alias - Fix is not available. -
+  "PYI048", # stub-body-multiple-statements - Fix is not available. -
+  "PYI049", # unused-private-typed-dict - Fix is not available. -
+  "PYI050", # no-return-argument-annotation-in-stub - Fix is not available. -
+  "PYI051", # redundant-literal-union - Fix is not available. -
+  "PYI052", # unannotated-assignment-in-stub - Fix is not available. -
+  "PYI053", # string-or-bytes-too-long - Fix is always available. -
+  "PYI054", # numeric-literal-too-long - Fix is always available. -
+  "PYI055", # unnecessary-type-union - Fix is sometimes available. -
+  "PYI056", # unsupported-method-call-on-all - Fix is not available. -
+  "PYI058", # generator-return-from-iter-method - Fix is sometimes available. -
+  "PYI059", # generic-not-last-base-class - Fix is sometimes available. -
+  "PYI062", # duplicate-literal-member - Fix is always available. -
+  "RET503", # implicit-return - Fix is always available. -
+  "RET504", # unnecessary-assign - Fix is always available. -
+  "RET505", # superfluous-else-return - Fix is sometimes available. -
+  "RET506", # superfluous-else-raise - Fix is sometimes available. -
+  "RET507", # superfluous-else-continue - Fix is sometimes available. -
+  "RET508", # superfluous-else-break - Fix is sometimes available. -
+  "RSE102", # unnecessary-paren-on-raise-exception - Fix is always available. -
+  "RUF001", # ambiguous-unicode-character-string - Fix is not available. -
+  "RUF002", # ambiguous-unicode-character-docstring - Fix is not available. -
+  "RUF003", # ambiguous-unicode-character-comment - Fix is not available. -
+  "RUF005", # collection-literal-concatenation - Fix is sometimes available. -
+  "RUF006", # asyncio-dangling-task - Fix is not available. -
+  "RUF007", # zip-instead-of-pairwise - Fix is sometimes available. -
+  "RUF008", # mutable-dataclass-default - Fix is not available. -
+  "RUF009", # function-call-in-dataclass-default-argument - Fix is not available. -
+  "RUF010", # explicit-f-string-type-conversion - Fix is sometimes available. -
+  "RUF012", # mutable-class-default - Fix is not available. -
+  "RUF013", # implicit-optional - Fix is sometimes available. -
+  "RUF015", # unnecessary-iterable-allocation-for-first-element - Fix is always available. -
+  "RUF016", # invalid-index-type - Fix is not available. -
+  "RUF017", # quadratic-list-summation - Fix is always available. -
+  "RUF018", # assignment-in-assert - Fix is not available. -
+  "RUF019", # unnecessary-key-check - Fix is always available. -
+  "RUF020", # never-union - Fix is sometimes available. -
+  "RUF021", # parenthesize-chained-operators - Fix is always available. -
+  "RUF022", # unsorted-dunder-all - Fix is sometimes available. -
+  "RUF023", # unsorted-dunder-slots - Fix is sometimes available. -
+  "RUF024", # mutable-fromkeys-value - Fix is sometimes available. -
+  "RUF026", # default-factory-kwarg - Fix is sometimes available. -
+  "RUF027", # missing-f-string-syntax - Fix is always available. - Preview
+  "RUF028", # invalid-formatter-suppression-comment - Fix is always available. -
+  "RUF029", # unused-async - Fix is not available. - Preview
+  "RUF100", # unused-noqa - Fix is always available. -
+  "RUF101", # redirected-noqa - Fix is always available. -
+  "S101", # assert - Fix is not available. -
+  "S102", # exec-builtin - Fix is not available. -
+  "S103", # bad-file-permissions - Fix is not available. -
+  "S104", # hardcoded-bind-all-interfaces - Fix is not available. -
+  "S105", # hardcoded-password-string - Fix is not available. -
+  "S106", # hardcoded-password-func-arg - Fix is not available. -
+  "S107", # hardcoded-password-default - Fix is not available. -
+  "S108", # hardcoded-temp-file - Fix is not available. -
+  "S110", # try-except-pass - Fix is not available. -
+  "S112", # try-except-continue - Fix is not available. -
+  "S113", # request-without-timeout - Fix is not available. -
+  "S201", # flask-debug-true - Fix is not available. -
+  "S202", # tarfile-unsafe-members - Fix is not available. -
+  "S301", # suspicious-pickle-usage - Fix is not available. -
+  "S302", # suspicious-marshal-usage - Fix is not available. -
+  "S303", # suspicious-insecure-hash-usage - Fix is not available. -
+  "S304", # suspicious-insecure-cipher-usage - Fix is not available. -
+  "S305", # suspicious-insecure-cipher-mode-usage - Fix is not available. -
+  "S306", # suspicious-mktemp-usage - Fix is not available. -
+  "S307", # suspicious-eval-usage - Fix is not available. -
+  "S308", # suspicious-mark-safe-usage - Fix is not available. -
+  "S310", # suspicious-url-open-usage - Fix is not available. -
+  "S311", # suspicious-non-cryptographic-random-usage - Fix is not available. -
+  "S312", # suspicious-telnet-usage - Fix is not available. -
+  "S313", # suspicious-xmlc-element-tree-usage - Fix is not available. -
+  "S314", # suspicious-xml-element-tree-usage - Fix is not available. -
+  "S315", # suspicious-xml-expat-reader-usage - Fix is not available. -
+  "S316", # suspicious-xml-expat-builder-usage - Fix is not available. -
+  "S317", # suspicious-xml-sax-usage - Fix is not available. -
+  "S318", # suspicious-xml-mini-dom-usage - Fix is not available. -
+  "S319", # suspicious-xml-pull-dom-usage - Fix is not available. -
+  "S321", # suspicious-ftp-lib-usage - Fix is not available. -
+  "S323", # suspicious-unverified-context-usage - Fix is not available. -
+  "S324", # hashlib-insecure-hash-function - Fix is not available. -
+  "S401", # suspicious-telnetlib-import - Fix is not available. - Preview
+  "S402", # suspicious-ftplib-import - Fix is not available. - Preview
+  "S403", # suspicious-pickle-import - Fix is not available. - Preview
+  "S405", # suspicious-xml-etree-import - Fix is not available. - Preview
+  "S406", # suspicious-xml-sax-import - Fix is not available. - Preview
+  "S407", # suspicious-xml-expat-import - Fix is not available. - Preview
+  "S408", # suspicious-xml-minidom-import - Fix is not available. - Preview
+  "S409", # suspicious-xml-pulldom-import - Fix is not available. - Preview
+  "S411", # suspicious-xmlrpc-import - Fix is not available. - Preview
+  "S412", # suspicious-httpoxy-import - Fix is not available. - Preview
+  "S413", # suspicious-pycrypto-import - Fix is not available. - Preview
+  "S415", # suspicious-pyghmi-import - Fix is not available. - Preview
+  "S501", # request-with-no-cert-validation - Fix is not available. -
+  "S502", # ssl-insecure-version - Fix is not available. -
+  "S503", # ssl-with-bad-defaults - Fix is not available. -
+  "S504", # ssl-with-no-version - Fix is not available. -
+  "S505", # weak-cryptographic-key - Fix is not available. -
+  "S506", # unsafe-yaml-load - Fix is not available. -
+  "S507", # ssh-no-host-key-verification - Fix is not available. -
+  "S508", # snmp-insecure-version - Fix is not available. -
+  "S509", # snmp-weak-cryptography - Fix is not available. -
+  "S601", # paramiko-call - Fix is not available. -
+  "S602", # subprocess-popen-with-shell-equals-true - Fix is not available. -
+  "S604", # call-with-shell-equals-true - Fix is not available. -
+  "S605", # start-process-with-a-shell - Fix is not available. -
+  "S606", # start-process-with-no-shell - Fix is not available. -
+  "S607", # start-process-with-partial-path - Fix is not available. -
+  "S608", # hardcoded-sql-expression - Fix is not available. -
+  "S609", # unix-command-wildcard-injection - Fix is not available. -
+  "S610", # django-extra - Fix is not available. -
+  "S611", # django-raw-sql - Fix is not available. -
+  "S612", # logging-config-insecure-listen - Fix is not available. -
+  "S701", # jinja2-autoescape-false - Fix is not available. -
+  "S702", # mako-templates - Fix is not available. -
+  "SIM101", # duplicate-isinstance-call - Fix is sometimes available. -
+  "SIM102", # collapsible-if - Fix is sometimes available. -
+  "SIM103", # needless-bool - Fix is sometimes available. -
+  "SIM105", # suppressible-exception - Fix is sometimes available. -
+  "SIM107", # return-in-try-except-finally - Fix is not available. -
+  "SIM108", # if-else-block-instead-of-if-exp - Fix is sometimes available. -
+  "SIM109", # compare-with-tuple - Fix is always available. -
+  "SIM110", # reimplemented-builtin - Fix is sometimes available. -
+  "SIM112", # uncapitalized-environment-variables - Fix is sometimes available. -
+  "SIM113", # enumerate-for-loop - Fix is not available. -
+  "SIM114", # if-with-same-arms - Fix is sometimes available. -
+  "SIM115", # open-file-with-context-handler - Fix is not available. -
+  "SIM116", # if-else-block-instead-of-dict-lookup - Fix is not available. -
+  "SIM117", # multiple-with-statements - Fix is sometimes available. -
+  "SIM118", # in-dict-keys - Fix is always available. -
+  "SIM201", # negate-equal-op - Fix is always available. -
+  "SIM202", # negate-not-equal-op - Fix is always available. -
+  "SIM208", # double-negation - Fix is always available. -
+  "SIM210", # if-expr-with-true-false - Fix is sometimes available. -
+  "SIM211", # if-expr-with-false-true - Fix is always available. -
+  "SIM212", # if-expr-with-twisted-arms - Fix is always available. -
+  "SIM220", # expr-and-not-expr - Fix is always available. -
+  "SIM221", # expr-or-not-expr - Fix is always available. -
+  "SIM222", # expr-or-true - Fix is always available. -
+  "SIM223", # expr-and-false - Fix is always available. -
+  "SIM300", # yoda-conditions - Fix is sometimes available. -
+  "SIM910", # dict-get-with-none-default - Fix is always available. -
+  "SIM911", # zip-dict-keys-and-values - Fix is always available. -
+  "SLF001", # private-member-access - Fix is not available. -
+  "SLOT000", # no-slots-in-str-subclass - Fix is not available. -
+  "SLOT001", # no-slots-in-tuple-subclass - Fix is not available. -
+  "SLOT002", # no-slots-in-namedtuple-subclass - Fix is not available. -
+  "T100", # debugger - Fix is not available. -
+  "T201", # print - Fix is sometimes available. -
+  "T203", # p-print - Fix is sometimes available. -
+  "TC001", # typing-only-first-party-import - Fix is sometimes available. -
+  "TC002", # typing-only-third-party-import - Fix is sometimes available. -
+  "TC003", # typing-only-standard-library-import - Fix is sometimes available. -
+  "TC004", # runtime-import-in-type-checking-block - Fix is sometimes available. -
+  "TC005", # empty-type-checking-block - Fix is always available. -
+  "TC010", # runtime-string-union - Fix is not available. -
+  "TD004", # missing-todo-colon - Fix is not available. -
+  "TD005", # missing-todo-description - Fix is not available. -
+  "TD006", # invalid-todo-capitalization - Fix is always available. -
+  "TD007", # missing-space-after-todo-colon - Fix is not available. -
+  "TID251", # banned-api - Fix is not available. -
+  "TID252", # relative-imports - Fix is sometimes available. -
+  "TID253", # banned-module-level-imports - Fix is not available. -
+  "TRY002", # raise-vanilla-class - Fix is not available. -
+  "TRY003", # raise-vanilla-args - Fix is not available. -
+  "TRY004", # type-check-without-type-error - Fix is not available. -
+  "TRY201", # verbose-raise - Fix is always available. -
+  "TRY300", # try-consider-else - Fix is not available. -
+  "TRY301", # raise-within-try - Fix is not available. -
+  "TRY400", # error-instead-of-exception - Fix is sometimes available. -
+  "TRY401", # verbose-log-message - Fix is not available. -
+  "UP001", # useless-metaclass-type - Fix is always available. -
+  "UP003", # type-of-primitive - Fix is sometimes available. -
+  "UP004", # useless-object-inheritance - Fix is always available. -
+  "UP005", # deprecated-unittest-alias - Fix is always available. -
+  "UP006", # non-pep585-annotation - Fix is sometimes available. -
+  "UP007", # non-pep604-annotation-union - Fix is sometimes available. -
+  "UP008", # super-call-with-parameters - Fix is sometimes available. -
+  "UP009", # utf8-encoding-declaration - Fix is always available. -
+  "UP010", # unnecessary-future-import - Fix is always available. -
+  "UP011", # lru-cache-without-parameters - Fix is always available. -
+  "UP012", # unnecessary-encode-utf8 - Fix is always available. -
+  "UP013", # convert-typed-dict-functional-to-class - Fix is sometimes available. -
+  "UP014", # convert-named-tuple-functional-to-class - Fix is sometimes available. -
+  "UP015", # redundant-open-modes - Fix is always available. -
+  "UP017", # datetime-timezone-utc - Fix is sometimes available. -
+  "UP018", # native-literals - Fix is always available. -
+  "UP019", # typing-text-str-alias - Fix is sometimes available. -
+  "UP020", # open-alias - Fix is sometimes available. -
+  "UP021", # replace-universal-newlines - Fix is always available. -
+  "UP022", # replace-stdout-stderr - Fix is sometimes available. -
+  "UP023", # deprecated-c-element-tree - Fix is always available. -
+  "UP024", # os-error-alias - Fix is always available. -
+  "UP025", # unicode-kind-prefix - Fix is always available. -
+  "UP026", # deprecated-mock-import - Fix is always available. -
+  "UP028", # yield-in-for-loop - Fix is sometimes available. -
+  "UP029", # unnecessary-builtin-import - Fix is always available. -
+  "UP030", # format-literals - Fix is sometimes available. -
+  "UP031", # printf-string-formatting - Fix is sometimes available. -
+  "UP032", # f-string - Fix is sometimes available. -
+  "UP033", # lru-cache-with-maxsize-none - Fix is always available. -
+  "UP034", # extraneous-parentheses - Fix is always available. -
+  "UP035", # deprecated-import - Fix is sometimes available. -
+  "UP036", # outdated-version-block - Fix is sometimes available. -
+  "UP037", # quoted-annotation - Fix is always available. -
+  "UP039", # unnecessary-class-parentheses - Fix is always available. -
+  "UP040", # non-pep695-type-alias - Fix is always available. -
+  "UP041", # timeout-error-alias - Fix is always available. -
+  "UP042", # replace-str-enum - Fix is sometimes available. - Preview
+  "W291", # trailing-whitespace - Fix is always available. -
+  "W292", # missing-newline-at-end-of-file - Fix is always available. -
+  "W293", # blank-line-with-whitespace - Fix is always available. -
+  "W391", # too-many-newlines-at-end-of-file - Fix is always available. - Preview
+  "W505", # doc-line-too-long - Fix is not available. -
+  "W605", # invalid-escape-sequence - Fix is always available. -
+  "YTT101", # sys-version-slice3 - Fix is not available. -
+  "YTT102", # sys-version2 - Fix is not available. -
+  "YTT103", # sys-version-cmp-str3 - Fix is not available. -
+  "YTT201", # sys-version-info0-eq3 - Fix is not available. -
+  "YTT202", # six-py3 - Fix is not available. -
+  "YTT203", # sys-version-info1-cmp-int - Fix is not available. -
+  "YTT204", # sys-version-info-minor-cmp-int - Fix is not available. -
+  "YTT301", # sys-version0 - Fix is not available. -
+  "YTT302", # sys-version-cmp-str10 - Fix is not available. -
+  "YTT303", # sys-version-slice1 - Fix is not available. -
+]
+
+[lint.per-file-ignores]
+"[!s][!r][!c]*/**" = [
+  "INP001", # implicit-namespace-package - Fix is not available. -
+]
+"**/scripts/*" = [
+  "INP001", # implicit-namespace-package - Fix is not available. -
+  "T201", # print - Fix is sometimes available. -
+]
+"**/tests/**/*" = [
+  "ARG001", # unused-function-argument - Fix is not available. -
+  "PLC1901", # compare-to-empty-string - Fix is not available. - Preview
+  "PLR2004", # magic-value-comparison - Fix is not available. -
+  "PLR6301", # no-self-use - Fix is not available. - Preview
+  "S",
+  "TID252", # relative-imports - Fix is sometimes available. -
+]
+
+[lint.mccabe]
+max-complexity = 10
+
+[lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[lint.flake8-quotes]
+inline-quotes = "double"
+
+[lint.flake8-pytest-style]
+fixture-parentheses = false
+mark-parentheses = false

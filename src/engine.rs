@@ -261,7 +261,7 @@ mod tests {
     fn per_file_ignores_suppresses_matching_path() {
         let rules = all_rules(probe(), None);
         // Use a relative path that matches the glob directly.
-        // Source has a docstring so KDC rules don't fire; only KIS001 is at play.
+        // Source with a docstring produces only a KIS001 violation.
         let p = PathBuf::from("tests/test_foo.py");
         let input = CheckInput::new(&p, "\"\"\"Test module.\"\"\"\nfrom os.path import join\n");
         let mut config = Config::default();
@@ -292,7 +292,7 @@ mod tests {
     fn per_file_ignores_category_prefix_suppresses() {
         let rules = all_rules(probe(), None);
         let p = PathBuf::from("tests/test_foo.py");
-        // Source has a docstring so KDC rules don't fire; only KIS001 is at play.
+        // Source with a docstring produces only a KIS001 violation.
         let input = CheckInput::new(&p, "\"\"\"Test module.\"\"\"\nfrom os.path import join\n");
         let mut config = Config::default();
         // Category prefix "KIS" should suppress KIS001.

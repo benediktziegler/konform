@@ -14,4 +14,3 @@
 - Zuul `zuul_return.yaml` output for CI integration
 - Configurable via `[tool.konform]` in `pyproject.toml` or `konform.toml`
 - Cross-compiled wheels for Linux x86_64/aarch64, Windows x86_64, macOS x86_64/aarch64
-- Python wrapper for zero-overhead `pip install` distribution

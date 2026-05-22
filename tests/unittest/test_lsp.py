@@ -175,7 +175,7 @@ class _LspClient:
 
 def _start_server(root: pathlib.Path) -> _LspClient:
     proc = subprocess.Popen(
-        [sys.executable, "-m", "konform", "server"],
+        [BINARY_NAME, "server"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

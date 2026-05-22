@@ -422,7 +422,7 @@ mod tests {
         .unwrap();
         let cfg = load_config(Some(tmp.path()), None);
         assert!(
-            cfg.rules.get("per_file_ignores").is_none(),
+            !cfg.rules.contains_key("per_file_ignores"),
             "per_file_ignores must not be in the rules map"
         );
     }

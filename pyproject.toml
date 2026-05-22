@@ -34,10 +34,8 @@ Source        = "https://github.com/benediktziegler/konform"
 # maturin configuration
 # ---------------------------------------------------------------------------
 [tool.maturin]
-bindings      = "bin"
-python-source = "python"
-module-name   = "konform"
-profile       = "release"
+bindings = "bin"
+profile  = "release"
 
 [tool.hatch.build]
 directory = "tmp/dist"
@@ -49,8 +47,7 @@ directory = "tmp/dist"
 extend         = "ruff_defaults.toml"
 preview        = true
 target-version = "py310"
-include        = [
-  "python/**/*.py",
+include = [
   "tests/**/*.py",
 ]
 
@@ -63,7 +60,6 @@ extend-ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party      = ["konform"]
 force-single-line      = true
 single-line-exclusions = ["typing", "typing_extensions", "collections.abc"]
 required-imports       = ["from __future__ import annotations"]
@@ -138,8 +134,7 @@ version_provider         = "pep621"
 update_changelog_on_bump = true
 changelog_file           = "CHANGELOG.md"
 allowed_prefixes         = ["Merge", "Revert", "fixup!", "squash!"]
-version_files            = [
-    "python/konform/_version.py:__version__",
+version_files = [
     "Cargo.toml:^version",
 ]
 

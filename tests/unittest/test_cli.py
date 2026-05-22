@@ -4,29 +4,24 @@ from __future__ import annotations
 
 import json
 import pathlib
-import shutil
 import subprocess
 import sys
 import time
 
 import pytest
 
-import konform.__main__ as konform_main
-from konform import __version__  # noqa: KIS001
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 BINARY_NAME = "konform.exe" if sys.platform == "win32" else "konform"
-PACKAGE_DIR = pathlib.Path(__file__).parent.parent.parent / "python" / "konform"
 FIXTURES = pathlib.Path(__file__).parent.parent / "fixtures"
 
 
 def _run(*args: str, cwd: pathlib.Path | None = None, stdin: str | None = None) -> subprocess.CompletedProcess:  # type: ignore[type-arg]
-    """Run konform via the Python entry point and capture output."""
+    """Run the konform binary and capture output."""
     return subprocess.run(
-        [sys.executable, "-m", "konform", *args],
+        [BINARY_NAME, *args],
         capture_output=True,
         text=True,
         check=False,
@@ -621,23 +616,6 @@ def test_output_file_with_github_format(tmp_path: pathlib.Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Unit tests for the Python wrapper module (no binary required)
-# ---------------------------------------------------------------------------
-
-
-def test_version_importable() -> None:
-    assert isinstance(__version__, str)
-    assert __version__
-
-
-def test_main_missing_binary_exits(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(shutil, "which", lambda _name: None)
-    with pytest.raises(SystemExit) as exc_info:
-        konform_main.main()
-    assert exc_info.value.code != 0
-
-
-# ---------------------------------------------------------------------------
 # Step 23 — Stdin support
 # ---------------------------------------------------------------------------
 
@@ -901,7 +879,7 @@ def test_extend_per_file_ignores_merges_with_config(tmp_path: pathlib.Path) -> N
 def _watch_proc(tmp_path: pathlib.Path, *extra_args: str) -> subprocess.Popen[str]:
     """Start konform in watch mode and return the Popen handle."""
     return subprocess.Popen(
-        [sys.executable, "-m", "konform", "check", "-n", "--watch", *extra_args],
+        [BINARY_NAME, "check", "-n", "--watch", *extra_args],
         stderr=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,

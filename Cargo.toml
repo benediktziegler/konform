@@ -65,7 +65,7 @@ similar = "2"
 # (3.0.0 is a tombstone that refuses to compile). The upstream maintainer
 # recommends `wincode` as a maintained fork; we can migrate when it
 # stabilises beyond v0.x and adopts a compatible Rust MSRV.
-bincode  = { version = "=2.0.1", features = ["derive"] }
+bincode  = { version = "=3.0.0", features = ["derive"] }
 # Fast, deterministic hash for settings + file-cache keys
 seahash  = "4"
 # Writes CACHEDIR.TAG (backup/sync tool hint)

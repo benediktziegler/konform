@@ -306,7 +306,7 @@ test = [
   "pytest-clarity>=1.0.1,<2.0.0",
 ]
 lint = [
-  "ruff==0.15.12",
+  "ruff==0.15.14",
   "pydoclint~=0.8",
 ]
 typing = [

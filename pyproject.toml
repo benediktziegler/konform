@@ -310,7 +310,7 @@ lint = [
   "pydoclint~=0.8",
 ]
 typing = [
-  "ty==0.0.35",
+  "ty==0.0.40",
   "pytest~=8.1",   # needed so ty can resolve imports in test files
 ]
 dev = [

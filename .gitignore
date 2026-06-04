@@ -1,29 +1,25 @@
-*.swp
-*.pyc
-*.pdf
-dist/
-build/
-*.egg-info/
-.coverage
-.coverage*
+# Rust
+target/
+
+# IDEs
+.vscode/
 .idea/
-.pytest_cache/
-.nox/
-.vscode/*
-!.vscode/extensions.json
-!.vscode/python.code-snippets
-.venv/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / Secrets
 .env
 .secret
-.ansible/
-.serena/
+*.local
 
-# Rust build artefacts
-target/
-Cargo.lock
-
-# hatch / maturin output
+# Logs and Temporary files
 tmp/
+*.log
+*.tmp
 
-# Checker cache produced at runtime
+# Konform specific cache
 .konform_cache/

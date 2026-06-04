@@ -55,7 +55,7 @@ regex   = "1"
 globset = "0.4"
 
 # Unified diff rendering for `check --diff`
-similar = "2"
+similar = "3"
 
 # ---------------------------------------------------------------------------
 # Cache (ruff-style binary cache)

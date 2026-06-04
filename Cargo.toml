@@ -33,7 +33,7 @@ rayon = "1"
 ignore = "0.4"
 
 # SHA-256 for the file-level cache
-sha2 = "0.10"
+sha2 = "0.11"
 hex  = "0.4"
 
 # Terminal colours — TTY detection, NO_COLOR, TERM=dumb handled in output.rs

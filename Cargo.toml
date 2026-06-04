@@ -41,7 +41,7 @@ owo-colors = "4"
 
 # Error handling
 anyhow    = "1"
-thiserror = "1"
+thiserror = "2"
 
 # Python AST parsing — published on crates.io; same version used by
 # pytest-language-server (bellini666/pytest-language-server 0.22.1)

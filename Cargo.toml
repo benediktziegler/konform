@@ -21,7 +21,7 @@ serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # TOML config (pyproject.toml / konform.toml)
-toml = "0.8"
+toml = "1.1"
 
 # YAML output
 serde_yaml = "0.9"
@@ -33,7 +33,7 @@ rayon = "1"
 ignore = "0.4"
 
 # SHA-256 for the file-level cache
-sha2 = "0.10"
+sha2 = "0.11"
 hex  = "0.4"
 
 # Terminal colours — TTY detection, NO_COLOR, TERM=dumb handled in output.rs
@@ -41,7 +41,7 @@ owo-colors = "4"
 
 # Error handling
 anyhow    = "1"
-thiserror = "1"
+thiserror = "2"
 
 # Python AST parsing — published on crates.io; same version used by
 # pytest-language-server (bellini666/pytest-language-server 0.22.1)
@@ -55,7 +55,7 @@ regex   = "1"
 globset = "0.4"
 
 # Unified diff rendering for `check --diff`
-similar = "2"
+similar = "3"
 
 # ---------------------------------------------------------------------------
 # Cache (ruff-style binary cache)

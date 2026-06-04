@@ -11,13 +11,13 @@ repos:
       - id: format
         name: Code format
         language: system
-        entry: hatch fmt
+        entry: cargo fmt
         pass_filenames: false
         verbose: false
-      - id: types
-        name: Type check
+      - id: check
+        name: Cargo check
         language: system
-        entry: hatch run types:check
+        entry: cargo check
         pass_filenames: false
         verbose: false
 
@@ -41,9 +41,3 @@ repos:
       - id: check-yaml
       - id: check-added-large-files
       - id: detect-private-key
-
-  - repo: https://github.com/jsh9/pydoclint
-    rev: 0.8.3
-    hooks:
-      - id: pydoclint
-        args: ["--config=pyproject.toml"]

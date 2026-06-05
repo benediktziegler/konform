@@ -88,7 +88,7 @@ crossbeam-channel = "0.5"
 # Watch mode (step 26)
 # ---------------------------------------------------------------------------
 # Cross-platform filesystem event notifications.
-notify = "6"
+notify = "8"
 
 [profile.release]
 lto           = "thin"  # fat (lto=true) saves ~1-2 % binary size but costs 3-5 min; thin gives 90 % of the gain

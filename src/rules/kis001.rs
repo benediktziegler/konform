@@ -17,7 +17,9 @@ use super::{has_noqa, FileContext, Rule};
 use crate::module_probe::ModuleProbe;
 use crate::types::{Level, Violation};
 use anyhow::Result;
-use rustpython_parser::{ast, Parse};
+use ruff_python_ast::{Expr, Stmt};
+use ruff_python_parser::parse_module;
+use ruff_text_size::Ranged;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -211,8 +213,8 @@ fn offset_to_line_col(line_starts: &[u32], offset: u32) -> (usize, usize) {
 /// Returns `(imports, all_exports)`.  On parse error both collections are
 /// empty so the caller silently skips the file.
 fn parse_ast(source: &str) -> (Vec<ParsedImport>, HashSet<String>) {
-    let stmts = match ast::Suite::parse(source, "<file>") {
-        Ok(s) => s,
+    let stmts = match parse_module(source) {
+        Ok(parsed) => parsed.into_suite(),
         Err(_) => return (vec![], HashSet::new()),
     };
     let line_starts = build_line_starts(source);
@@ -223,10 +225,10 @@ fn parse_ast(source: &str) -> (Vec<ParsedImport>, HashSet<String>) {
 }
 
 /// Returns `true` iff `expr` is `TYPE_CHECKING` or `typing.TYPE_CHECKING`.
-fn is_type_checking_guard(expr: &ast::Expr) -> bool {
+fn is_type_checking_guard(expr: &Expr) -> bool {
     match expr {
-        ast::Expr::Name(n) => n.id.as_str() == "TYPE_CHECKING",
-        ast::Expr::Attribute(a) => a.attr.as_str() == "TYPE_CHECKING",
+        Expr::Name(n) => n.id.as_str() == "TYPE_CHECKING",
+        Expr::Attribute(a) => a.attr.as_str() == "TYPE_CHECKING",
         _ => false,
     }
 }
@@ -235,7 +237,7 @@ fn is_type_checking_guard(expr: &ast::Expr) -> bool {
 /// statements into `out`, tagging each with whether it is inside an
 /// `if TYPE_CHECKING:` block.
 fn collect_imports(
-    stmts: &[ast::Stmt],
+    stmts: &[Stmt],
     in_type_checking: bool,
     line_starts: &[u32],
     out: &mut Vec<ParsedImport>,
@@ -243,32 +245,21 @@ fn collect_imports(
     for stmt in stmts {
         match stmt {
             // ── from X import Y ──────────────────────────────────────────
-            ast::Stmt::ImportFrom(node) => {
-                // Skip relative imports.
-                // In rustpython-parser 0.4 the level is *always* Some(Int(n)):
-                //   absolute: Int(0)  relative: Int(1), Int(2), …
-                // Int has no Display and no comparison with primitive integers.
-                // We detect non-zero level via its Debug representation, which
-                // is stable within the semver-pinned 0.4 dependency.
-                // Additionally, a None module (bare `from . import X`) is always
-                // relative regardless of the level field.
+            Stmt::ImportFrom(node) => {
+                // Skip relative imports (level > 0) and bare `from . import X`
+                // (no module name).
                 let module = match &node.module {
                     Some(m) => m.as_str().to_owned(),
                     None => continue, // bare `from . import X`
                 };
-                // Relative iff level debug string is not "Int(0)".
-                let is_relative = node
-                    .level
-                    .as_ref()
-                    .is_some_and(|l| format!("{l:?}") != "Int(0)");
-                if is_relative {
+                if node.level != 0 {
                     continue;
                 }
 
-                let start_off = u32::from(node.range.start());
+                let start_off = u32::from(node.range().start());
                 // end() points one past the last byte; use saturating_sub to
                 // stay on the closing token.
-                let end_off = u32::from(node.range.end()).saturating_sub(1);
+                let end_off = u32::from(node.range().end()).saturating_sub(1);
                 let (start_line, col) = offset_to_line_col(line_starts, start_off);
                 let (end_line, end_col_inclusive) = offset_to_line_col(line_starts, end_off);
                 // end_col_inclusive points at the last byte; add 1 so the
@@ -279,11 +270,11 @@ fn collect_imports(
                     .names
                     .iter()
                     .map(|alias| {
-                        let alias_off = u32::from(alias.range.start());
+                        let alias_off = u32::from(alias.range().start());
                         let (alias_line, _) = offset_to_line_col(line_starts, alias_off);
                         ParsedAlias {
                             name: alias.name.as_str().to_owned(),
-                            asname: alias.asname.as_ref().map(|id| id.as_str().to_owned()),
+                            asname: alias.asname.as_deref().map(str::to_owned),
                             line: alias_line,
                         }
                     })
@@ -301,22 +292,23 @@ fn collect_imports(
             }
 
             // ── if TYPE_CHECKING: … ──────────────────────────────────────
-            ast::Stmt::If(node) => {
+            Stmt::If(node) => {
                 let guard = is_type_checking_guard(&node.test);
                 collect_imports(&node.body, in_type_checking || guard, line_starts, out);
-                // else / elif branches are NOT considered TYPE_CHECKING scope.
-                collect_imports(&node.orelse, in_type_checking, line_starts, out);
+                // elif/else branches are NOT considered TYPE_CHECKING scope.
+                for clause in &node.elif_else_clauses {
+                    collect_imports(&clause.body, in_type_checking, line_starts, out);
+                }
             }
 
             // ── walk into function / class bodies ────────────────────────
             // Unusual but legal: imports can appear in nested scopes.
-            ast::Stmt::FunctionDef(node) => {
+            // In ruff's AST, async functions share `Stmt::FunctionDef` with
+            // an `is_async` flag instead of a separate `AsyncFunctionDef`.
+            Stmt::FunctionDef(node) => {
                 collect_imports(&node.body, in_type_checking, line_starts, out);
             }
-            ast::Stmt::AsyncFunctionDef(node) => {
-                collect_imports(&node.body, in_type_checking, line_starts, out);
-            }
-            ast::Stmt::ClassDef(node) => {
+            Stmt::ClassDef(node) => {
                 collect_imports(&node.body, in_type_checking, line_starts, out);
             }
 
@@ -334,16 +326,14 @@ fn collect_imports(
 /// Handles:
 /// - `__all__ = ['a', 'b']` / `__all__ = ('a', 'b')`  (direct assignment)
 /// - `__all__ += ['c', 'd']`                            (augmented assignment)
-fn collect_all_exports(stmts: &[ast::Stmt]) -> HashSet<String> {
+fn collect_all_exports(stmts: &[Stmt]) -> HashSet<String> {
     let mut exports = HashSet::new();
 
     /// Push all string-literal elements of a list/tuple expression into `out`.
-    fn push_str_elts(elts: &[ast::Expr], out: &mut HashSet<String>) {
+    fn push_str_elts(elts: &[Expr], out: &mut HashSet<String>) {
         for elt in elts {
-            if let ast::Expr::Constant(c) = elt {
-                if let ast::Constant::Str(s) = &c.value {
-                    out.insert(s.clone());
-                }
+            if let Expr::StringLiteral(s) = elt {
+                out.insert(s.value.to_str().to_owned());
             }
         }
     }
@@ -351,30 +341,30 @@ fn collect_all_exports(stmts: &[ast::Stmt]) -> HashSet<String> {
     for stmt in stmts {
         match stmt {
             // __all__ = ['a', 'b']  or  __all__ = ('a', 'b')
-            ast::Stmt::Assign(node) => {
+            Stmt::Assign(node) => {
                 let targets_all = node
                     .targets
                     .iter()
-                    .any(|t| matches!(t, ast::Expr::Name(n) if n.id.as_str() == "__all__"));
+                    .any(|t| matches!(t, Expr::Name(n) if n.id.as_str() == "__all__"));
                 if !targets_all {
                     continue;
                 }
                 match &*node.value {
-                    ast::Expr::List(l) => push_str_elts(&l.elts, &mut exports),
-                    ast::Expr::Tuple(t) => push_str_elts(&t.elts, &mut exports),
+                    Expr::List(l) => push_str_elts(&l.elts, &mut exports),
+                    Expr::Tuple(t) => push_str_elts(&t.elts, &mut exports),
                     _ => {}
                 }
             }
             // __all__ += ['c', 'd']
-            ast::Stmt::AugAssign(node) => {
+            Stmt::AugAssign(node) => {
                 let target_is_all =
-                    matches!(&*node.target, ast::Expr::Name(n) if n.id.as_str() == "__all__");
+                    matches!(node.target.as_ref(), Expr::Name(n) if n.id.as_str() == "__all__");
                 if !target_is_all {
                     continue;
                 }
                 match &*node.value {
-                    ast::Expr::List(l) => push_str_elts(&l.elts, &mut exports),
-                    ast::Expr::Tuple(t) => push_str_elts(&t.elts, &mut exports),
+                    Expr::List(l) => push_str_elts(&l.elts, &mut exports),
+                    Expr::Tuple(t) => push_str_elts(&t.elts, &mut exports),
                     _ => {}
                 }
             }
@@ -949,19 +939,18 @@ mod tests {
     }
 
     #[test]
-    fn test_int_zero_comparison() {
-        // Verifies the Debug-format hack for detecting relative imports still works.
-        let src = "from os.path import join\n"; // absolute, level = Int(0)
-        let stmts = ast::Suite::parse(src, "<t>").unwrap();
-        if let ast::Stmt::ImportFrom(n) = &stmts[0] {
-            let level = n.level.as_ref().expect("level should be Some");
-            assert_eq!(format!("{level:?}"), "Int(0)");
+    fn test_level_detection() {
+        // Verifies that ruff's u32 level field correctly distinguishes absolute
+        // from relative imports (replaces the old rustpython Debug-format hack).
+        let src = "from os.path import join\n"; // absolute, level == 0
+        let stmts = parse_module(src).unwrap().into_suite();
+        if let Stmt::ImportFrom(n) = &stmts[0] {
+            assert_eq!(n.level, 0, "absolute import should have level 0");
         }
         let src2 = "from .sub import thing\n";
-        let stmts2 = ast::Suite::parse(src2, "<t>").unwrap();
-        if let ast::Stmt::ImportFrom(n) = &stmts2[0] {
-            let level = n.level.as_ref().expect("level should be Some");
-            assert_ne!(format!("{level:?}"), "Int(0)");
+        let stmts2 = parse_module(src2).unwrap().into_suite();
+        if let Stmt::ImportFrom(n) = &stmts2[0] {
+            assert_ne!(n.level, 0, "relative import should have level != 0");
         }
     }
 

@@ -43,9 +43,11 @@ owo-colors = "4"
 anyhow    = "1"
 thiserror = "2"
 
-# Python AST parsing — published on crates.io; same version used by
-# pytest-language-server (bellini666/pytest-language-server 0.22.1)
-rustpython-parser = "0.4"
+# Python AST parsing — ruff's own parser, published on crates.io.
+# ruff_text_size provides TextRange / TextSize for source locations.
+ruff_python_parser = "0.0.2"
+ruff_python_ast    = "0.0.2"
+ruff_text_size     = "0.0.2"
 
 # Lock-free concurrent HashMap for the in-process module-probe cache
 dashmap = "6"

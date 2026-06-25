@@ -8,7 +8,8 @@
 //! process.
 
 use dashmap::DashMap;
-use rustpython_parser::{ast, Parse};
+use ruff_python_ast::Stmt;
+use ruff_python_parser::parse_module;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -136,12 +137,12 @@ impl ModuleProbe {
             Ok(s) => s,
             Err(_) => return false,
         };
-        let stmts = match ast::Suite::parse(&source, "<__init__>") {
-            Ok(s) => s,
+        let stmts = match parse_module(&source) {
+            Ok(parsed) => parsed.into_suite(),
             Err(_) => return false,
         };
         for stmt in &stmts {
-            let ast::Stmt::ImportFrom(node) = stmt else {
+            let Stmt::ImportFrom(node) = stmt else {
                 continue;
             };
             let module = match &node.module {
@@ -149,20 +150,12 @@ impl ModuleProbe {
                 None => continue, // bare `from . import X`
             };
             // Skip relative imports (level != 0).
-            if node
-                .level
-                .as_ref()
-                .is_some_and(|l| format!("{l:?}") != "Int(0)")
-            {
+            if node.level != 0 {
                 continue;
             }
             for alias in &node.names {
                 // The local name after the import (asname if present, else name).
-                let local = alias
-                    .asname
-                    .as_ref()
-                    .map(|id| id.as_str())
-                    .unwrap_or_else(|| alias.name.as_str());
+                let local = alias.asname.as_deref().unwrap_or_else(|| alias.name.as_str());
                 if local == attr_name {
                     // Recursively check whether the original symbol in the
                     // source module is itself a module.  The sentinel in

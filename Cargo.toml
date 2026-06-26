@@ -78,7 +78,7 @@ filetime = "0.2"
 # ---------------------------------------------------------------------------
 # JSON-RPC framing + message types — no tokio, crossbeam-based, ~769 LoC.
 # Actively maintained by the rust-analyzer team.
-lsp-server  = "0.7"
+lsp-server  = "0.8"
 # LSP protocol types (Diagnostic, Position, …)
 lsp-types   = "0.97"
 # Actor-model messaging between the main-loop and worker threads.

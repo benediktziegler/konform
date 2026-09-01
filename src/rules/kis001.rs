@@ -71,6 +71,7 @@ impl Rule for Kis001Rule {
             level,
             unresolved_level,
             ctx.ignore_noqa,
+            &ctx.noqa_aliases,
         )
     }
 
@@ -81,6 +82,7 @@ impl Rule for Kis001Rule {
             &self.probe,
             &exceptions,
             ctx.ignore_noqa,
+            &ctx.noqa_aliases,
         ))
     }
 
@@ -498,6 +500,7 @@ fn check_imports(
     level: Level,
     unresolved_level: Option<Level>,
     ignore_noqa: bool,
+    noqa_aliases: &HashMap<String, String>,
 ) -> Vec<Violation> {
     let lines: Vec<&str> = source.lines().collect();
     let (imports, all_exports) = parse_ast(source);
@@ -513,7 +516,7 @@ fn check_imports(
             .get(imp.start_line.saturating_sub(1))
             .copied()
             .unwrap_or("");
-        if !ignore_noqa && has_noqa(start_line_str, "KIS001") {
+        if !ignore_noqa && has_noqa(start_line_str, "KIS001", noqa_aliases) {
             continue;
         }
 
@@ -530,7 +533,7 @@ fn check_imports(
                 .get(alias.line.saturating_sub(1))
                 .copied()
                 .unwrap_or("");
-            if !ignore_noqa && has_noqa(alias_line_str, "KIS001") {
+            if !ignore_noqa && has_noqa(alias_line_str, "KIS001", noqa_aliases) {
                 continue;
             }
 
@@ -593,6 +596,7 @@ fn apply_fixes(
     probe: &ModuleProbe,
     exceptions: &[String],
     ignore_noqa: bool,
+    noqa_aliases: &HashMap<String, String>,
 ) -> Option<String> {
     let lines: Vec<&str> = source.lines().collect();
     let (imports, all_exports) = parse_ast(source);
@@ -617,7 +621,7 @@ fn apply_fixes(
             .get(imp.start_line.saturating_sub(1))
             .copied()
             .unwrap_or("");
-        if !ignore_noqa && has_noqa(start_line_str, "KIS001") {
+        if !ignore_noqa && has_noqa(start_line_str, "KIS001", noqa_aliases) {
             continue;
         }
 
@@ -634,7 +638,7 @@ fn apply_fixes(
                 .get(alias.line.saturating_sub(1))
                 .copied()
                 .unwrap_or("");
-            if !ignore_noqa && has_noqa(alias_line_str, "KIS001") {
+            if !ignore_noqa && has_noqa(alias_line_str, "KIS001", noqa_aliases) {
                 continue;
             }
 

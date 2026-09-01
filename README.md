@@ -135,6 +135,24 @@ from os.path import join   # noqa: KIS       ← whole category
 from os.path import join   # noqa             ← everything on this line
 ```
 
+### Aliasing noqa codes
+
+When a rule code changes (e.g. a rule is renamed, or a project migrates
+from another linter's codes), old `# noqa` comments would otherwise stop
+working. Define aliases in your config so they keep suppressing the
+renamed/canonical rule:
+
+```toml
+# pyproject.toml
+[tool.konform.noqa_aliases]
+IS001 = "KIS001"
+IS    = "KIS"
+```
+
+```python
+from os.path import join   # noqa: IS001   ← suppresses KIS001 via alias
+```
+
 ## Language Server (LSP)
 
 konform ships a built-in LSP server that shares the same rule engine as the

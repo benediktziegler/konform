@@ -9,6 +9,7 @@
 use crate::module_probe::ModuleProbe;
 use crate::types::Violation;
 use anyhow::Result;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -37,6 +38,9 @@ pub struct FileContext {
     /// When `true`, `# noqa` suppression comments are ignored.
     /// Propagated from `CheckInput::ignore_noqa` / `Config::ignore_noqa`.
     pub ignore_noqa: bool,
+    /// Alias `# noqa` codes to canonical rule codes / category prefixes.
+    /// Propagated from `Config::noqa_aliases`. See [`has_noqa`].
+    pub noqa_aliases: HashMap<String, String>,
 }
 
 impl FileContext {
@@ -57,6 +61,7 @@ impl FileContext {
             source,
             lines,
             ignore_noqa: false,
+            noqa_aliases: HashMap::new(),
         }
     }
 }
@@ -117,7 +122,12 @@ pub trait Rule: Send + Sync {
 
 /// Return `true` if the violation with code `code` is suppressed on `line`
 /// by a `# noqa` comment.
-pub fn has_noqa(line: &str, code: &str) -> bool {
+///
+/// `aliases` maps alias codes (or category prefixes) to the canonical code
+/// (or prefix) they stand in for, e.g. `"IS001" -> "KIS001"` so that
+/// `# noqa: IS001` suppresses `KIS001` violations during a rule-rename
+/// migration. Aliasing an entire category also works, e.g. `"IS" -> "KIS"`.
+pub fn has_noqa(line: &str, code: &str, aliases: &HashMap<String, String>) -> bool {
     let Some(noqa_pos) = line.find("# noqa") else {
         return false;
     };
@@ -128,7 +138,13 @@ pub fn has_noqa(line: &str, code: &str) -> bool {
     }
 
     let codes = rest.trim_start_matches(':');
-    codes.split(',').any(|c| code.starts_with(c.trim()))
+    codes.split(',').any(|c| {
+        let c = c.trim();
+        code.starts_with(c)
+            || aliases
+                .get(c)
+                .is_some_and(|target| code.starts_with(target.as_str()))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -144,4 +160,31 @@ pub fn all_rules(
         Box::new(kis001::Kis001Rule::new(probe)),
         Box::new(kpt::KptRule::new(config_dir)),
     ]
+}
+
+#[cfg(test)]
+mod noqa_alias_tests {
+    use super::*;
+
+    #[test]
+    fn has_noqa_matches_canonical_code_without_aliases() {
+        let aliases = HashMap::new();
+        assert!(has_noqa("x = 1  # noqa: KIS001", "KIS001", &aliases));
+        assert!(!has_noqa("x = 1  # noqa: KIS001", "KPT001", &aliases));
+    }
+
+    #[test]
+    fn has_noqa_matches_via_exact_alias() {
+        let mut aliases = HashMap::new();
+        aliases.insert("IS001".to_owned(), "KIS001".to_owned());
+        assert!(has_noqa("x = 1  # noqa: IS001", "KIS001", &aliases));
+        assert!(!has_noqa("x = 1  # noqa: IS001", "KPT001", &aliases));
+    }
+
+    #[test]
+    fn has_noqa_matches_via_category_alias() {
+        let mut aliases = HashMap::new();
+        aliases.insert("IS".to_owned(), "KIS".to_owned());
+        assert!(has_noqa("x = 1  # noqa: IS", "KIS001", &aliases));
+    }
 }

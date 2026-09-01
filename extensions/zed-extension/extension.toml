@@ -1,4 +1,4 @@
-id = "konform"
+id = "konform-lsp"
 name = "Konform"
 version = "0.1.0"
 schema_version = 1

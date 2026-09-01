@@ -14,10 +14,12 @@
 //! ```
 
 use super::{has_noqa, FileContext, Rule};
-use crate::module_probe::ModuleProbe;
+use crate::module_probe::{ModuleCheck, ModuleProbe};
 use crate::types::{Level, Violation};
 use anyhow::Result;
-use rustpython_parser::{ast, Parse};
+use ruff_python_ast::{Expr, Stmt};
+use ruff_python_parser::parse_module;
+use ruff_text_size::Ranged;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -61,23 +63,26 @@ impl Rule for Kis001Rule {
     }
 
     fn check(&self, ctx: &FileContext, cfg: &toml::Value) -> Vec<Violation> {
-        let (exceptions, level) = parse_kis_config(cfg);
+        let (exceptions, level, unresolved_level) = parse_kis_config(cfg);
         check_imports(
             &ctx.source,
             &self.probe,
             &exceptions,
             level,
+            unresolved_level,
             ctx.ignore_noqa,
+            &ctx.noqa_aliases,
         )
     }
 
     fn fix(&self, ctx: &FileContext, cfg: &toml::Value) -> Result<Option<String>> {
-        let (exceptions, _level) = parse_kis_config(cfg);
+        let (exceptions, _level, _unresolved_level) = parse_kis_config(cfg);
         Ok(apply_fixes(
             &ctx.source,
             &self.probe,
             &exceptions,
             ctx.ignore_noqa,
+            &ctx.noqa_aliases,
         ))
     }
 
@@ -98,6 +103,11 @@ KIS001 — Google-style imports [fixable]
   Configure exceptions in [tool.konform.KIS]:
     exceptions = [\"__future__\", \"typing\", \"typing_extensions\", \"collections.abc\"]
 
+  When a package isn't installed in this environment, KIS001 can't tell
+  whether the imported name is a module or not. Control how that's reported
+  in [tool.konform.KIS]:
+    unresolved_level = \"warning\"   # default: \"warning\" | \"error\" | \"off\"
+
   Suppress per-line:
     from os.path import join   # noqa: KIS001
     from os.path import join   # noqa: KIS      (silences all KIS rules)
@@ -110,7 +120,7 @@ KIS001 — Google-style imports [fixable]
 // Config helper
 // ---------------------------------------------------------------------------
 
-fn parse_kis_config(cfg: &toml::Value) -> (Vec<String>, Level) {
+fn parse_kis_config(cfg: &toml::Value) -> (Vec<String>, Level, Option<Level>) {
     let exceptions = cfg
         .get("exceptions")
         .and_then(|v| v.as_array())
@@ -133,7 +143,15 @@ fn parse_kis_config(cfg: &toml::Value) -> (Vec<String>, Level) {
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse().ok())
         .unwrap_or(Level::Error);
-    (exceptions, level)
+    // `unresolved_level` controls how KIS001 reports imports it can't
+    // validate because the package isn't installed in this environment:
+    // "warning" (default), "error", or "off" (don't report at all).
+    let unresolved_level = match cfg.get("unresolved_level").and_then(|v| v.as_str()) {
+        Some(s) if s.eq_ignore_ascii_case("off") => None,
+        Some(s) => Some(s.parse().unwrap_or(Level::Warning)),
+        None => Some(Level::Warning),
+    };
+    (exceptions, level, unresolved_level)
 }
 
 // ---------------------------------------------------------------------------
@@ -211,8 +229,8 @@ fn offset_to_line_col(line_starts: &[u32], offset: u32) -> (usize, usize) {
 /// Returns `(imports, all_exports)`.  On parse error both collections are
 /// empty so the caller silently skips the file.
 fn parse_ast(source: &str) -> (Vec<ParsedImport>, HashSet<String>) {
-    let stmts = match ast::Suite::parse(source, "<file>") {
-        Ok(s) => s,
+    let stmts = match parse_module(source) {
+        Ok(parsed) => parsed.into_suite(),
         Err(_) => return (vec![], HashSet::new()),
     };
     let line_starts = build_line_starts(source);
@@ -223,10 +241,10 @@ fn parse_ast(source: &str) -> (Vec<ParsedImport>, HashSet<String>) {
 }
 
 /// Returns `true` iff `expr` is `TYPE_CHECKING` or `typing.TYPE_CHECKING`.
-fn is_type_checking_guard(expr: &ast::Expr) -> bool {
+fn is_type_checking_guard(expr: &Expr) -> bool {
     match expr {
-        ast::Expr::Name(n) => n.id.as_str() == "TYPE_CHECKING",
-        ast::Expr::Attribute(a) => a.attr.as_str() == "TYPE_CHECKING",
+        Expr::Name(n) => n.id.as_str() == "TYPE_CHECKING",
+        Expr::Attribute(a) => a.attr.as_str() == "TYPE_CHECKING",
         _ => false,
     }
 }
@@ -235,7 +253,7 @@ fn is_type_checking_guard(expr: &ast::Expr) -> bool {
 /// statements into `out`, tagging each with whether it is inside an
 /// `if TYPE_CHECKING:` block.
 fn collect_imports(
-    stmts: &[ast::Stmt],
+    stmts: &[Stmt],
     in_type_checking: bool,
     line_starts: &[u32],
     out: &mut Vec<ParsedImport>,
@@ -243,32 +261,21 @@ fn collect_imports(
     for stmt in stmts {
         match stmt {
             // ── from X import Y ──────────────────────────────────────────
-            ast::Stmt::ImportFrom(node) => {
-                // Skip relative imports.
-                // In rustpython-parser 0.4 the level is *always* Some(Int(n)):
-                //   absolute: Int(0)  relative: Int(1), Int(2), …
-                // Int has no Display and no comparison with primitive integers.
-                // We detect non-zero level via its Debug representation, which
-                // is stable within the semver-pinned 0.4 dependency.
-                // Additionally, a None module (bare `from . import X`) is always
-                // relative regardless of the level field.
+            Stmt::ImportFrom(node) => {
+                // Skip relative imports (level > 0) and bare `from . import X`
+                // (no module name).
                 let module = match &node.module {
                     Some(m) => m.as_str().to_owned(),
                     None => continue, // bare `from . import X`
                 };
-                // Relative iff level debug string is not "Int(0)".
-                let is_relative = node
-                    .level
-                    .as_ref()
-                    .is_some_and(|l| format!("{l:?}") != "Int(0)");
-                if is_relative {
+                if node.level != 0 {
                     continue;
                 }
 
-                let start_off = u32::from(node.range.start());
+                let start_off = u32::from(node.range().start());
                 // end() points one past the last byte; use saturating_sub to
                 // stay on the closing token.
-                let end_off = u32::from(node.range.end()).saturating_sub(1);
+                let end_off = u32::from(node.range().end()).saturating_sub(1);
                 let (start_line, col) = offset_to_line_col(line_starts, start_off);
                 let (end_line, end_col_inclusive) = offset_to_line_col(line_starts, end_off);
                 // end_col_inclusive points at the last byte; add 1 so the
@@ -279,11 +286,11 @@ fn collect_imports(
                     .names
                     .iter()
                     .map(|alias| {
-                        let alias_off = u32::from(alias.range.start());
+                        let alias_off = u32::from(alias.range().start());
                         let (alias_line, _) = offset_to_line_col(line_starts, alias_off);
                         ParsedAlias {
                             name: alias.name.as_str().to_owned(),
-                            asname: alias.asname.as_ref().map(|id| id.as_str().to_owned()),
+                            asname: alias.asname.as_deref().map(str::to_owned),
                             line: alias_line,
                         }
                     })
@@ -301,22 +308,23 @@ fn collect_imports(
             }
 
             // ── if TYPE_CHECKING: … ──────────────────────────────────────
-            ast::Stmt::If(node) => {
+            Stmt::If(node) => {
                 let guard = is_type_checking_guard(&node.test);
                 collect_imports(&node.body, in_type_checking || guard, line_starts, out);
-                // else / elif branches are NOT considered TYPE_CHECKING scope.
-                collect_imports(&node.orelse, in_type_checking, line_starts, out);
+                // elif/else branches are NOT considered TYPE_CHECKING scope.
+                for clause in &node.elif_else_clauses {
+                    collect_imports(&clause.body, in_type_checking, line_starts, out);
+                }
             }
 
             // ── walk into function / class bodies ────────────────────────
             // Unusual but legal: imports can appear in nested scopes.
-            ast::Stmt::FunctionDef(node) => {
+            // In ruff's AST, async functions share `Stmt::FunctionDef` with
+            // an `is_async` flag instead of a separate `AsyncFunctionDef`.
+            Stmt::FunctionDef(node) => {
                 collect_imports(&node.body, in_type_checking, line_starts, out);
             }
-            ast::Stmt::AsyncFunctionDef(node) => {
-                collect_imports(&node.body, in_type_checking, line_starts, out);
-            }
-            ast::Stmt::ClassDef(node) => {
+            Stmt::ClassDef(node) => {
                 collect_imports(&node.body, in_type_checking, line_starts, out);
             }
 
@@ -334,16 +342,14 @@ fn collect_imports(
 /// Handles:
 /// - `__all__ = ['a', 'b']` / `__all__ = ('a', 'b')`  (direct assignment)
 /// - `__all__ += ['c', 'd']`                            (augmented assignment)
-fn collect_all_exports(stmts: &[ast::Stmt]) -> HashSet<String> {
+fn collect_all_exports(stmts: &[Stmt]) -> HashSet<String> {
     let mut exports = HashSet::new();
 
     /// Push all string-literal elements of a list/tuple expression into `out`.
-    fn push_str_elts(elts: &[ast::Expr], out: &mut HashSet<String>) {
+    fn push_str_elts(elts: &[Expr], out: &mut HashSet<String>) {
         for elt in elts {
-            if let ast::Expr::Constant(c) = elt {
-                if let ast::Constant::Str(s) = &c.value {
-                    out.insert(s.clone());
-                }
+            if let Expr::StringLiteral(s) = elt {
+                out.insert(s.value.to_str().to_owned());
             }
         }
     }
@@ -351,30 +357,30 @@ fn collect_all_exports(stmts: &[ast::Stmt]) -> HashSet<String> {
     for stmt in stmts {
         match stmt {
             // __all__ = ['a', 'b']  or  __all__ = ('a', 'b')
-            ast::Stmt::Assign(node) => {
+            Stmt::Assign(node) => {
                 let targets_all = node
                     .targets
                     .iter()
-                    .any(|t| matches!(t, ast::Expr::Name(n) if n.id.as_str() == "__all__"));
+                    .any(|t| matches!(t, Expr::Name(n) if n.id.as_str() == "__all__"));
                 if !targets_all {
                     continue;
                 }
                 match &*node.value {
-                    ast::Expr::List(l) => push_str_elts(&l.elts, &mut exports),
-                    ast::Expr::Tuple(t) => push_str_elts(&t.elts, &mut exports),
+                    Expr::List(l) => push_str_elts(&l.elts, &mut exports),
+                    Expr::Tuple(t) => push_str_elts(&t.elts, &mut exports),
                     _ => {}
                 }
             }
             // __all__ += ['c', 'd']
-            ast::Stmt::AugAssign(node) => {
+            Stmt::AugAssign(node) => {
                 let target_is_all =
-                    matches!(&*node.target, ast::Expr::Name(n) if n.id.as_str() == "__all__");
+                    matches!(node.target.as_ref(), Expr::Name(n) if n.id.as_str() == "__all__");
                 if !target_is_all {
                     continue;
                 }
                 match &*node.value {
-                    ast::Expr::List(l) => push_str_elts(&l.elts, &mut exports),
-                    ast::Expr::Tuple(t) => push_str_elts(&t.elts, &mut exports),
+                    Expr::List(l) => push_str_elts(&l.elts, &mut exports),
+                    Expr::Tuple(t) => push_str_elts(&t.elts, &mut exports),
                     _ => {}
                 }
             }
@@ -458,6 +464,31 @@ fn make_violation(
     }
 }
 
+fn make_unknown_violation(
+    span: ViolationSpan,
+    module: &str,
+    alias_name: &str,
+    level: Level,
+) -> Violation {
+    let root = module.split('.').next().unwrap_or(module);
+    Violation {
+        rule: "KIS001".to_owned(),
+        line: span.start_line,
+        col: span.col,
+        end_line: span.end_line,
+        end_col: span.end_col,
+        message: format!(
+            "KIS001: Cannot verify whether '{alias_name}' from '{module}' is a module -- '{root}' was not found in this Python environment."
+        ),
+        help: Some(
+            "Install the package in this environment so KIS001 can validate this import, or set `unresolved_level` in [tool.konform.KIS] to \"off\" to silence this warning."
+                .to_owned(),
+        ),
+        level,
+        fixable: false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // check_imports
 // ---------------------------------------------------------------------------
@@ -467,7 +498,9 @@ fn check_imports(
     probe: &ModuleProbe,
     exceptions: &[String],
     level: Level,
+    unresolved_level: Option<Level>,
     ignore_noqa: bool,
+    noqa_aliases: &HashMap<String, String>,
 ) -> Vec<Violation> {
     let lines: Vec<&str> = source.lines().collect();
     let (imports, all_exports) = parse_ast(source);
@@ -483,34 +516,48 @@ fn check_imports(
             .get(imp.start_line.saturating_sub(1))
             .copied()
             .unwrap_or("");
-        if !ignore_noqa && has_noqa(start_line_str, "KIS001") {
+        if !ignore_noqa && has_noqa(start_line_str, "KIS001", noqa_aliases) {
             continue;
         }
 
         for alias in &imp.aliases {
-            if probe.is_module(&imp.module, &alias.name) {
+            let check = probe.check(&imp.module, &alias.name);
+            if check == ModuleCheck::Module {
                 continue; // valid: the imported name is itself a module
             }
             let effective = alias.asname.as_deref().unwrap_or(alias.name.as_str());
             if all_exports.contains(effective) || all_exports.contains(&alias.name) {
-                continue; // re-export via __all__ — allowed
+                continue; // re-export via __all__ -- allowed
             }
             let alias_line_str = lines
                 .get(alias.line.saturating_sub(1))
                 .copied()
                 .unwrap_or("");
-            if !ignore_noqa && has_noqa(alias_line_str, "KIS001") {
+            if !ignore_noqa && has_noqa(alias_line_str, "KIS001", noqa_aliases) {
+                continue;
+            }
+
+            let span = ViolationSpan {
+                start_line: imp.start_line,
+                end_line: imp.end_line,
+                end_col: imp.end_col,
+                col: imp.col,
+            };
+            if check == ModuleCheck::Unknown {
+                if let Some(unresolved_level) = unresolved_level {
+                    violations.push(make_unknown_violation(
+                        span,
+                        &imp.module,
+                        &alias.name,
+                        unresolved_level,
+                    ));
+                }
                 continue;
             }
 
             let fix = can_fix(&imp.module, &alias.name, probe);
             violations.push(make_violation(
-                ViolationSpan {
-                    start_line: imp.start_line,
-                    end_line: imp.end_line,
-                    end_col: imp.end_col,
-                    col: imp.col,
-                },
+                span,
                 &imp.module,
                 &alias.name,
                 level,
@@ -549,6 +596,7 @@ fn apply_fixes(
     probe: &ModuleProbe,
     exceptions: &[String],
     ignore_noqa: bool,
+    noqa_aliases: &HashMap<String, String>,
 ) -> Option<String> {
     let lines: Vec<&str> = source.lines().collect();
     let (imports, all_exports) = parse_ast(source);
@@ -573,12 +621,13 @@ fn apply_fixes(
             .get(imp.start_line.saturating_sub(1))
             .copied()
             .unwrap_or("");
-        if !ignore_noqa && has_noqa(start_line_str, "KIS001") {
+        if !ignore_noqa && has_noqa(start_line_str, "KIS001", noqa_aliases) {
             continue;
         }
 
         for alias in &imp.aliases {
-            if probe.is_module(&imp.module, &alias.name) {
+            let check = probe.check(&imp.module, &alias.name);
+            if check != ModuleCheck::NotModule {
                 continue;
             }
             let effective = alias.asname.as_deref().unwrap_or(alias.name.as_str());
@@ -589,7 +638,7 @@ fn apply_fixes(
                 .get(alias.line.saturating_sub(1))
                 .copied()
                 .unwrap_or("");
-            if !ignore_noqa && has_noqa(alias_line_str, "KIS001") {
+            if !ignore_noqa && has_noqa(alias_line_str, "KIS001", noqa_aliases) {
                 continue;
             }
 
@@ -892,6 +941,17 @@ mod tests {
     }
 
     #[test]
+    fn uninstalled_package_produces_warning_not_error() {
+        let violations = rule().check(
+            &ctx("from totally_not_a_real_package_zzz_kis001 import something\n"),
+            &empty_cfg(),
+        );
+        assert_eq!(violations.len(), 1, "expected exactly one violation");
+        assert_eq!(violations[0].level, Level::Warning);
+        assert!(!violations[0].fixable);
+    }
+
+    #[test]
     fn future_excepted_by_default() {
         let violations = rule().check(&ctx("from __future__ import annotations\n"), &empty_cfg());
         assert!(violations.is_empty(), "should be excepted by default");
@@ -949,19 +1009,51 @@ mod tests {
     }
 
     #[test]
-    fn test_int_zero_comparison() {
-        // Verifies the Debug-format hack for detecting relative imports still works.
-        let src = "from os.path import join\n"; // absolute, level = Int(0)
-        let stmts = ast::Suite::parse(src, "<t>").unwrap();
-        if let ast::Stmt::ImportFrom(n) = &stmts[0] {
-            let level = n.level.as_ref().expect("level should be Some");
-            assert_eq!(format!("{level:?}"), "Int(0)");
+    fn unresolved_level_can_be_escalated_to_error() {
+        let mut cfg = toml::map::Map::new();
+        cfg.insert(
+            "unresolved_level".to_owned(),
+            toml::Value::String("error".to_owned()),
+        );
+        let violations = rule().check(
+            &ctx("from totally_not_a_real_package_zzz_kis001 import something\n"),
+            &toml::Value::Table(cfg),
+        );
+        assert_eq!(violations.len(), 1, "expected exactly one violation");
+        assert_eq!(violations[0].level, Level::Error);
+        assert!(!violations[0].fixable);
+    }
+
+    #[test]
+    fn unresolved_level_off_suppresses_violation() {
+        let mut cfg = toml::map::Map::new();
+        cfg.insert(
+            "unresolved_level".to_owned(),
+            toml::Value::String("off".to_owned()),
+        );
+        let violations = rule().check(
+            &ctx("from totally_not_a_real_package_zzz_kis001 import something\n"),
+            &toml::Value::Table(cfg),
+        );
+        assert!(
+            violations.is_empty(),
+            "unresolved_level = off should suppress the violation entirely"
+        );
+    }
+
+    #[test]
+    fn test_level_detection() {
+        // Verifies that ruff's u32 level field correctly distinguishes absolute
+        // from relative imports (replaces the old rustpython Debug-format hack).
+        let src = "from os.path import join\n"; // absolute, level == 0
+        let stmts = parse_module(src).unwrap().into_suite();
+        if let Stmt::ImportFrom(n) = &stmts[0] {
+            assert_eq!(n.level, 0, "absolute import should have level 0");
         }
         let src2 = "from .sub import thing\n";
-        let stmts2 = ast::Suite::parse(src2, "<t>").unwrap();
-        if let ast::Stmt::ImportFrom(n) = &stmts2[0] {
-            let level = n.level.as_ref().expect("level should be Some");
-            assert_ne!(format!("{level:?}"), "Int(0)");
+        let stmts2 = parse_module(src2).unwrap().into_suite();
+        if let Stmt::ImportFrom(n) = &stmts2[0] {
+            assert_ne!(n.level, 0, "relative import should have level != 0");
         }
     }
 

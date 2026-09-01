@@ -1,15 +1,25 @@
 # Fail on high-severity or critical vulnerabilities introduced by a PR.
 # Allow common permissive open-source licenses used by konform's dependency tree.
-fail-on-severity: high
-allow-licenses:
+fail_on_severity: moderate
+
+license_check: true
+
+allow_licenses:
   - MIT
   - Apache-2.0
-  - Apache-2.0 WITH LLVM-exception
+  - BlueOak-1.0.0
   - BSD-2-Clause
   - BSD-3-Clause
   - ISC
   - MPL-2.0
-  - Zlib
+  - Unlicense
+  - 0BSD
   - CC0-1.0
-  - Unicode-DFS-2016
+  - Zlib
+  - CC-BY-4.0
+  - Python-2.0
   - Unicode-3.0
+  - Unicode-DFS-2016
+  - BSL-1.0
+
+comment_summary_in_pr: always

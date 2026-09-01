@@ -11,6 +11,7 @@ use dashmap::DashMap;
 use ruff_python_ast::Stmt;
 use ruff_python_parser::parse_module;
 use seahash::SeaHasher;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -78,34 +79,92 @@ impl ModuleProbe {
         }
         let stdout = String::from_utf8(output.stdout).ok()?;
         let paths: Vec<String> = serde_json::from_str(stdout.trim()).ok()?;
-        Some(
-            paths
-                .into_iter()
-                .filter(|p| !p.is_empty())
-                .map(PathBuf::from)
-                .collect(),
-        )
+        let cwd = std::env::current_dir().ok();
+        Some(Self::resolve_sys_path(paths, cwd.as_deref()))
+    }
+
+    /// Resolve the raw `sys.path` strings returned by the interpreter into
+    /// filesystem paths.
+    ///
+    /// Python represents "current working directory" as an empty string in
+    /// `sys.path` (e.g. `sys.path[0]` for `python -c "..."` / interactive
+    /// use). Since `python` is spawned without overriding its working
+    /// directory, that empty string means *this process's* `cwd` — resolve
+    /// it rather than silently dropping it, otherwise modules/packages only
+    /// reachable via cwd (e.g. namespace packages rooted at the repo root,
+    /// such as a `tests/mocks` directory with no `__init__.py`) are never
+    /// found and get incorrectly flagged as "not a module".
+    fn resolve_sys_path(paths: Vec<String>, cwd: Option<&Path>) -> Vec<PathBuf> {
+        paths
+            .into_iter()
+            .filter_map(|p| {
+                if p.is_empty() {
+                    cwd.map(Path::to_path_buf)
+                } else {
+                    Some(PathBuf::from(p))
+                }
+            })
+            .collect()
     }
 
     /// Returns `true` iff `attr_name` inside `module_name` is itself a module.
     ///
     /// Example: `is_module("os", "path")` → `true` (os/path.py exists)
     ///          `is_module("os.path", "join")` → `false` (join is a function)
+    ///
+    /// # Thread-safety
+    /// `ModuleProbe` is shared across rayon worker threads (one per checked
+    /// file). This method must never write a placeholder/sentinel value to
+    /// the shared `cache` before the real result is known: a concurrent
+    /// call for the *same* `(module_name, attr_name)` key (e.g. two files
+    /// both importing the same symbol) could observe that placeholder and
+    /// return a wrong, transient answer. Only fully-resolved results are
+    /// ever cached; the re-export cycle guard lives in a call-local
+    /// `visiting` set instead.
     pub fn is_module(&self, module_name: &str, attr_name: &str) -> bool {
         let key = (module_name.to_string(), attr_name.to_string());
         if let Some(v) = self.cache.get(&key) {
             return *v;
         }
-        // Insert a `false` sentinel before recursing so that circular
-        // re-export chains (A re-exports from B, B re-exports from A) terminate
-        // rather than stack-overflow.
-        self.cache.insert(key.clone(), false);
-        let result = self.check_filesystem(module_name, attr_name);
+        let mut visiting = HashSet::new();
+        self.is_module_recursive(module_name, attr_name, &mut visiting)
+    }
+
+    /// Recursive core of [`ModuleProbe::is_module`].
+    ///
+    /// `visiting` guards against circular `__init__.py` re-export chains
+    /// (A re-exports from B, B re-exports from A). It is local to a single
+    /// top-level `is_module` call — never shared across threads or across
+    /// unrelated queries — so it cannot corrupt the shared `cache`.
+    fn is_module_recursive(
+        &self,
+        module_name: &str,
+        attr_name: &str,
+        visiting: &mut HashSet<(String, String)>,
+    ) -> bool {
+        let key = (module_name.to_owned(), attr_name.to_owned());
+        if let Some(v) = self.cache.get(&key) {
+            return *v;
+        }
+        if !visiting.insert(key.clone()) {
+            // Already being resolved higher up this same call chain: it's a
+            // cycle in the on-disk re-export graph, not a real module.
+            return false;
+        }
+        let result = self.check_filesystem(module_name, attr_name, visiting);
+        // Only ever cache the fully-resolved result -- concurrent readers
+        // either miss (and recompute, harmlessly redundant) or see the
+        // correct final answer, never a mid-computation placeholder.
         self.cache.insert(key, result);
         result
     }
 
-    fn check_filesystem(&self, module_name: &str, attr_name: &str) -> bool {
+    fn check_filesystem(
+        &self,
+        module_name: &str,
+        attr_name: &str,
+        visiting: &mut HashSet<(String, String)>,
+    ) -> bool {
         // "myorg.utils.public" → "myorg/utils/public"
         let module_dir = module_name.replace('.', "/");
 
@@ -145,7 +204,7 @@ impl ModuleProbe {
             // 4. __init__.py re-export: the package may forward-import attr_name
             //    from another location (e.g. `from myorg.utils import networking`
             //    in `myorg/utils/public/__init__.py`).  Follow that one hop.
-            if self.check_init_reexport(&parent_dir, attr_name) {
+            if self.check_init_reexport(&parent_dir, attr_name, visiting) {
                 return true;
             }
         }
@@ -166,7 +225,12 @@ impl ModuleProbe {
     ///
     /// so that `from mypkg import networking` is not incorrectly flagged by
     /// KIS001.
-    fn check_init_reexport(&self, package_dir: &Path, attr_name: &str) -> bool {
+    fn check_init_reexport(
+        &self,
+        package_dir: &Path,
+        attr_name: &str,
+        visiting: &mut HashSet<(String, String)>,
+    ) -> bool {
         let source = match std::fs::read_to_string(package_dir.join("__init__.py")) {
             Ok(s) => s,
             Err(_) => return false,
@@ -195,9 +259,9 @@ impl ModuleProbe {
                     .unwrap_or_else(|| alias.name.as_str());
                 if local == attr_name {
                     // Recursively check whether the original symbol in the
-                    // source module is itself a module.  The sentinel in
-                    // `is_module` prevents infinite loops on circular imports.
-                    if self.is_module(&module, alias.name.as_str()) {
+                    // source module is itself a module.  `visiting` prevents
+                    // infinite loops on circular imports.
+                    if self.is_module_recursive(&module, alias.name.as_str(), visiting) {
                         return true;
                     }
                 }
@@ -364,5 +428,93 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let probe = probe_for(tmp.path());
         assert_eq!(probe.env_fingerprint(), probe.env_fingerprint());
+    }
+
+    // ── resolve_sys_path (empty-string / cwd handling) ──────────────
+
+    #[test]
+    fn resolve_sys_path_substitutes_empty_string_with_cwd() {
+        // Python represents cwd as "" in sys.path; this must resolve to the
+        // actual cwd rather than being dropped, otherwise namespace packages
+        // rooted at the repo root (e.g. `tests/mocks` with no `__init__.py`)
+        // are invisible to the probe.
+        let cwd = PathBuf::from("/some/repo/root");
+        let raw = vec![
+            "".to_owned(),
+            "/usr/lib/python3.10".to_owned(),
+            "/some/repo/root/src".to_owned(),
+        ];
+        let resolved = ModuleProbe::resolve_sys_path(raw, Some(&cwd));
+        assert_eq!(
+            resolved,
+            vec![
+                PathBuf::from("/some/repo/root"),
+                PathBuf::from("/usr/lib/python3.10"),
+                PathBuf::from("/some/repo/root/src"),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_sys_path_drops_empty_string_when_cwd_unavailable() {
+        let raw = vec!["".to_owned(), "/usr/lib/python3.10".to_owned()];
+        let resolved = ModuleProbe::resolve_sys_path(raw, None);
+        assert_eq!(resolved, vec![PathBuf::from("/usr/lib/python3.10")]);
+    }
+
+    #[test]
+    fn cwd_namespace_package_found_via_resolved_empty_path_entry() {
+        // Reproduces the real bug: `tests/mocks/mock_adb_server.py` is only
+        // reachable through the cwd ("") entry of sys.path because
+        // `tests/mocks` has no `__init__.py` (implicit namespace package).
+        let tmp = TempDir::new().unwrap();
+        let tests_dir = tmp.path().join("tests");
+        let mocks_dir = tests_dir.join("mocks");
+        fs::create_dir_all(&mocks_dir).unwrap();
+        fs::write(tests_dir.join("__init__.py"), "").unwrap();
+        // Deliberately no mocks/__init__.py.
+        fs::write(mocks_dir.join("mock_adb_server.py"), "").unwrap();
+
+        let sys_path = ModuleProbe::resolve_sys_path(vec![String::new()], Some(tmp.path()));
+        let probe = ModuleProbe {
+            sys_path,
+            cache: DashMap::new(),
+        };
+        assert!(probe.is_module("tests.mocks", "mock_adb_server"));
+    }
+
+    // ── concurrency ─────────────────────────────────────────────────
+
+    #[test]
+    fn concurrent_queries_for_the_same_key_never_see_a_placeholder() {
+        // Regression test for a data race in the previous implementation:
+        // `is_module` inserted a `false` *sentinel* into the shared cache
+        // before computing the real result, so a concurrent call for the
+        // exact same (module, attr) key (e.g. two files both importing
+        // `vcc.conx_power.controller`, checked on different rayon worker
+        // threads) could observe that sentinel and wrongly report "not a
+        // module". This spins up many threads hammering the same key and
+        // asserts every single one gets the correct answer.
+        let tmp = TempDir::new().unwrap();
+        let pkg = tmp.path().join("mypkg");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("__init__.py"), "").unwrap();
+        fs::write(pkg.join("controller.py"), "").unwrap();
+
+        let probe = std::sync::Arc::new(probe_for(tmp.path()));
+        let mut handles = Vec::new();
+        for _ in 0..64 {
+            let probe = std::sync::Arc::clone(&probe);
+            handles.push(std::thread::spawn(move || {
+                probe.is_module("mypkg", "controller")
+            }));
+        }
+        for h in handles {
+            assert!(
+                h.join().unwrap(),
+                "every concurrent caller must see the correct (true) result, \
+                 never a transient sentinel"
+            );
+        }
     }
 }

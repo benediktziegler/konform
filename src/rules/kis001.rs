@@ -14,7 +14,7 @@
 //! ```
 
 use super::{has_noqa, FileContext, Rule};
-use crate::module_probe::ModuleProbe;
+use crate::module_probe::{ModuleCheck, ModuleProbe};
 use crate::types::{Level, Violation};
 use anyhow::Result;
 use ruff_python_ast::{Expr, Stmt};
@@ -63,18 +63,19 @@ impl Rule for Kis001Rule {
     }
 
     fn check(&self, ctx: &FileContext, cfg: &toml::Value) -> Vec<Violation> {
-        let (exceptions, level) = parse_kis_config(cfg);
+        let (exceptions, level, unresolved_level) = parse_kis_config(cfg);
         check_imports(
             &ctx.source,
             &self.probe,
             &exceptions,
             level,
+            unresolved_level,
             ctx.ignore_noqa,
         )
     }
 
     fn fix(&self, ctx: &FileContext, cfg: &toml::Value) -> Result<Option<String>> {
-        let (exceptions, _level) = parse_kis_config(cfg);
+        let (exceptions, _level, _unresolved_level) = parse_kis_config(cfg);
         Ok(apply_fixes(
             &ctx.source,
             &self.probe,
@@ -100,6 +101,11 @@ KIS001 — Google-style imports [fixable]
   Configure exceptions in [tool.konform.KIS]:
     exceptions = [\"__future__\", \"typing\", \"typing_extensions\", \"collections.abc\"]
 
+  When a package isn't installed in this environment, KIS001 can't tell
+  whether the imported name is a module or not. Control how that's reported
+  in [tool.konform.KIS]:
+    unresolved_level = \"warning\"   # default: \"warning\" | \"error\" | \"off\"
+
   Suppress per-line:
     from os.path import join   # noqa: KIS001
     from os.path import join   # noqa: KIS      (silences all KIS rules)
@@ -112,7 +118,7 @@ KIS001 — Google-style imports [fixable]
 // Config helper
 // ---------------------------------------------------------------------------
 
-fn parse_kis_config(cfg: &toml::Value) -> (Vec<String>, Level) {
+fn parse_kis_config(cfg: &toml::Value) -> (Vec<String>, Level, Option<Level>) {
     let exceptions = cfg
         .get("exceptions")
         .and_then(|v| v.as_array())
@@ -135,7 +141,15 @@ fn parse_kis_config(cfg: &toml::Value) -> (Vec<String>, Level) {
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse().ok())
         .unwrap_or(Level::Error);
-    (exceptions, level)
+    // `unresolved_level` controls how KIS001 reports imports it can't
+    // validate because the package isn't installed in this environment:
+    // "warning" (default), "error", or "off" (don't report at all).
+    let unresolved_level = match cfg.get("unresolved_level").and_then(|v| v.as_str()) {
+        Some(s) if s.eq_ignore_ascii_case("off") => None,
+        Some(s) => Some(s.parse().unwrap_or(Level::Warning)),
+        None => Some(Level::Warning),
+    };
+    (exceptions, level, unresolved_level)
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +462,31 @@ fn make_violation(
     }
 }
 
+fn make_unknown_violation(
+    span: ViolationSpan,
+    module: &str,
+    alias_name: &str,
+    level: Level,
+) -> Violation {
+    let root = module.split('.').next().unwrap_or(module);
+    Violation {
+        rule: "KIS001".to_owned(),
+        line: span.start_line,
+        col: span.col,
+        end_line: span.end_line,
+        end_col: span.end_col,
+        message: format!(
+            "KIS001: Cannot verify whether '{alias_name}' from '{module}' is a module -- '{root}' was not found in this Python environment."
+        ),
+        help: Some(
+            "Install the package in this environment so KIS001 can validate this import, or set `unresolved_level` in [tool.konform.KIS] to \"off\" to silence this warning."
+                .to_owned(),
+        ),
+        level,
+        fixable: false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // check_imports
 // ---------------------------------------------------------------------------
@@ -457,6 +496,7 @@ fn check_imports(
     probe: &ModuleProbe,
     exceptions: &[String],
     level: Level,
+    unresolved_level: Option<Level>,
     ignore_noqa: bool,
 ) -> Vec<Violation> {
     let lines: Vec<&str> = source.lines().collect();
@@ -478,12 +518,13 @@ fn check_imports(
         }
 
         for alias in &imp.aliases {
-            if probe.is_module(&imp.module, &alias.name) {
+            let check = probe.check(&imp.module, &alias.name);
+            if check == ModuleCheck::Module {
                 continue; // valid: the imported name is itself a module
             }
             let effective = alias.asname.as_deref().unwrap_or(alias.name.as_str());
             if all_exports.contains(effective) || all_exports.contains(&alias.name) {
-                continue; // re-export via __all__ — allowed
+                continue; // re-export via __all__ -- allowed
             }
             let alias_line_str = lines
                 .get(alias.line.saturating_sub(1))
@@ -493,14 +534,27 @@ fn check_imports(
                 continue;
             }
 
+            let span = ViolationSpan {
+                start_line: imp.start_line,
+                end_line: imp.end_line,
+                end_col: imp.end_col,
+                col: imp.col,
+            };
+            if check == ModuleCheck::Unknown {
+                if let Some(unresolved_level) = unresolved_level {
+                    violations.push(make_unknown_violation(
+                        span,
+                        &imp.module,
+                        &alias.name,
+                        unresolved_level,
+                    ));
+                }
+                continue;
+            }
+
             let fix = can_fix(&imp.module, &alias.name, probe);
             violations.push(make_violation(
-                ViolationSpan {
-                    start_line: imp.start_line,
-                    end_line: imp.end_line,
-                    end_col: imp.end_col,
-                    col: imp.col,
-                },
+                span,
                 &imp.module,
                 &alias.name,
                 level,
@@ -568,7 +622,8 @@ fn apply_fixes(
         }
 
         for alias in &imp.aliases {
-            if probe.is_module(&imp.module, &alias.name) {
+            let check = probe.check(&imp.module, &alias.name);
+            if check != ModuleCheck::NotModule {
                 continue;
             }
             let effective = alias.asname.as_deref().unwrap_or(alias.name.as_str());
@@ -882,6 +937,17 @@ mod tests {
     }
 
     #[test]
+    fn uninstalled_package_produces_warning_not_error() {
+        let violations = rule().check(
+            &ctx("from totally_not_a_real_package_zzz_kis001 import something\n"),
+            &empty_cfg(),
+        );
+        assert_eq!(violations.len(), 1, "expected exactly one violation");
+        assert_eq!(violations[0].level, Level::Warning);
+        assert!(!violations[0].fixable);
+    }
+
+    #[test]
     fn future_excepted_by_default() {
         let violations = rule().check(&ctx("from __future__ import annotations\n"), &empty_cfg());
         assert!(violations.is_empty(), "should be excepted by default");
@@ -936,6 +1002,39 @@ mod tests {
         );
         let violations = rule().check(&ctx("from os.path import join\n"), &toml::Value::Table(cfg));
         assert!(violations.is_empty(), "os.path should be excepted");
+    }
+
+    #[test]
+    fn unresolved_level_can_be_escalated_to_error() {
+        let mut cfg = toml::map::Map::new();
+        cfg.insert(
+            "unresolved_level".to_owned(),
+            toml::Value::String("error".to_owned()),
+        );
+        let violations = rule().check(
+            &ctx("from totally_not_a_real_package_zzz_kis001 import something\n"),
+            &toml::Value::Table(cfg),
+        );
+        assert_eq!(violations.len(), 1, "expected exactly one violation");
+        assert_eq!(violations[0].level, Level::Error);
+        assert!(!violations[0].fixable);
+    }
+
+    #[test]
+    fn unresolved_level_off_suppresses_violation() {
+        let mut cfg = toml::map::Map::new();
+        cfg.insert(
+            "unresolved_level".to_owned(),
+            toml::Value::String("off".to_owned()),
+        );
+        let violations = rule().check(
+            &ctx("from totally_not_a_real_package_zzz_kis001 import something\n"),
+            &toml::Value::Table(cfg),
+        );
+        assert!(
+            violations.is_empty(),
+            "unresolved_level = off should suppress the violation entirely"
+        );
     }
 
     #[test]

@@ -16,12 +16,31 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Result of checking whether an imported name is a module.
+///
+/// See [`ModuleProbe::check`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleCheck {
+    /// `attr_name` resolved to a real module.
+    Module,
+    /// `attr_name` resolved and is definitively not a module.
+    NotModule,
+    /// The root package (first dotted component of `module_name`) could not
+    /// be found anywhere in `sys.path` — e.g. it isn't installed in this
+    /// Python environment. There is no way to tell whether `attr_name` would
+    /// be a module or not, so callers should treat this as "unknown" rather
+    /// than a definitive violation.
+    Unknown,
+}
+
 /// Caches `(module_name, attr_name) -> is_module` probe results.
 pub struct ModuleProbe {
     /// Ordered list of directories to search, from `python3 -c "import sys,json; print(json.dumps(sys.path))"`.
     sys_path: Vec<PathBuf>,
     /// In-process result cache.
     cache: DashMap<(String, String), bool>,
+    /// Caches whether a root package name exists anywhere in `sys_path`.
+    root_cache: DashMap<String, bool>,
 }
 
 impl ModuleProbe {
@@ -34,6 +53,7 @@ impl ModuleProbe {
         Self {
             sys_path,
             cache: DashMap::new(),
+            root_cache: DashMap::new(),
         }
     }
 
@@ -128,6 +148,56 @@ impl ModuleProbe {
         }
         let mut visiting = HashSet::new();
         self.is_module_recursive(module_name, attr_name, &mut visiting)
+    }
+
+    /// Tri-state version of [`ModuleProbe::is_module`].
+    ///
+    /// Distinguishes "definitely not a module" from "cannot tell, because the
+    /// root package isn't installed in this environment" so callers (e.g.
+    /// KIS001) can downgrade the latter to a warning instead of an error.
+    pub fn check(&self, module_name: &str, attr_name: &str) -> ModuleCheck {
+        if self.is_module(module_name, attr_name) {
+            return ModuleCheck::Module;
+        }
+        if self.root_package_exists(module_name) {
+            ModuleCheck::NotModule
+        } else {
+            ModuleCheck::Unknown
+        }
+    }
+
+    /// Returns `true` iff the root package (first dotted component of
+    /// `module_name`) can be found anywhere in `sys_path`, as a regular
+    /// package, namespace package, plain module file, or C extension.
+    ///
+    /// Used to tell "the package isn't installed, so we can't validate this
+    /// import" apart from "the package is installed but this name isn't a
+    /// submodule of it".
+    fn root_package_exists(&self, module_name: &str) -> bool {
+        let root = module_name.split('.').next().unwrap_or(module_name);
+        if let Some(v) = self.root_cache.get(root) {
+            return *v;
+        }
+        let found = self.sys_path.iter().any(|base| {
+            base.join(root).is_dir()
+                || base.join(format!("{root}.py")).exists()
+                || std::fs::read_dir(base).is_ok_and(|entries| {
+                    entries.flatten().any(|entry| {
+                        let fname = entry.file_name();
+                        let fname_str = fname.to_string_lossy();
+                        fname_str.starts_with(&format!("{root}.")) && {
+                            let ext = entry
+                                .path()
+                                .extension()
+                                .map(|e| e.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            matches!(ext.as_str(), "so" | "pyd" | "dylib")
+                        }
+                    })
+                })
+        });
+        self.root_cache.insert(root.to_owned(), found);
+        found
     }
 
     /// Recursive core of [`ModuleProbe::is_module`].
@@ -303,6 +373,7 @@ mod tests {
         ModuleProbe {
             sys_path: vec![root.to_path_buf()],
             cache: DashMap::new(),
+            root_cache: DashMap::new(),
         }
     }
 
@@ -381,8 +452,28 @@ mod tests {
         // (impl_pkg/core.py does not exist)
 
         let probe = probe_for(tmp.path());
-        // SomeClass is not a module — must remain false.
+        // SomeClass is not a module -- must remain false.
         assert!(!probe.is_module("pub", "SomeClass"));
+    }
+
+    #[test]
+    fn check_returns_not_module_when_package_installed() {
+        let tmp = TempDir::new().unwrap();
+        let pkg = tmp.path().join("mypkg");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("__init__.py"), "").unwrap();
+        fs::write(pkg.join("utils.py"), "").unwrap();
+
+        let probe = probe_for(tmp.path());
+        assert_eq!(probe.check("mypkg", "utils"), ModuleCheck::Module);
+        assert_eq!(probe.check("mypkg", "nonexistent"), ModuleCheck::NotModule);
+    }
+
+    #[test]
+    fn check_returns_unknown_when_package_not_installed() {
+        let tmp = TempDir::new().unwrap();
+        let probe = probe_for(tmp.path());
+        assert_eq!(probe.check("requests", "models"), ModuleCheck::Unknown);
     }
 
     #[test]
@@ -479,6 +570,7 @@ mod tests {
         let probe = ModuleProbe {
             sys_path,
             cache: DashMap::new(),
+            root_cache: DashMap::new(),
         };
         assert!(probe.is_module("tests.mocks", "mock_adb_server"));
     }

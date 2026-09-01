@@ -110,7 +110,9 @@ pub fn main_loop(connection: Connection, session: Arc<RwLock<Session>>) {
                 if let Some(kind) = pending.remove(&resp.id) {
                     handle_pending_response(
                         kind,
-                        resp.result.clone().unwrap_or(serde_json::Value::Null),
+                        resp.response_result
+                            .clone()
+                            .unwrap_or(serde_json::Value::Null),
                         &connection,
                         &session,
                     );

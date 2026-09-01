@@ -1,38 +1,60 @@
 version: 2
 updates:
-  # Rust — main crate
+  # Rust dependencies (main project)
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
-    labels:
-      - "dependencies"
-      - "rust"
+      day: "saturday"
+      time: "09:00"
+      timezone: "Europe/Amsterdam"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    groups:
+      rust-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
-  # Rust — Zed extension (separate Cargo.toml)
+  # Rust dependencies (Zed extension)
   - package-ecosystem: "cargo"
     directory: "/extensions/zed-extension"
     schedule:
       interval: "weekly"
-    labels:
-      - "dependencies"
-      - "rust"
-      - "zed"
+      day: "saturday"
+      time: "09:00"
+      timezone: "Europe/Amsterdam"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(zed)"
+      include: "scope"
 
-  # Python development dependencies (pyproject.toml)
+  # pip dependencies (Python dev tools)
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
-    labels:
-      - "dependencies"
-      - "python"
+      day: "saturday"
+      time: "09:00"
+      timezone: "Europe/Amsterdam"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(python)"
+      include: "scope"
 
-  # GitHub Actions versions
+  # GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    labels:
-      - "dependencies"
-      - "github-actions"
+      day: "saturday"
+      time: "09:00"
+      timezone: "Europe/Amsterdam"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"

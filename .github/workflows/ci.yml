@@ -12,6 +12,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  rust_version: "1.96"
 
 jobs:
   test:
@@ -20,14 +21,13 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable]
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: ${{ env.rust_version }}
           components: rustfmt, clippy
 
       - name: Cache Rust dependencies
@@ -78,7 +78,7 @@ jobs:
           fail_ci_if_error: false
 
   check-msrv:
-    name: Check MSRV (1.85.0)
+    name: Check MSRV (defined version)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -86,7 +86,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.85.0
+          toolchain: ${{ env.rust_version }}
+          components: rustfmt
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2

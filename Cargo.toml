@@ -43,9 +43,11 @@ owo-colors = "4"
 anyhow    = "1"
 thiserror = "2"
 
-# Python AST parsing — published on crates.io; same version used by
-# pytest-language-server (bellini666/pytest-language-server 0.22.1)
-rustpython-parser = "0.4"
+# Python AST parsing — ruff's own parser, published on crates.io.
+# ruff_text_size provides TextRange / TextSize for source locations.
+ruff_python_parser = "0.0.11"
+ruff_python_ast    = "0.0.11"
+ruff_text_size     = "0.0.11"
 
 # Lock-free concurrent HashMap for the in-process module-probe cache
 dashmap = "6"
@@ -78,7 +80,7 @@ filetime = "0.2"
 # ---------------------------------------------------------------------------
 # JSON-RPC framing + message types — no tokio, crossbeam-based, ~769 LoC.
 # Actively maintained by the rust-analyzer team.
-lsp-server  = "0.7"
+lsp-server  = "0.8"
 # LSP protocol types (Diagnostic, Position, …)
 lsp-types   = "0.97"
 # Actor-model messaging between the main-loop and worker threads.
@@ -88,7 +90,7 @@ crossbeam-channel = "0.5"
 # Watch mode (step 26)
 # ---------------------------------------------------------------------------
 # Cross-platform filesystem event notifications.
-notify = "6"
+notify = "8"
 
 [profile.release]
 lto           = "thin"  # fat (lto=true) saves ~1-2 % binary size but costs 3-5 min; thin gives 90 % of the gain

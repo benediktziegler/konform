@@ -69,9 +69,17 @@ fn walk_python_files(path: &Path, exclude: &[String]) -> Vec<PathBuf> {
                 continue;
             }
         }
-        files.push(p);
+        files.push(strip_leading_curdir(p));
     }
     files
+}
+
+/// Strip a leading `./` component, matching ruff's relative-path reporting
+/// (e.g. `src/foo.py` instead of `./src/foo.py`).
+fn strip_leading_curdir(path: PathBuf) -> PathBuf {
+    path.strip_prefix(".")
+        .map(Path::to_path_buf)
+        .unwrap_or(path)
 }
 
 /// Print a unified diff between `original` and `modified` for `path` to stdout.
@@ -393,6 +401,7 @@ fn run_check(args: CheckArgs, isolated: bool) {
         &level_str,
         &config.select,
         &config.ignore,
+        probe.env_fingerprint(),
     );
 
     let changed_files = get_changed_files();

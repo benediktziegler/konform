@@ -156,7 +156,13 @@ impl FileCacheKey {
 // Settings hash — determines the cache file name
 // ---------------------------------------------------------------------------
 
-fn settings_hash(package_root: &Path, select: &[String], ignore: &[String], level: &str) -> u64 {
+fn settings_hash(
+    package_root: &Path,
+    select: &[String],
+    ignore: &[String],
+    level: &str,
+    env_fingerprint: u64,
+) -> u64 {
     let mut h = SeaHasher::new();
     for component in package_root.components() {
         format!("{component:?}").hash(&mut h);
@@ -168,6 +174,13 @@ fn settings_hash(package_root: &Path, select: &[String], ignore: &[String], leve
     sel.join(",").hash(&mut h);
     ign.join(",").hash(&mut h);
     level.hash(&mut h);
+    // Fold in the Python environment fingerprint (see
+    // `ModuleProbe::env_fingerprint`) so that installing/upgrading/removing
+    // a package routes checks to a fresh cache file instead of silently
+    // reusing module-existence results (e.g. KIS001) computed against a
+    // now-stale `sys.path`. The old file is simply orphaned and swept up by
+    // the existing 30-day eviction/pruning of unused cache directories.
+    env_fingerprint.hash(&mut h);
     h.finish()
 }
 
@@ -214,6 +227,12 @@ pub struct Cache {
 
 impl Cache {
     /// Open (or create fresh) a cache for the given package root + settings.
+    ///
+    /// `env_fingerprint` should be [`crate::module_probe::ModuleProbe::env_fingerprint`]
+    /// so that changes to the Python environment (installed packages) route
+    /// checks to a fresh cache file rather than replaying stale
+    /// module-existence results. Pass `0` when no probe-dependent rule is in
+    /// use (e.g. in tests).
     pub fn open(
         package_root: PathBuf,
         cache_root: &Path,
@@ -221,8 +240,9 @@ impl Cache {
         level: &str,
         select: &[String],
         ignore: &[String],
+        env_fingerprint: u64,
     ) -> Self {
-        let hash = settings_hash(&package_root, select, ignore, level);
+        let hash = settings_hash(&package_root, select, ignore, level, env_fingerprint);
         let path = cache_root.join(VERSION).join(format!("{hash:016x}"));
         let root_str = package_root.to_string_lossy().into_owned();
 
@@ -364,7 +384,83 @@ mod tests {
         let sel: Vec<String> = select.iter().map(|s| s.to_string()).collect();
         let ign: Vec<String> = ignore.iter().map(|s| s.to_string()).collect();
         let _ = init(tmp);
-        Cache::open(tmp.to_path_buf(), tmp, false, "error", &sel, &ign)
+        Cache::open(tmp.to_path_buf(), tmp, false, "error", &sel, &ign, 0)
+    }
+
+    // ── Environment fingerprint ───────────────────────────────────────────
+
+    #[test]
+    fn env_fingerprint_change_routes_to_a_different_cache_file() {
+        // Simulate a `pip install` / `uv sync` that changes the resolvable
+        // module set without touching any linted source file: same package
+        // root/select/ignore/level, different `env_fingerprint`.
+        let tmp = tempfile::tempdir().unwrap();
+        let sel: Vec<String> = vec![];
+        let ign: Vec<String> = vec![];
+
+        let hash_before = settings_hash(tmp.path(), &sel, &ign, "error", 111);
+        let hash_after = settings_hash(tmp.path(), &sel, &ign, "error", 222);
+
+        assert_ne!(
+            hash_before, hash_after,
+            "changing the env fingerprint must select a different cache file, \
+             otherwise stale module-existence results (e.g. KIS001) survive \
+             a dependency change"
+        );
+    }
+
+    #[test]
+    fn env_fingerprint_stable_for_unchanged_environment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sel: Vec<String> = vec![];
+        let ign: Vec<String> = vec![];
+
+        let hash_a = settings_hash(tmp.path(), &sel, &ign, "error", 42);
+        let hash_b = settings_hash(tmp.path(), &sel, &ign, "error", 42);
+
+        assert_eq!(hash_a, hash_b, "identical inputs must hash identically");
+    }
+
+    #[test]
+    fn cache_miss_after_env_fingerprint_change() {
+        // End-to-end: a violation cached under one env fingerprint must not
+        // be visible when the cache is reopened with a different one, even
+        // though the linted file itself never changed.
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("e.py");
+        std::fs::write(&file, "x = 1\n").unwrap();
+        let key = FileCacheKey::from_path(&file).unwrap();
+
+        let _ = init(tmp.path());
+        let mut cache = Cache::open(
+            tmp.path().to_path_buf(),
+            tmp.path(),
+            false,
+            "error",
+            &[],
+            &[],
+            111,
+        );
+        cache.set_linted(&file, &key, &[]);
+        cache.persist().unwrap();
+        assert!(
+            cache.get(&file, &key).is_some(),
+            "sanity: cache hit before env change"
+        );
+
+        let cache2 = Cache::open(
+            tmp.path().to_path_buf(),
+            tmp.path(),
+            false,
+            "error",
+            &[],
+            &[],
+            222,
+        );
+        assert!(
+            cache2.get(&file, &key).is_none(),
+            "a changed env fingerprint must not reuse the previous cache file"
+        );
     }
 
     // ── FileCacheKey ──────────────────────────────────────────────────────
@@ -539,7 +635,7 @@ mod tests {
             let _ = init(tmp.path());
             let sel: Vec<String> = vec![];
             let ign: Vec<String> = vec![];
-            let hash = settings_hash(tmp.path(), &sel, &ign, "error");
+            let hash = settings_hash(tmp.path(), &sel, &ign, "error", 0);
             let path = tmp.path().join(VERSION).join(format!("{hash:016x}"));
             let mut pkg = PackageCache {
                 package_root: tmp.path().to_string_lossy().into_owned(),

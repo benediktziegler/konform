@@ -80,6 +80,7 @@ pub fn run_check(
     if config.ignore_noqa {
         ctx.ignore_noqa = true;
     }
+    ctx.noqa_aliases = config.noqa_aliases.clone();
     let mut violations: Vec<Violation> = rules
         .iter()
         .filter(|r| config.is_enabled(r.code()))
@@ -132,6 +133,7 @@ pub fn run_fix(
     {
         let mut ctx = FileContext::from_source(input.path.to_path_buf(), src.clone());
         ctx.ignore_noqa = input.ignore_noqa || config.ignore_noqa;
+        ctx.noqa_aliases = config.noqa_aliases.clone();
         if let Some(fixed) = rule.fix(&ctx, config.rule_config(rule.category()))? {
             src = fixed;
             changed = true;
@@ -303,6 +305,48 @@ mod tests {
         assert!(
             violations.is_empty(),
             "category prefix KIS should suppress KIS001"
+        );
+    }
+
+    #[test]
+    fn noqa_alias_suppresses_violation() {
+        let rules = all_rules(probe(), None);
+        let p = path();
+        let input = CheckInput::new(&p, "from os.path import join  # noqa: IS001\n");
+        let mut config = Config::default();
+        config.noqa_aliases.insert("IS001".into(), "KIS001".into());
+        let violations = run_check(&input, &rules, &config);
+        assert!(
+            violations.is_empty(),
+            "noqa_aliases should let IS001 suppress KIS001"
+        );
+    }
+
+    #[test]
+    fn noqa_alias_category_suppresses_violation() {
+        let rules = all_rules(probe(), None);
+        let p = path();
+        let input = CheckInput::new(&p, "from os.path import join  # noqa: IS\n");
+        let mut config = Config::default();
+        config.noqa_aliases.insert("IS".into(), "KIS".into());
+        let violations = run_check(&input, &rules, &config);
+        assert!(
+            violations.is_empty(),
+            "category noqa_aliases should let IS suppress KIS001"
+        );
+    }
+
+    #[test]
+    fn noqa_alias_unrelated_code_does_not_suppress() {
+        let rules = all_rules(probe(), None);
+        let p = path();
+        let input = CheckInput::new(&p, "from os.path import join  # noqa: IS002\n");
+        let mut config = Config::default();
+        config.noqa_aliases.insert("IS001".into(), "KIS001".into());
+        let violations = run_check(&input, &rules, &config);
+        assert!(
+            !violations.is_empty(),
+            "unrelated alias should not suppress KIS001"
         );
     }
 }

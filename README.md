@@ -94,6 +94,10 @@ exceptions = [
     "mycompany.compat",
 ]
 level = "error"
+unresolved_level = "warning"   # "warning" (default) | "error" | "off"
+                                # Used when a package isn't installed in this
+                                # environment, so KIS001 can't tell whether the
+                                # imported name is a module or not.
 
 # ── KPT — user-defined patterns ───────────────────────────────────────────
 [tool.konform.KPT]

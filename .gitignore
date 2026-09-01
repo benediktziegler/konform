@@ -20,6 +20,10 @@ Thumbs.db
 tmp/
 *.log
 *.tmp
+dist/
 
 # Konform specific cache
 .konform_cache/
+
+# Python
+.coverage

@@ -155,7 +155,10 @@ impl ModuleProbe {
             }
             for alias in &node.names {
                 // The local name after the import (asname if present, else name).
-                let local = alias.asname.as_deref().unwrap_or_else(|| alias.name.as_str());
+                let local = alias
+                    .asname
+                    .as_deref()
+                    .unwrap_or_else(|| alias.name.as_str());
                 if local == attr_name {
                     // Recursively check whether the original symbol in the
                     // source module is itself a module.  The sentinel in

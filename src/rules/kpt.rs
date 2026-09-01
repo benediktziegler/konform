@@ -272,7 +272,8 @@ impl Rule for KptRule {
 
                         // noqa is checked against the first line of the match.
                         let first_line = ctx.lines.get(line_0).map(String::as_str).unwrap_or("");
-                        if ctx.ignore_noqa || !has_noqa(first_line, &pattern.id) {
+                        if ctx.ignore_noqa || !has_noqa(first_line, &pattern.id, &ctx.noqa_aliases)
+                        {
                             let matched_str = m.as_str();
                             let (message, help) = pattern
                                 .sub_rules
@@ -304,7 +305,7 @@ impl Rule for KptRule {
                         .filter_map(|re| re.find(line))
                         .max_by_key(|m| m.end() - m.start())
                     {
-                        if ctx.ignore_noqa || !has_noqa(line, &pattern.id) {
+                        if ctx.ignore_noqa || !has_noqa(line, &pattern.id, &ctx.noqa_aliases) {
                             // Apply sub-rules in declaration order; first match wins
                             // and overrides the parent message and help for this line.
                             let (message, help) = pattern

@@ -51,6 +51,17 @@ pub struct Config {
     /// or from `--per-file-ignores` CLI flags.
     #[serde(skip)]
     pub per_file_ignores: HashMap<String, Vec<String>>,
+
+    /// Alias `# noqa` codes to canonical rule codes, to support migrating
+    /// away from an old rule/category name without breaking existing
+    /// suppression comments.
+    ///
+    /// Populated from `[tool.konform] noqa_aliases = {"IS001" = "KIS001"}`.
+    /// A `# noqa: IS001` comment then suppresses `KIS001` violations.
+    /// Aliases may also target a category prefix (e.g. `"IS" = "KIS"`) to
+    /// alias an entire category at once.
+    #[serde(skip)]
+    pub noqa_aliases: HashMap<String, String>,
 }
 
 impl Default for Config {
@@ -66,6 +77,7 @@ impl Default for Config {
             config_dir: None,
             ignore_noqa: false,
             per_file_ignores: HashMap::new(),
+            noqa_aliases: HashMap::new(),
         }
     }
 }
@@ -214,6 +226,15 @@ pub fn load_config(start: Option<&Path>, explicit_path: Option<&Path>) -> Config
         }
     }
 
+    // ── noqa aliases ──────────────────────────────────────────────────────
+    if let Some(table) = section.get("noqa_aliases").and_then(|v| v.as_table()) {
+        for (alias, target) in table {
+            if let Some(target) = target.as_str() {
+                cfg.noqa_aliases.insert(alias.clone(), target.to_owned());
+            }
+        }
+    }
+
     // ── Global defaults ────────────────────────────────────────────────────
     if let Some(v) = section.get("level").and_then(|v| v.as_str()) {
         if let Ok(l) = v.parse::<Level>() {
@@ -237,7 +258,7 @@ pub fn load_config(start: Option<&Path>, explicit_path: Option<&Path>) -> Config
     // config blob (KIS, KPT, …).  Scalar keys are the global settings above.
     if let toml::Value::Table(table) = &section {
         for (key, val) in table {
-            if key == "per_file_ignores" {
+            if key == "per_file_ignores" || key == "noqa_aliases" {
                 continue; // Already parsed above.
             }
             if matches!(val, toml::Value::Table(_)) {
@@ -424,6 +445,39 @@ mod tests {
         assert!(
             !cfg.rules.contains_key("per_file_ignores"),
             "per_file_ignores must not be in the rules map"
+        );
+    }
+
+    #[test]
+    fn noqa_aliases_parsed_from_pyproject() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pyproject = tmp.path().join("pyproject.toml");
+        std::fs::write(
+            &pyproject,
+            "[tool.konform]\nnoqa_aliases = {\"IS001\" = \"KIS001\", \"IS\" = \"KIS\"}",
+        )
+        .unwrap();
+        let cfg = load_config(Some(tmp.path()), None);
+        assert_eq!(
+            cfg.noqa_aliases.get("IS001").map(String::as_str),
+            Some("KIS001")
+        );
+        assert_eq!(cfg.noqa_aliases.get("IS").map(String::as_str), Some("KIS"));
+    }
+
+    #[test]
+    fn noqa_aliases_not_inserted_into_rules_map() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pyproject = tmp.path().join("pyproject.toml");
+        std::fs::write(
+            &pyproject,
+            "[tool.konform]\nnoqa_aliases = {\"IS001\" = \"KIS001\"}",
+        )
+        .unwrap();
+        let cfg = load_config(Some(tmp.path()), None);
+        assert!(
+            !cfg.rules.contains_key("noqa_aliases"),
+            "noqa_aliases must not be in the rules map"
         );
     }
 }

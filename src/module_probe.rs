@@ -10,6 +10,8 @@
 use dashmap::DashMap;
 use ruff_python_ast::Stmt;
 use ruff_python_parser::parse_module;
+use seahash::SeaHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -32,6 +34,38 @@ impl ModuleProbe {
             sys_path,
             cache: DashMap::new(),
         }
+    }
+
+    /// Fingerprint of the Python environment this probe searches.
+    ///
+    /// Hashes each `sys.path` directory's own mtime (not a recursive scan).
+    /// Installing, upgrading, or removing a package touches the mtime of the
+    /// directory that contains it (site-packages, a namespace-package root,
+    /// etc.), so this changes whenever the resolvable module set changes —
+    /// even though no *source file being linted* was touched.
+    ///
+    /// Callers should fold this into any on-disk cache key that depends on
+    /// [`ModuleProbe::is_module`] results (e.g. KIS001 violations), otherwise
+    /// a cache keyed purely on source-file mtime will keep serving stale
+    /// results after a `pip install` / `uv sync` until the file itself is
+    /// edited.
+    pub fn env_fingerprint(&self) -> u64 {
+        let mut h = SeaHasher::new();
+        for dir in &self.sys_path {
+            format!("{dir:?}").hash(&mut h);
+            match std::fs::metadata(dir) {
+                Ok(meta) => {
+                    let mtime = filetime::FileTime::from_last_modification_time(&meta);
+                    mtime.seconds().hash(&mut h);
+                    mtime.nanoseconds().hash(&mut h);
+                }
+                // Missing/unreadable sys.path entries still contribute a
+                // stable (but distinct) value so the fingerprint changes if
+                // the entry starts or stops existing.
+                Err(_) => "missing".hash(&mut h),
+            }
+        }
+        h.finish()
     }
 
     fn get_sys_path(python: &Path) -> Option<Vec<PathBuf>> {
@@ -303,5 +337,32 @@ mod tests {
         // Neither package has x as a real file; cycle guard prevents infinite loop.
         assert!(!probe.is_module("a", "x"));
         assert!(!probe.is_module("b", "x"));
+    }
+
+    // ── env_fingerprint ────────────────────────────────────────────
+
+    #[test]
+    fn env_fingerprint_changes_when_a_sys_path_dir_is_touched() {
+        let tmp = TempDir::new().unwrap();
+        let probe = probe_for(tmp.path());
+        let before = probe.env_fingerprint();
+
+        // Simulate a package install/removal: bump the sys.path root's mtime.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let new_mtime = filetime::FileTime::from_unix_time(9_999_999, 0);
+        filetime::set_file_mtime(tmp.path(), new_mtime).unwrap();
+
+        let after = probe.env_fingerprint();
+        assert_ne!(
+            before, after,
+            "fingerprint must change when a sys.path directory's mtime changes"
+        );
+    }
+
+    #[test]
+    fn env_fingerprint_stable_when_nothing_changes() {
+        let tmp = TempDir::new().unwrap();
+        let probe = probe_for(tmp.path());
+        assert_eq!(probe.env_fingerprint(), probe.env_fingerprint());
     }
 }

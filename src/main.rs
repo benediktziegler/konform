@@ -393,6 +393,7 @@ fn run_check(args: CheckArgs, isolated: bool) {
         &level_str,
         &config.select,
         &config.ignore,
+        probe.env_fingerprint(),
     );
 
     let changed_files = get_changed_files();

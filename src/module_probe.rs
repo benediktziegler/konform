@@ -37,6 +37,12 @@ pub enum ModuleCheck {
 pub struct ModuleProbe {
     /// Ordered list of directories to search, from `python3 -c "import sys,json; print(json.dumps(sys.path))"`.
     sys_path: Vec<PathBuf>,
+    /// Names of modules that are compiled into the interpreter or otherwise
+    /// part of the standard library, and therefore have no corresponding
+    /// file/directory anywhere in `sys_path` (e.g. `itertools`, `sys`,
+    /// `_thread`). Sourced from `sys.stdlib_module_names` (falling back to
+    /// `sys.builtin_module_names` on Python < 3.10).
+    builtin_modules: HashSet<String>,
     /// In-process result cache.
     cache: DashMap<(String, String), bool>,
     /// Caches whether a root package name exists anywhere in `sys_path`.
@@ -50,8 +56,10 @@ impl ModuleProbe {
     /// searches the same environment that owns the files being checked.
     pub fn new(python: &Path) -> Self {
         let sys_path = Self::get_sys_path(python).unwrap_or_default();
+        let builtin_modules = Self::get_builtin_modules(python).unwrap_or_default();
         Self {
             sys_path,
+            builtin_modules,
             cache: DashMap::new(),
             root_cache: DashMap::new(),
         }
@@ -101,6 +109,32 @@ impl ModuleProbe {
         let paths: Vec<String> = serde_json::from_str(stdout.trim()).ok()?;
         let cwd = std::env::current_dir().ok();
         Some(Self::resolve_sys_path(paths, cwd.as_deref()))
+    }
+
+    /// Ask the interpreter for the set of standard-library module names that
+    /// have no discoverable file on disk (built into the interpreter binary,
+    /// e.g. `itertools`, `sys`, `_thread`, `_abc`).
+    ///
+    /// `sys.stdlib_module_names` (Python 3.10+) covers the full standard
+    /// library, pure-Python and compiled alike. On older interpreters it
+    /// falls back to `sys.builtin_module_names`, which only covers modules
+    /// statically linked into the executable but is present on all versions.
+    fn get_builtin_modules(python: &Path) -> Option<HashSet<String>> {
+        let output = Command::new(python)
+            .args([
+                "-c",
+                "import json,sys; \
+                 names = getattr(sys, 'stdlib_module_names', None) or sys.builtin_module_names; \
+                 print(json.dumps(list(names)))",
+            ])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8(output.stdout).ok()?;
+        let names: Vec<String> = serde_json::from_str(stdout.trim()).ok()?;
+        Some(names.into_iter().collect())
     }
 
     /// Resolve the raw `sys.path` strings returned by the interpreter into
@@ -192,24 +226,25 @@ impl ModuleProbe {
         if let Some(v) = self.root_cache.get(root) {
             return *v;
         }
-        let found = self.sys_path.iter().any(|base| {
-            base.join(root).is_dir()
-                || base.join(format!("{root}.py")).exists()
-                || std::fs::read_dir(base).is_ok_and(|entries| {
-                    entries.flatten().any(|entry| {
-                        let fname = entry.file_name();
-                        let fname_str = fname.to_string_lossy();
-                        fname_str.starts_with(&format!("{root}.")) && {
-                            let ext = entry
-                                .path()
-                                .extension()
-                                .map(|e| e.to_string_lossy().into_owned())
-                                .unwrap_or_default();
-                            matches!(ext.as_str(), "so" | "pyd" | "dylib")
-                        }
+        let found = self.builtin_modules.contains(root)
+            || self.sys_path.iter().any(|base| {
+                base.join(root).is_dir()
+                    || base.join(format!("{root}.py")).exists()
+                    || std::fs::read_dir(base).is_ok_and(|entries| {
+                        entries.flatten().any(|entry| {
+                            let fname = entry.file_name();
+                            let fname_str = fname.to_string_lossy();
+                            fname_str.starts_with(&format!("{root}.")) && {
+                                let ext = entry
+                                    .path()
+                                    .extension()
+                                    .map(|e| e.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                matches!(ext.as_str(), "so" | "pyd" | "dylib")
+                            }
+                        })
                     })
-                })
-        });
+            });
         self.root_cache.insert(root.to_owned(), found);
         found
     }
@@ -388,6 +423,19 @@ mod tests {
     fn probe_for(root: &std::path::Path) -> ModuleProbe {
         ModuleProbe {
             sys_path: vec![root.to_path_buf()],
+            builtin_modules: HashSet::new(),
+            cache: DashMap::new(),
+            root_cache: DashMap::new(),
+        }
+    }
+
+    /// Build a `ModuleProbe` whose `sys_path` is exactly one directory and
+    /// with a fixed set of builtin/stdlib module names, without spawning a
+    /// real Python interpreter.
+    fn probe_with_builtins(root: &std::path::Path, builtin_modules: &[&str]) -> ModuleProbe {
+        ModuleProbe {
+            sys_path: vec![root.to_path_buf()],
+            builtin_modules: builtin_modules.iter().map(|s| s.to_string()).collect(),
             cache: DashMap::new(),
             root_cache: DashMap::new(),
         }
@@ -509,6 +557,29 @@ mod tests {
     }
 
     #[test]
+    fn builtin_stdlib_module_recognised_as_root_package() {
+        // itertools (and other compiled-in stdlib modules) have no file or
+        // directory anywhere on sys.path -- they only exist in
+        // sys.stdlib_module_names / sys.builtin_module_names. Without
+        // consulting that list, root_package_exists would wrongly report
+        // "not installed" and check() would return Unknown instead of
+        // correctly flagging `chain` as not-a-module.
+        let tmp = TempDir::new().unwrap();
+        let probe = probe_with_builtins(tmp.path(), &["itertools"]);
+        assert_eq!(probe.check("itertools", "chain"), ModuleCheck::NotModule);
+    }
+
+    #[test]
+    fn non_builtin_missing_package_still_unknown() {
+        let tmp = TempDir::new().unwrap();
+        let probe = probe_with_builtins(tmp.path(), &["itertools"]);
+        assert_eq!(
+            probe.check("not_installed_pkg", "thing"),
+            ModuleCheck::Unknown
+        );
+    }
+
+    #[test]
     fn check_returns_unknown_when_package_not_installed() {
         let tmp = TempDir::new().unwrap();
         let probe = probe_for(tmp.path());
@@ -627,6 +698,7 @@ mod tests {
         let sys_path = ModuleProbe::resolve_sys_path(vec![String::new()], Some(tmp.path()));
         let probe = ModuleProbe {
             sys_path,
+            builtin_modules: HashSet::new(),
             cache: DashMap::new(),
             root_cache: DashMap::new(),
         };
@@ -654,6 +726,7 @@ mod tests {
         let sys_path = ModuleProbe::resolve_sys_path(vec![String::new()], Some(tmp.path()));
         let probe = ModuleProbe {
             sys_path,
+            builtin_modules: HashSet::new(),
             cache: DashMap::new(),
             root_cache: DashMap::new(),
         };

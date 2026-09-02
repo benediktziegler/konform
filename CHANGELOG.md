@@ -1,16 +1,24 @@
-# Changelog
+## 0.1.0 (2026-09-02)
 
-<!-- changelog managed by commitizen (cz bump) -->
+### Feat
 
-## [0.1.0] — Initial release
+- **config**: add aliases for noqa rule codes
+- **kis001**: add unresolved import warning level config
+- switch Python AST parser from rustpython-parser to ruff_python_parser
+- add Zed editor extension
+- add CLI, LSP server and main entry point
+- add KPT user-defined pattern-matching rule
+- add rule engine and KIS001 module-only import checker
+- add config loader and git changed-file detection
+- add core types, theme, module probe and file cache
 
-### Features
+### Fix
 
-- Rust-based import checker (IS001: module-only imports)
-- Filesystem-based module probe — no Python execution at check time
-- SHA-256 file-level result cache (`.konform_cache/`)
-- Auto-fix mode (`--fix`)
-- Git-aware changed-file filtering
-- Zuul `zuul_return.yaml` output for CI integration
-- Configurable via `[tool.konform]` in `pyproject.toml` or `konform.toml`
-- Cross-compiled wheels for Linux x86_64/aarch64, Windows x86_64, macOS x86_64/aarch64
+- update lsp-server Response field for 0.10.0
+- normalize walked python file paths
+- **module_probe**: handle cwd sys.path and cache race
+- improve cache invalidation
+
+### Refactor
+
+- **main**: remove python wrapper and migrate to pure Rust binary

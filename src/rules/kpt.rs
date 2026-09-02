@@ -409,19 +409,24 @@ impl Rule for KptRule {
   The first sub-rule whose pattern(s) match the already-flagged line wins:
 
     [[rules]]
-    id      = "CTFW001"
+    id      = "KPT901"
     message = "os.environ found — discouraged in test code."
     pattern = 'os\.environ'
     help    = "Contact the project maintainers for guidance."
+    sub_rules = [
+      {
+        # pattern accepts a single string or a list; any match fires the sub-rule
+        pattern = ['os\.environ\.get\(', 'os\.environ\['],
+        message = "os.environ — special_key access detected.",
+        help    = "Use the 'shared_fixture' fixture instead.",
+      },
+    ]
 
-    [[rules.sub_rules]]
-    # pattern accepts a single string or a list; any match fires the sub-rule
-    pattern = ['os\.environ\.get\(', 'os\.environ\[']
-    message = "os.environ — baseline_handle access detected."
-    help    = "Use the 'core_baseline' fixture instead."
+  If you use [[rules.sub_rules]] instead, each sub-rule belongs to the
+  most recently declared [[rules]] block.
 
   Suppress per-line:
-    os.environ.get("X")   # noqa: CTFW001
+    os.environ.get("X")   # noqa: KPT901
     os.environ.get("X")   # noqa: KPT      (silences all KPT rules on this line)
 "#
         .to_owned()
@@ -1151,16 +1156,69 @@ message = "Generic os.environ hit."
 pattern = 'os\.environ'
 
 [[rules.sub_rules]]
-pattern = 'baseline_handle'
-message = "baseline_handle specific hit."
+pattern = 'special_key'
+message = "special_key specific hit."
 "#,
         );
-        let v = rule().check(&ctx("os.environ.get('baseline_handle')\n"), &cfg);
+        let v = rule().check(&ctx("os.environ.get('special_key')\n"), &cfg);
         assert_eq!(v.len(), 1);
         assert!(
-            v[0].message.contains("baseline_handle specific hit."),
+            v[0].message.contains("special_key specific hit."),
             "sub-rule message should win: {:?}",
             v[0].message
+        );
+    }
+
+    #[test]
+    fn inline_sub_rules_field_form_is_bound_to_its_rule() {
+        let cfg = cfg_with_rules(
+            r#"
+[[rules]]
+id      = "KPT001"
+message = "Generic hit."
+pattern = 'os\.environ'
+help    = "Generic help."
+sub_rules = [
+  { pattern = ['special_key'], message = "Specific hit.", help = "Use shared_fixture fixture." }
+]
+"#,
+        );
+        let v = rule().check(&ctx("os.environ['special_key']\n"), &cfg);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].message.contains("Specific hit."));
+        assert_eq!(v[0].help.as_deref(), Some("Use shared_fixture fixture."));
+    }
+
+    #[test]
+    fn sub_rules_stay_scoped_to_declaring_rule() {
+        let cfg = cfg_with_rules(
+            r#"
+[[rules]]
+id      = "KPT001"
+message = "First generic."
+pattern = 'foo'
+
+[[rules.sub_rules]]
+pattern = 'special_key'
+message = "First specific."
+
+[[rules]]
+id      = "KPT002"
+message = "Second generic."
+pattern = 'foo'
+"#,
+        );
+
+        let v = rule().check(&ctx("foo special_key\n"), &cfg);
+        assert_eq!(v.len(), 2);
+
+        let first = v.iter().find(|x| x.rule == "KPT001").unwrap();
+        assert!(first.message.contains("First specific."));
+
+        let second = v.iter().find(|x| x.rule == "KPT002").unwrap();
+        assert!(
+            second.message.contains("Second generic."),
+            "sub-rules from KPT001 must not affect KPT002"
         );
     }
 
@@ -1175,14 +1233,14 @@ pattern = 'os\.environ'
 help    = "Generic help."
 
 [[rules.sub_rules]]
-pattern = 'baseline_handle'
+pattern = 'special_key'
 message = "Specific hit."
-help    = "Use core_baseline fixture."
+help    = "Use shared_fixture fixture."
 "#,
         );
-        let v = rule().check(&ctx("os.environ['baseline_handle']\n"), &cfg);
+        let v = rule().check(&ctx("os.environ['special_key']\n"), &cfg);
         assert_eq!(v.len(), 1);
-        assert_eq!(v[0].help.as_deref(), Some("Use core_baseline fixture."));
+        assert_eq!(v[0].help.as_deref(), Some("Use shared_fixture fixture."));
     }
 
     #[test]
@@ -1196,8 +1254,8 @@ pattern = 'os\.environ'
 help    = "Parent help."
 
 [[rules.sub_rules]]
-pattern = 'baseline_handle'
-message = "baseline_handle specific hit."
+pattern = 'special_key'
+message = "special_key specific hit."
 help    = "Sub-rule help."
 "#,
         );
@@ -1222,12 +1280,12 @@ message = "Generic hit."
 pattern = 'os\.environ'
 
 [[rules.sub_rules]]
-pattern = ['baseline_handle', 'some_other_key']
+pattern = ['special_key', 'some_other_key']
 message = "Specific key hit."
 "#,
         );
         // First pattern in the list matches.
-        let v1 = rule().check(&ctx("os.environ.get('baseline_handle')\n"), &cfg);
+        let v1 = rule().check(&ctx("os.environ.get('special_key')\n"), &cfg);
         assert!(
             v1[0].message.contains("Specific key hit."),
             "first list pattern should fire"
@@ -1256,16 +1314,16 @@ message = "Generic hit."
 pattern = 'os\.environ'
 
 [[rules.sub_rules]]
-pattern = 'baseline'
+pattern = 'special'
 message = "First sub-rule."
 
 [[rules.sub_rules]]
-pattern = 'baseline_handle'
+pattern = 'special_key'
 message = "Second sub-rule."
 "#,
         );
-        // 'baseline' matches before 'baseline_handle' is even tested.
-        let v = rule().check(&ctx("os.environ.get('baseline_handle')\n"), &cfg);
+        // 'special' matches before 'special_key' is even tested.
+        let v = rule().check(&ctx("os.environ.get('special_key')\n"), &cfg);
         assert_eq!(v.len(), 1);
         assert!(
             v[0].message.contains("First sub-rule."),
@@ -1301,15 +1359,15 @@ message = "Should be skipped."
         std::fs::write(
             &pattern_file,
             r#"rules:
-  - id: CTFW001
+  - id: KPT901
     message: "os.environ found."
     pattern: 'os\.environ'
     help: "Contact maintainers."
     sub_rules:
       - pattern:
-          - 'baseline_handle'
-        message: "baseline_handle access detected."
-        help: "Use the core_baseline fixture."
+          - 'special_key'
+        message: "special_key access detected."
+        help: "Use the shared_fixture fixture."
 "#,
         )
         .unwrap();
@@ -1317,15 +1375,18 @@ message = "Should be skipped."
         let rule_inst = KptRule::new(Some(tmp.path().to_path_buf()));
         let cfg = toml::Value::Table(toml::map::Map::new());
 
-        // Sub-rule message for baseline_handle access.
-        let v = rule_inst.check(&ctx("os.environ.get('baseline_handle')\n"), &cfg);
+        // Sub-rule message for special_key access.
+        let v = rule_inst.check(&ctx("os.environ.get('special_key')\n"), &cfg);
         assert_eq!(v.len(), 1);
         assert!(
-            v[0].message.contains("baseline_handle access detected."),
+            v[0].message.contains("special_key access detected."),
             "YAML sub-rule should fire: {:?}",
             v[0].message
         );
-        assert_eq!(v[0].help.as_deref(), Some("Use the core_baseline fixture."));
+        assert_eq!(
+            v[0].help.as_deref(),
+            Some("Use the shared_fixture fixture.")
+        );
 
         // Parent message for an unrelated environ access.
         let v2 = rule_inst.check(&ctx("os.environ.get('OTHER')\n"), &cfg);

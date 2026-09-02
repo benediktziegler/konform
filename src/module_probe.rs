@@ -114,8 +114,13 @@ impl ModuleProbe {
     /// reachable via cwd (e.g. namespace packages rooted at the repo root,
     /// such as a `tests/mocks` directory with no `__init__.py`) are never
     /// found and get incorrectly flagged as "not a module".
+    ///
+    /// Also include `<cwd>/src` when present. Many projects use a "src layout"
+    /// (packages live under `src/` but are not installed into site-packages
+    /// during local development). Without this, valid local imports can be
+    /// misclassified as non-modules.
     fn resolve_sys_path(paths: Vec<String>, cwd: Option<&Path>) -> Vec<PathBuf> {
-        paths
+        let mut resolved: Vec<PathBuf> = paths
             .into_iter()
             .filter_map(|p| {
                 if p.is_empty() {
@@ -124,7 +129,16 @@ impl ModuleProbe {
                     Some(PathBuf::from(p))
                 }
             })
-            .collect()
+            .collect();
+
+        if let Some(cwd) = cwd {
+            let src = cwd.join("src");
+            if src.is_dir() && !resolved.iter().any(|p| p == &src) {
+                resolved.push(src);
+            }
+        }
+
+        resolved
     }
 
     /// Returns `true` iff `attr_name` inside `module_name` is itself a module.
@@ -241,8 +255,10 @@ impl ModuleProbe {
         for base in &self.sys_path {
             let parent_dir = base.join(&module_dir);
 
-            // 1. Package directory: parent_dir/attr_name/__init__.py
-            if parent_dir.join(attr_name).join("__init__.py").exists() {
+            // 1. Package directory: parent_dir/attr_name
+            //    Supports both regular packages (`__init__.py`) and implicit
+            //    namespace packages (directory exists without `__init__.py`).
+            if parent_dir.join(attr_name).is_dir() {
                 return true;
             }
 
@@ -411,6 +427,29 @@ mod tests {
     }
 
     #[test]
+    fn namespace_subpackage_directory_without_init_is_module() {
+        // `from acme.framework.pytest.plugins.xcp import plugin` is valid when
+        // `.../xcp/plugin/` exists as an implicit namespace package (no
+        // `plugin/__init__.py`).
+        let tmp = TempDir::new().unwrap();
+        let xcp_pkg = tmp
+            .path()
+            .join("acme")
+            .join("framework")
+            .join("pytest")
+            .join("plugins")
+            .join("xcp");
+        fs::create_dir_all(xcp_pkg.join("plugin")).unwrap();
+
+        let probe = probe_for(tmp.path());
+        assert!(probe.is_module("acme.framework.pytest.plugins.xcp", "plugin"));
+        assert_eq!(
+            probe.check("acme.framework.pytest.plugins.xcp", "plugin"),
+            ModuleCheck::Module
+        );
+    }
+
+    #[test]
     fn init_reexport_from_sibling_package() {
         // Simulate:
         //   pub/__init__.py  →  from impl_pkg import networking
@@ -554,6 +593,25 @@ mod tests {
     }
 
     #[test]
+    fn resolve_sys_path_adds_cwd_src_for_src_layout_projects() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        fs::create_dir_all(cwd.join("src")).unwrap();
+
+        let raw = vec!["".to_owned(), "/usr/lib/python3.10".to_owned()];
+        let resolved = ModuleProbe::resolve_sys_path(raw, Some(cwd));
+
+        assert_eq!(
+            resolved,
+            vec![
+                cwd.to_path_buf(),
+                PathBuf::from("/usr/lib/python3.10"),
+                cwd.join("src"),
+            ]
+        );
+    }
+
+    #[test]
     fn cwd_namespace_package_found_via_resolved_empty_path_entry() {
         // Reproduces the real bug: `tests/mocks/mock_adb_server.py` is only
         // reachable through the cwd ("") entry of sys.path because
@@ -573,6 +631,38 @@ mod tests {
             root_cache: DashMap::new(),
         };
         assert!(probe.is_module("tests.mocks", "mock_adb_server"));
+    }
+
+    #[test]
+    fn src_layout_project_module_is_found() {
+        // Reproduces a src-layout false positive:
+        //   from acme.framework.pytest.plugins.xcp import plugin
+        // where code lives under src/acme/... and is not installed.
+        let tmp = TempDir::new().unwrap();
+        let xcp_dir = tmp
+            .path()
+            .join("src")
+            .join("acme")
+            .join("framework")
+            .join("pytest")
+            .join("plugins")
+            .join("xcp");
+        fs::create_dir_all(&xcp_dir).unwrap();
+        fs::write(xcp_dir.join("__init__.py"), "").unwrap();
+        fs::write(xcp_dir.join("plugin.py"), "").unwrap();
+
+        let sys_path = ModuleProbe::resolve_sys_path(vec![String::new()], Some(tmp.path()));
+        let probe = ModuleProbe {
+            sys_path,
+            cache: DashMap::new(),
+            root_cache: DashMap::new(),
+        };
+
+        assert!(probe.is_module("acme.framework.pytest.plugins.xcp", "plugin"));
+        assert_eq!(
+            probe.check("acme.framework.pytest.plugins.xcp", "plugin"),
+            ModuleCheck::Module
+        );
     }
 
     // ── concurrency ─────────────────────────────────────────────────

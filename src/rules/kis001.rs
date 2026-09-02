@@ -1239,6 +1239,50 @@ mod tests {
     }
 
     #[test]
+    fn typing_excepted_by_default() {
+        // Google Style Guide §2.2 exemption: typing symbols used for static
+        // analysis / type checking are allowed via `from typing import X`.
+        let violations = rule().check(&ctx("from typing import Optional\n"), &empty_cfg());
+        assert!(
+            violations.is_empty(),
+            "typing should be excepted by default"
+        );
+    }
+
+    #[test]
+    fn typing_extensions_excepted_by_default() {
+        let violations = rule().check(
+            &ctx("from typing_extensions import TypedDict\n"),
+            &empty_cfg(),
+        );
+        assert!(
+            violations.is_empty(),
+            "typing_extensions should be excepted by default"
+        );
+    }
+
+    #[test]
+    fn collections_abc_excepted_by_default() {
+        let violations = rule().check(&ctx("from collections.abc import Mapping\n"), &empty_cfg());
+        assert!(
+            violations.is_empty(),
+            "collections.abc should be excepted by default"
+        );
+    }
+
+    #[test]
+    fn plain_collections_not_excepted_by_default() {
+        // Only `collections.abc` is exempted per the Google Style Guide --
+        // `collections` itself (e.g. `defaultdict`, a class) still requires
+        // module-only imports.
+        let violations = rule().check(&ctx("from collections import defaultdict\n"), &empty_cfg());
+        assert!(
+            !violations.is_empty(),
+            "plain collections should not be excepted by default"
+        );
+    }
+
+    #[test]
     fn noqa_suppresses() {
         let violations = rule().check(
             &ctx("from os.path import join  # noqa: KIS001\n"),

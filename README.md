@@ -111,7 +111,20 @@ message = "Use the project logger instead of bare print()."
 pattern = '^\s*print\s*\('
 files   = ["src/**/*.py"]
 level   = "warning"
+
+# Sub-rules are attached to this rule entry. This inline form makes the
+# parent/child relation explicit and avoids table-order confusion.
+sub_rules = [
+  {
+    pattern = ['print\(.*password', 'print\(.*secret'],
+    message = "Never print credentials.",
+    help = "Use redaction helpers before logging.",
+  },
+]
 ```
+
+When using `[[tool.konform.KPT.rules.sub_rules]]`, TOML binds each sub-rule to
+_the most recently declared_ `[[tool.konform.KPT.rules]]` entry.
 
 ### Pattern files
 

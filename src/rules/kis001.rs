@@ -182,6 +182,21 @@ struct ParsedImport {
     /// Tracked for future use (e.g. PT rules may treat TC imports differently).
     #[allow(dead_code)]
     in_type_checking: bool,
+    /// True when this import sits directly in the module's top-level body
+    /// (not nested inside an `if`/`def`/`class` block). New imports must
+    /// only ever be inserted at this level.
+    is_top_level: bool,
+    /// Identifies the enclosing compound-statement body this import lives
+    /// in: the byte offset of the first statement in that body. All sibling
+    /// imports sharing the same body share this id. Meaningless (0) for
+    /// top-level imports, which are never at risk of leaving an empty block.
+    block_id: u32,
+    /// Total number of statements (of any kind) in the enclosing body
+    /// identified by `block_id`. Used to detect when every statement in a
+    /// block turns out to be an import that gets fully removed, in which
+    /// case the block would otherwise end up empty (invalid Python) and one
+    /// line must be replaced with `pass` instead of being blanked.
+    block_size: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +206,12 @@ struct FixInfo {
     #[allow(dead_code)]
     old_local: String,
     new_qualified: String,
+    /// The name this fix's `import_stmt` binds into the file's namespace
+    /// (e.g. `plugin` for `from parent import plugin`, or `os` for
+    /// `import os.path`). If this name is already assigned/bound elsewhere
+    /// in the file, applying the fix would silently shadow it, so callers
+    /// must treat that case as unsafe to auto-fix.
+    new_bound_name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -223,19 +244,30 @@ fn offset_to_line_col(line_starts: &[u32], offset: u32) -> (usize, usize) {
 // AST-based import collection
 // ---------------------------------------------------------------------------
 
+/// Parse `source` and return its top-level statement list, or an empty
+/// list on a parse error. A small shared helper for the several places that
+/// need the raw AST rather than the `(imports, exports)` pair `parse_ast`
+/// extracts from it.
+fn parse_module_stmts(source: &str) -> Vec<Stmt> {
+    match parse_module(source) {
+        Ok(parsed) => parsed.into_suite().into_iter().collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Parse `source` once and extract all absolute `from X import Y` statements
 /// together with the module's `__all__` exports.
 ///
 /// Returns `(imports, all_exports)`.  On parse error both collections are
 /// empty so the caller silently skips the file.
 fn parse_ast(source: &str) -> (Vec<ParsedImport>, HashSet<String>) {
-    let stmts = match parse_module(source) {
-        Ok(parsed) => parsed.into_suite(),
-        Err(_) => return (vec![], HashSet::new()),
-    };
+    let stmts = parse_module_stmts(source);
+    if stmts.is_empty() {
+        return (vec![], HashSet::new());
+    }
     let line_starts = build_line_starts(source);
     let mut imports = Vec::new();
-    collect_imports(&stmts, false, &line_starts, &mut imports);
+    collect_imports(&stmts, false, false, &line_starts, &mut imports);
     let exports = collect_all_exports(&stmts);
     (imports, exports)
 }
@@ -255,9 +287,19 @@ fn is_type_checking_guard(expr: &Expr) -> bool {
 fn collect_imports(
     stmts: &[Stmt],
     in_type_checking: bool,
+    // True when `stmts` is itself the body of a compound statement (if/def/
+    // class/etc.) rather than the module's top-level statement list.
+    nested: bool,
     line_starts: &[u32],
     out: &mut Vec<ParsedImport>,
 ) {
+    // Identifies this exact body (shared by every statement directly in
+    // it) so fixes can later tell whether *all* statements in the body are
+    // imports that end up fully removed, which would otherwise leave an
+    // empty (invalid) indented block.
+    let block_id = stmts.first().map_or(0, |s| u32::from(s.range().start()));
+    let block_size = stmts.len();
+
     for stmt in stmts {
         match stmt {
             // ── from X import Y ──────────────────────────────────────────
@@ -304,16 +346,25 @@ fn collect_imports(
                     end_col,
                     col,
                     in_type_checking,
+                    is_top_level: !nested,
+                    block_id,
+                    block_size,
                 });
             }
 
             // ── if TYPE_CHECKING: … ──────────────────────────────────────
             Stmt::If(node) => {
                 let guard = is_type_checking_guard(&node.test);
-                collect_imports(&node.body, in_type_checking || guard, line_starts, out);
+                collect_imports(
+                    &node.body,
+                    in_type_checking || guard,
+                    true,
+                    line_starts,
+                    out,
+                );
                 // elif/else branches are NOT considered TYPE_CHECKING scope.
                 for clause in &node.elif_else_clauses {
-                    collect_imports(&clause.body, in_type_checking, line_starts, out);
+                    collect_imports(&clause.body, in_type_checking, true, line_starts, out);
                 }
             }
 
@@ -322,15 +373,120 @@ fn collect_imports(
             // In ruff's AST, async functions share `Stmt::FunctionDef` with
             // an `is_async` flag instead of a separate `AsyncFunctionDef`.
             Stmt::FunctionDef(node) => {
-                collect_imports(&node.body, in_type_checking, line_starts, out);
+                collect_imports(&node.body, in_type_checking, true, line_starts, out);
             }
             Stmt::ClassDef(node) => {
-                collect_imports(&node.body, in_type_checking, line_starts, out);
+                collect_imports(&node.body, in_type_checking, true, line_starts, out);
             }
 
             _ => {}
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// AST-based Load-context name collection
+// ---------------------------------------------------------------------------
+
+/// Recursively collect the byte-offset span and identifier of every
+/// `Expr::Name` used in **Load** context (i.e. a value is being *read*).
+///
+/// Only Load-context occurrences may safely be rewritten to a dotted
+/// qualified name (`join` -> `os.path.join`): Python does not allow a dotted
+/// path as an assignment target, walrus (`:=`) target, `for` target, `as`
+/// binding, function parameter, etc. Restricting renames to these exact
+/// spans (rather than a textual word-boundary scan) also naturally skips
+/// occurrences inside string literals, docstrings and comments, since those
+/// never produce `Expr::Name` nodes.
+fn collect_load_names(stmts: &[Stmt]) -> Vec<(u32, u32, String)> {
+    struct LoadNameVisitor(Vec<(u32, u32, String)>);
+
+    impl<'a> ruff_python_ast::visitor::Visitor<'a> for LoadNameVisitor {
+        fn visit_expr(&mut self, expr: &'a Expr) {
+            if let Expr::Name(name) = expr {
+                if name.ctx.is_load() {
+                    self.0.push((
+                        u32::from(name.range().start()),
+                        u32::from(name.range().end()),
+                        name.id.to_string(),
+                    ));
+                }
+            }
+            ruff_python_ast::visitor::walk_expr(self, expr);
+        }
+    }
+
+    let mut visitor = LoadNameVisitor(Vec::new());
+    for stmt in stmts {
+        ruff_python_ast::visitor::Visitor::visit_stmt(&mut visitor, stmt);
+    }
+    visitor.0
+}
+
+/// Collect every identifier that is **bound** (assigned/declared) somewhere
+/// in `stmts`, at any scope: assignment targets, walrus (`:=`) targets,
+/// `for`/`with`/`except ... as` bindings, function parameters,
+/// function/class names, and `global`/`nonlocal` declarations.
+///
+/// A rename is only sound when the name resolves unambiguously to the
+/// import everywhere it's read. If the same identifier is *also* bound
+/// (e.g. shadowed by a local variable, as in `plugin = plugin.Foo()`) then
+/// some `Load` occurrences of that name refer to the local binding instead
+/// of the import, and a blind rename would rewrite those too -- silently
+/// changing runtime behaviour rather than producing a syntax error. This
+/// rule has no scope/binding resolution, so it treats any such collision as
+/// unsafe and skips the fix entirely (see `can_fix`'s caller).
+fn collect_bound_names(stmts: &[Stmt]) -> HashSet<String> {
+    struct BoundNameVisitor(HashSet<String>);
+
+    impl<'a> ruff_python_ast::visitor::Visitor<'a> for BoundNameVisitor {
+        fn visit_expr(&mut self, expr: &'a Expr) {
+            if let Expr::Name(name) = expr {
+                if !name.ctx.is_load() {
+                    self.0.insert(name.id.to_string());
+                }
+            }
+            ruff_python_ast::visitor::walk_expr(self, expr);
+        }
+
+        fn visit_stmt(&mut self, stmt: &'a Stmt) {
+            match stmt {
+                Stmt::FunctionDef(f) => {
+                    self.0.insert(f.name.as_str().to_owned());
+                }
+                Stmt::ClassDef(c) => {
+                    self.0.insert(c.name.as_str().to_owned());
+                }
+                Stmt::Global(g) => {
+                    self.0.extend(g.names.iter().map(|n| n.as_str().to_owned()));
+                }
+                Stmt::Nonlocal(n) => {
+                    self.0.extend(n.names.iter().map(|n| n.as_str().to_owned()));
+                }
+                _ => {}
+            }
+            ruff_python_ast::visitor::walk_stmt(self, stmt);
+        }
+
+        fn visit_parameter(&mut self, parameter: &'a ruff_python_ast::Parameter) {
+            self.0.insert(parameter.name.as_str().to_owned());
+            ruff_python_ast::visitor::walk_parameter(self, parameter);
+        }
+
+        fn visit_except_handler(&mut self, except_handler: &'a ruff_python_ast::ExceptHandler) {
+            let ruff_python_ast::ExceptHandler::ExceptHandler(h) = except_handler;
+            if let Some(name) = &h.name {
+                self.0.insert(name.as_str().to_owned());
+            }
+            ruff_python_ast::visitor::walk_except_handler(self, except_handler);
+        }
+    }
+
+    let mut visitor = BoundNameVisitor(HashSet::new());
+    for stmt in stmts {
+        ruff_python_ast::visitor::Visitor::visit_stmt(&mut visitor, stmt);
+    }
+    visitor.0
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +567,7 @@ fn can_fix(module: &str, attr_name: &str, probe: &ModuleProbe) -> Option<FixInfo
                 import_key: format!("{parent}.{child}"),
                 old_local: attr_name.to_owned(),
                 new_qualified: format!("{child}.{attr_name}"),
+                new_bound_name: child.to_owned(),
             });
         }
     }
@@ -420,6 +577,9 @@ fn can_fix(module: &str, attr_name: &str, probe: &ModuleProbe) -> Option<FixInfo
         import_key: module.to_owned(),
         old_local: attr_name.to_owned(),
         new_qualified: format!("{module}.{attr_name}"),
+        // `import a.b.c` only binds the top-level name `a` in the
+        // namespace; access is always via `a.b.c...`.
+        new_bound_name: parts[0].to_owned(),
     })
 }
 
@@ -443,6 +603,7 @@ fn make_violation(
     alias_name: &str,
     level: Level,
     fix: Option<&FixInfo>,
+    unsafe_to_fix: Option<&str>,
 ) -> Violation {
     let fixable = fix.is_some();
     let base_help =
@@ -456,6 +617,12 @@ fn make_violation(
         message: format!("KIS001: Import '{alias_name}' from '{module}' is not a module."),
         help: Some(if fixable {
             format!("{base_help} (fixable)")
+        } else if let Some(colliding_name) = unsafe_to_fix {
+            format!(
+                "{base_help} (not auto-fixed: '{colliding_name}' is also assigned/bound elsewhere \
+                 in this file -- a rename could not reliably tell that binding apart from the \
+                 import, so it must be fixed by hand)"
+            )
         } else {
             base_help.to_owned()
         }),
@@ -504,6 +671,7 @@ fn check_imports(
 ) -> Vec<Violation> {
     let lines: Vec<&str> = source.lines().collect();
     let (imports, all_exports) = parse_ast(source);
+    let bound_names = collect_bound_names(&parse_module_stmts(source));
     let mut violations = Vec::new();
 
     let exception_set: HashSet<&str> = exceptions.iter().map(String::as_str).collect();
@@ -555,13 +723,39 @@ fn check_imports(
                 continue;
             }
 
-            let fix = can_fix(&imp.module, &alias.name, probe);
+            let name_shadowed = bound_names.contains(effective);
+            let candidate_fix = if name_shadowed {
+                None
+            } else {
+                can_fix(&imp.module, &alias.name, probe)
+            };
+            // Even when the *old* alias name isn't shadowed, the fix may
+            // introduce a *new* bound name (e.g. `plugin` from
+            // `from parent import plugin`) that collides with an existing
+            // local binding elsewhere in the file. That's equally unsafe to
+            // auto-fix -- but the colliding name to report is the *new*
+            // one, not the original alias name.
+            let new_bound_shadow: Option<String> = candidate_fix
+                .as_ref()
+                .filter(|f| bound_names.contains(&f.new_bound_name))
+                .map(|f| f.new_bound_name.clone());
+            let fix = if new_bound_shadow.is_some() {
+                None
+            } else {
+                candidate_fix
+            };
+            let unsafe_to_fix = if name_shadowed {
+                Some(effective)
+            } else {
+                new_bound_shadow.as_deref()
+            };
             violations.push(make_violation(
                 span,
                 &imp.module,
                 &alias.name,
                 level,
                 fix.as_ref(),
+                unsafe_to_fix,
             ));
         }
     }
@@ -600,6 +794,8 @@ fn apply_fixes(
 ) -> Option<String> {
     let lines: Vec<&str> = source.lines().collect();
     let (imports, all_exports) = parse_ast(source);
+    let stmts = parse_module_stmts(source);
+    let bound_names = collect_bound_names(&stmts);
     let exception_set: HashSet<&str> = exceptions.iter().map(String::as_str).collect();
 
     // ── Phase 1: collect fix instructions ────────────────────────────────
@@ -607,7 +803,7 @@ fn apply_fixes(
     let mut aliases_to_remove: HashMap<usize, HashSet<String>> = HashMap::new();
     // import_spans       : 0-based start_line → 0-based end_line
     let mut import_spans: HashMap<usize, usize> = HashMap::new();
-    // new_imports        : import_key → import statement string (deduped)
+    // new_imports        : import_key -> import statement string (deduped)
     let mut new_imports: HashMap<String, String> = HashMap::new();
     // renames            : old_local_name → new_qualified_name
     let mut renames: HashMap<String, String> = HashMap::new();
@@ -634,6 +830,17 @@ fn apply_fixes(
             if all_exports.contains(effective) || all_exports.contains(&alias.name) {
                 continue;
             }
+            if bound_names.contains(effective) {
+                // `effective` is also assigned/bound somewhere else in this
+                // file (e.g. shadowed by a local variable of the same
+                // name). We have no scope resolution, so we can't tell
+                // which `Load` occurrences of that name refer to the import
+                // versus the local binding -- renaming would silently
+                // change behaviour rather than raise a syntax error. Skip
+                // the fix; `check_imports` reports this same condition as a
+                // non-fixable violation with an explanatory `help` message.
+                continue;
+            }
             let alias_line_str = lines
                 .get(alias.line.saturating_sub(1))
                 .copied()
@@ -643,6 +850,19 @@ fn apply_fixes(
             }
 
             if let Some(fix) = can_fix(&imp.module, &alias.name, probe) {
+                if bound_names.contains(&fix.new_bound_name) {
+                    // The fix would bind `fix.new_bound_name` at module
+                    // scope (e.g. `plugin` from `from parent import
+                    // plugin`), but that name is already assigned/bound
+                    // elsewhere in the file. Applying the fix would
+                    // silently shadow that binding (or, if the collision is
+                    // inside a function, turn every reference in that
+                    // function into a local before its assignment -- an
+                    // `UnboundLocalError` at runtime). Skip the fix;
+                    // `check_imports` reports this same condition as a
+                    // non-fixable violation.
+                    continue;
+                }
                 let old_local = alias
                     .asname
                     .as_deref()
@@ -663,11 +883,51 @@ fn apply_fixes(
 
         let end_idx = imp.end_line - 1;
         import_spans.insert(imp.start_line - 1, end_idx);
-        last_import_line = Some(last_import_line.map_or(end_idx, |prev| prev.max(end_idx)));
+        if imp.is_top_level {
+            // Only a module-top-level import is a safe place to anchor the
+            // insertion of new `import X` statements (phase 5). Imports
+            // nested inside `if TYPE_CHECKING:` / a function / a class body
+            // must never be used as the anchor, or the new statement would
+            // land inside that indented block at column 0.
+            last_import_line = Some(last_import_line.map_or(end_idx, |prev| prev.max(end_idx)));
+        }
     }
 
     if renames.is_empty() {
         return None;
+    }
+
+    let mut block_removed_count: HashMap<u32, usize> = HashMap::new();
+    let mut block_first_removed_line: HashMap<u32, usize> = HashMap::new();
+    for imp in &imports {
+        if imp.is_top_level {
+            continue;
+        }
+        let line_idx = imp.start_line - 1;
+        let removed = match aliases_to_remove.get(&line_idx) {
+            Some(r) => r,
+            None => continue,
+        };
+        if removed.len() != imp.aliases.len() {
+            continue;
+        }
+        *block_removed_count.entry(imp.block_id).or_insert(0) += 1;
+        block_first_removed_line
+            .entry(imp.block_id)
+            .and_modify(|l| *l = (*l).min(line_idx))
+            .or_insert(line_idx);
+    }
+    let mut pass_line: HashSet<usize> = HashSet::new();
+    for imp in &imports {
+        if imp.is_top_level {
+            continue;
+        }
+        let removed_in_block = block_removed_count.get(&imp.block_id).copied().unwrap_or(0);
+        if removed_in_block == imp.block_size {
+            if let Some(first) = block_first_removed_line.get(&imp.block_id) {
+                pass_line.insert(*first);
+            }
+        }
     }
 
     // ── Phase 2: drop imports already present in the file ────────────────
@@ -777,6 +1037,11 @@ fn apply_fixes(
                         lines_out[i] = eol.to_owned();
                     }
                 }
+                if pass_line.contains(line_idx) {
+                    // This block would otherwise become empty: a blank body
+                    // is not valid Python, so leave a `pass` behind.
+                    lines_out[*line_idx] = format!("{leading}pass{eol}");
+                }
             } else if survivors.len() == 1 {
                 // Collapse to a single line.
                 lines_out[*line_idx] =
@@ -829,7 +1094,14 @@ fn apply_fixes(
                         .collect();
 
                     lines_out[*line_idx] = if survivors.is_empty() {
-                        eol.to_owned() // blank preserves subsequent line numbers
+                        if pass_line.contains(line_idx) {
+                            // This block would otherwise become empty: a
+                            // blank body is not valid Python, so leave a
+                            // `pass` behind.
+                            format!("{leading}pass{eol}")
+                        } else {
+                            eol.to_owned() // blank preserves subsequent line numbers
+                        }
                     } else {
                         format!(
                             "{leading}from {module_part} import {}{eol}",
@@ -841,47 +1113,37 @@ fn apply_fixes(
         }
     }
 
-    // ── Phase 4: inject new imports after the last import line ────────────
-    if !new_imports.is_empty() {
-        let insert_after = last_import_line.unwrap_or(0);
-        let inject_pos = (insert_after + 1).min(lines_out.len());
-        let mut sorted: Vec<&String> = new_imports.values().collect();
-        sorted.sort();
-        for (offset, stmt) in sorted.into_iter().enumerate() {
-            lines_out.insert(inject_pos + offset, format!("{stmt}{eol}"));
-        }
-    }
-
-    // ── Phase 5: rename bare name usages (right-to-left per line) ─────────
-    let working: Vec<&str> = lines_out.iter().map(String::as_str).collect();
+    // ── Phase 4: rename bare name usages via precise AST Load-context spans ──
+    //
+    // This runs *before* new imports are injected (phase 5 below) because the
+    // spans below are byte offsets into the original `source`, which map
+    // 1:1 onto `lines_out`'s current line numbers only as long as no lines
+    // have been inserted or removed yet (phase 3 only ever rewrites content
+    // in place, never changing the line count).
+    //
+    // Renaming is restricted to `Expr::Name` occurrences in **Load** context
+    // collected straight from the AST, rather than a textual word-boundary
+    // scan. This is deliberate: a plain-text scan cannot distinguish a value
+    // being *read* (safe to qualify, e.g. `join(...)` -> `os.path.join(...)`)
+    // from a name being *bound* (a plain assignment target, a `:=` walrus
+    // target, a `for`/`as`/parameter binding) -- Python does not allow a
+    // dotted path in any of those binding positions, so rewriting them
+    // produces a `SyntaxError`. It also cannot tell a real code reference
+    // apart from the same text appearing inside a string, docstring or
+    // comment. AST Load-context spans have neither problem.
+    let line_starts = build_line_starts(source);
     let mut replacements: Vec<(usize, usize, usize, String)> = Vec::new();
 
-    for (old_name, new_qualified) in &renames {
-        for (line_idx, line) in working.iter().enumerate() {
-            let trimmed_line = line.trim();
-            if trimmed_line.starts_with("import ") || trimmed_line.starts_with("from ") {
-                continue;
-            }
-            let mut search_start = 0;
-            while let Some(pos) = line[search_start..].find(old_name.as_str()) {
-                let abs_pos = search_start + pos;
-                let col_end = abs_pos + old_name.len();
-                let bytes = line.as_bytes();
-                let before_ok = abs_pos == 0
-                    || (!bytes[abs_pos - 1].is_ascii_alphanumeric() && bytes[abs_pos - 1] != b'_');
-                let after_ok = col_end >= line.len()
-                    || (!bytes[col_end].is_ascii_alphanumeric()
-                        && bytes[col_end] != b'_'
-                        && bytes[col_end] != b'.'); // skip already-qualified access
-                if before_ok && after_ok {
-                    replacements.push((line_idx, abs_pos, col_end, new_qualified.clone()));
-                }
-                search_start = abs_pos + 1;
-                if search_start >= line.len() {
-                    break;
-                }
-            }
+    for (start_off, end_off, name) in collect_load_names(&stmts) {
+        let Some(new_qualified) = renames.get(&name) else {
+            continue;
+        };
+        let (start_line, col_start) = offset_to_line_col(&line_starts, start_off);
+        let (end_line, col_end) = offset_to_line_col(&line_starts, end_off);
+        if start_line != end_line {
+            continue; // a bare Name never spans multiple lines
         }
+        replacements.push((start_line - 1, col_start, col_end, new_qualified.clone()));
     }
 
     replacements.sort_by_key(|&(li, col, _, _)| (li, std::cmp::Reverse(col)));
@@ -905,6 +1167,25 @@ fn apply_fixes(
                 replacement,
                 &bare[col_end..]
             );
+        }
+    }
+
+    // ── Phase 5: inject new imports after the last top-level import line ──
+    if !new_imports.is_empty() {
+        // When there is no top-level import to anchor on (e.g. every import
+        // in the file lives inside `if TYPE_CHECKING:` or a function), the
+        // only always-safe place to add a new `import X` statement is the
+        // very top of the file (position 0) -- never "after line 0", since
+        // line 0 could be the first line of an unrelated block (as in the
+        // `if TYPE_CHECKING:` case) rather than a docstring/shebang.
+        let inject_pos = match last_import_line {
+            Some(line) => (line + 1).min(lines_out.len()),
+            None => 0,
+        };
+        let mut sorted: Vec<&String> = new_imports.values().collect();
+        sorted.sort();
+        for (offset, stmt) in sorted.into_iter().enumerate() {
+            lines_out.insert(inject_pos + offset, format!("{stmt}{eol}"));
         }
     }
 
@@ -1194,5 +1475,221 @@ mod tests {
         let source = "import os\nx = 1\n";
         let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
         assert!(result.is_none(), "clean file should not be modified");
+    }
+
+    // ── regression tests: new-import anchor only uses top-level imports ───
+
+    #[test]
+    fn new_import_is_anchored_after_top_level_imports_only() {
+        // A nested `if TYPE_CHECKING:` import must never be used as the
+        // anchor for inserting a new top-level `import X` statement -- doing
+        // so would land the new statement inside the indented block.
+        let source = "from os.path import join\n\nif TYPE_CHECKING:\n    from types import ModuleType\n\n\ndef f(m):\n    return join('a', 'b')\n";
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        let fixed = result.expect("fixable file should be rewritten");
+
+        let type_checking_idx = fixed
+            .find("if TYPE_CHECKING:")
+            .expect("TYPE_CHECKING block should survive");
+        let new_import_idx = fixed
+            .find("import os.path\n")
+            .expect("new import os.path should be inserted");
+        assert!(
+            new_import_idx < type_checking_idx,
+            "new import must be anchored before the TYPE_CHECKING block"
+        );
+        assert!(
+            parse_module(&fixed).is_ok(),
+            "fixed source must remain valid Python"
+        );
+    }
+
+    // ── regression tests: removing a nested import must not empty its block ─
+
+    #[test]
+    fn removing_only_import_in_block_inserts_pass() {
+        // Removing the sole statement of an indented block must leave a
+        // `pass` behind, or the block becomes an IndentationError.
+        let source =
+            "if TYPE_CHECKING:\n    from types import ModuleType\n\n\ndef f(m):\n    pass\n";
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        let fixed = result.expect("fixable file should be rewritten");
+        assert!(
+            fixed.contains("if TYPE_CHECKING:\n    pass\n")
+                || fixed.contains("if TYPE_CHECKING:\n    import types\n"),
+            "block should either keep a real import or gain a `pass`, got:\n{fixed}"
+        );
+        assert!(
+            parse_module(&fixed).is_ok(),
+            "fixed source must remain valid Python"
+        );
+    }
+
+    #[test]
+    fn removing_all_imports_in_multi_import_block_stays_valid() {
+        // Two fixable imports are the only statements of the block; once
+        // both are rewritten, the block must not become empty.
+        let source = "if TYPE_CHECKING:\n    from os.path import join\n    from os.path import dirname\n\n\ndef f():\n    pass\n";
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        let fixed = result.expect("fixable file should be rewritten");
+        assert!(
+            parse_module(&fixed).is_ok(),
+            "fixed source must remain valid Python:\n{fixed}"
+        );
+    }
+
+    #[test]
+    fn removing_one_of_two_imports_does_not_insert_pass() {
+        // Only one of two imports in the block is rewritten; the block still
+        // has real content afterwards, so no `pass` should be injected.
+        let source = "if TYPE_CHECKING:\n    from os.path import join\n    import sys\n\n\ndef f():\n    return join('a', 'b')\n";
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        let fixed = result.expect("fixable file should be rewritten");
+        assert!(
+            !fixed.contains("    pass\n"),
+            "block still has content, no pass should be inserted, got:\n{fixed}"
+        );
+        assert!(
+            fixed.contains("    import sys\n"),
+            "surviving import should remain, got:\n{fixed}"
+        );
+        assert!(
+            parse_module(&fixed).is_ok(),
+            "fixed source must remain valid Python:\n{fixed}"
+        );
+    }
+
+    // ── regression tests: rename only touches Load-context AST names ──────
+
+    #[test]
+    fn rename_does_not_touch_docstrings_or_comments() {
+        // The literal text "join" inside a docstring/comment must survive
+        // untouched, while the real call is rewritten to the qualified form.
+        let source = "from os.path import join\n\n\ndef f():\n    \"\"\"Calls join() to combine paths.\"\"\"\n    # join here refers to os.path.join\n    return join('a', 'b')\n";
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        let fixed = result.expect("fixable file should be rewritten");
+        assert!(
+            fixed.contains("Calls join() to combine paths."),
+            "docstring text must be preserved verbatim, got:\n{fixed}"
+        );
+        assert!(
+            fixed.contains("# join here refers to os.path.join"),
+            "comment text must be preserved verbatim, got:\n{fixed}"
+        );
+        assert!(
+            fixed.contains("os.path.join('a', 'b')"),
+            "the real call site should be rewritten to the qualified form, got:\n{fixed}"
+        );
+        assert!(
+            parse_module(&fixed).is_ok(),
+            "fixed source must remain valid Python:\n{fixed}"
+        );
+    }
+
+    // ── regression tests: shadowed local names must not be auto-fixed ─────
+
+    #[test]
+    fn shadowed_import_name_is_reported_as_unsafe_to_fix() {
+        // `join` is both the imported alias and a local variable name that
+        // is reassigned; a blind rename cannot tell those apart, so this
+        // must be reported non-fixable rather than silently rewritten.
+        let source =
+            "from os.path import join\n\n\ndef f():\n    join = join('a', 'b')\n    return join\n";
+        let violations = rule().check(&ctx(source), &empty_cfg());
+        assert_eq!(violations.len(), 1, "expected exactly one violation");
+        assert!(
+            !violations[0].fixable,
+            "shadowed import must not be marked fixable"
+        );
+        assert!(
+            violations[0]
+                .help
+                .as_deref()
+                .unwrap_or("")
+                .contains("also assigned/bound"),
+            "help text should explain the shadowing hazard, got: {:?}",
+            violations[0].help
+        );
+
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        assert!(
+            result.is_none(),
+            "shadowed import must not be auto-fixed, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn non_shadowed_import_in_same_file_is_still_fixed() {
+        // A shadowed import in one function must not block fixing an
+        // unrelated, non-shadowed import elsewhere in the same file.
+        let source = "from os.path import join, dirname\n\n\ndef f():\n    join = join('a', 'b')\n    return join\n\n\ndef g():\n    return dirname('/a/b')\n";
+        let violations = rule().check(&ctx(source), &empty_cfg());
+        assert_eq!(
+            violations.len(),
+            2,
+            "expected two violations, got: {violations:?}"
+        );
+        let join_violation = violations
+            .iter()
+            .find(|v| v.message.contains("'join'"))
+            .expect("join violation present");
+        let dirname_violation = violations
+            .iter()
+            .find(|v| v.message.contains("'dirname'"))
+            .expect("dirname violation present");
+        assert!(
+            !join_violation.fixable,
+            "join is shadowed, must not be fixable"
+        );
+        assert!(
+            dirname_violation.fixable,
+            "dirname is not shadowed, must be fixable"
+        );
+
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        let fixed = result.expect("dirname fix should still be applied");
+        assert!(
+            fixed.contains("os.path.dirname('/a/b')"),
+            "dirname call site should be rewritten to the qualified form, got:\n{fixed}"
+        );
+        assert!(
+            fixed.contains("join = join('a', 'b')"),
+            "shadowed join code must remain untouched, got:\n{fixed}"
+        );
+        assert!(
+            parse_module(&fixed).is_ok(),
+            "fixed source must remain valid Python:\n{fixed}"
+        );
+    }
+
+    #[test]
+    fn new_bound_name_collision_is_reported_as_unsafe_to_fix() {
+        // The fix wants to introduce `from xml.etree import ElementTree`,
+        // binding the name `ElementTree` -- but `ElementTree` is already
+        // assigned as a local variable elsewhere in this file. The old
+        // alias name (`Element`) isn't shadowed at all; it's the *new*
+        // name the fix itself would introduce that collides.
+        let source = "from xml.etree.ElementTree import Element\n\n\ndef f():\n    ElementTree = Element()\n    return ElementTree\n";
+        let violations = rule().check(&ctx(source), &empty_cfg());
+        assert_eq!(violations.len(), 1, "expected exactly one violation");
+        assert!(
+            !violations[0].fixable,
+            "new-bound-name collision must not be marked fixable"
+        );
+        assert!(
+            violations[0]
+                .help
+                .as_deref()
+                .unwrap_or("")
+                .contains("'ElementTree' is also assigned/bound"),
+            "help text should name the colliding *new* binding, got: {:?}",
+            violations[0].help
+        );
+
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        assert!(
+            result.is_none(),
+            "import with a colliding new-bound-name must not be auto-fixed, got: {result:?}"
+        );
     }
 }

@@ -22,6 +22,7 @@ use crate::rules::{FileContext, Rule};
 use crate::types::Violation;
 use anyhow::Result;
 use globset::{Glob, GlobMatcher};
+use ruff_python_parser::parse_module;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -114,11 +115,38 @@ pub fn run_check(
 // run_fix
 // ---------------------------------------------------------------------------
 
-/// Apply all enabled, fixable rules to `input` in sequence.
+/// Maximum number of full passes over all fixable rules for a single file.
 ///
-/// Rules are applied one after another so each fix sees the output of the
-/// previous one.  Returns the final source text if any rule made a change,
-/// or `None` if the source is already clean.
+/// One pass may leave behind violations that only became visible *because*
+/// of that pass's edits (e.g. fixing rule A's violation can incidentally
+/// introduce or expose a violation of rule B, or of A itself) -- mirroring
+/// why Ruff's `check --fix` re-parses and re-lints iteratively rather than
+/// applying each rule exactly once. Looping here lets those cascades
+/// resolve fully within a single `--fix` invocation instead of requiring
+/// the user to re-run it repeatedly. The cap is a pure safety guard against
+/// a pathological/buggy fix that oscillates forever; well-behaved fixes
+/// converge (a pass makes no changes) in 1-2 iterations.
+const MAX_FIX_PASSES: u32 = 100;
+
+/// Apply all enabled, fixable rules to `input`, repeating full passes over
+/// the rule set until a pass makes no further changes (or [`MAX_FIX_PASSES`]
+/// is reached).
+///
+/// Within a pass, rules are applied one after another so each fix sees the
+/// output of the previous one. Returns the final source text if any rule
+/// made a change, or `None` if the source is already clean.
+///
+/// # Safety net
+/// After each rule's fix, the resulting source is re-parsed with
+/// `ruff_python_parser::parse_module`. A fix is a contract: it must turn
+/// valid Python into different, still-valid Python. If a rule ever produces
+/// text that no longer parses (a bug in that rule, not something we can fix
+/// here), that specific fix is rejected -- the previous, still-valid `src`
+/// is kept and the rest of the pipeline continues -- rather than silently
+/// writing corrupted code to disk. This check only runs when `src` itself
+/// parsed cleanly *before* the rule ran, since we can't meaningfully judge
+/// "still valid" against an input that was already unparsable (e.g. a file
+/// with a pre-existing syntax error unrelated to any rule).
 pub fn run_fix(
     input: &CheckInput<'_>,
     rules: &[Box<dyn Rule>],
@@ -127,16 +155,38 @@ pub fn run_fix(
     let mut src = input.source.to_owned();
     let mut changed = false;
 
-    for rule in rules
-        .iter()
-        .filter(|r| r.fixable() && config.is_enabled(r.code()))
-    {
-        let mut ctx = FileContext::from_source(input.path.to_path_buf(), src.clone());
-        ctx.ignore_noqa = input.ignore_noqa || config.ignore_noqa;
-        ctx.noqa_aliases = config.noqa_aliases.clone();
-        if let Some(fixed) = rule.fix(&ctx, config.rule_config(rule.category()))? {
-            src = fixed;
-            changed = true;
+    for _pass in 0..MAX_FIX_PASSES {
+        let mut pass_changed = false;
+
+        for rule in rules
+            .iter()
+            .filter(|r| r.fixable() && config.is_enabled(r.code()))
+        {
+            let mut ctx = FileContext::from_source(input.path.to_path_buf(), src.clone());
+            ctx.ignore_noqa = input.ignore_noqa || config.ignore_noqa;
+            ctx.noqa_aliases = config.noqa_aliases.clone();
+            if let Some(fixed) = rule.fix(&ctx, config.rule_config(rule.category()))? {
+                if fixed == src {
+                    continue; // no-op fix; nothing to apply or loop on
+                }
+                let src_was_valid = parse_module(&src).is_ok();
+                if src_was_valid && parse_module(&fixed).is_err() {
+                    eprintln!(
+                        "warning: {}'s fix for {} would produce invalid Python; skipping this \
+                         fix (this is a bug in the rule -- please report it)",
+                        rule.code(),
+                        input.path.display()
+                    );
+                    continue;
+                }
+                src = fixed;
+                changed = true;
+                pass_changed = true;
+            }
+        }
+
+        if !pass_changed {
+            break;
         }
     }
 
@@ -347,6 +397,252 @@ mod tests {
         assert!(
             !violations.is_empty(),
             "unrelated alias should not suppress KIS001"
+        );
+    }
+
+    // ── AST-validity safety net: a rule's fix must not corrupt syntax ───────
+
+    /// A fake rule whose `fix` always "succeeds" but emits syntactically
+    /// invalid Python. Stands in for a buggy rule to exercise the engine's
+    /// safety net without depending on any real rule having a bug.
+    struct BrokenFixRule;
+
+    impl Rule for BrokenFixRule {
+        fn code(&self) -> &str {
+            "ZZ999"
+        }
+        fn category(&self) -> &str {
+            "ZZ"
+        }
+        fn name(&self) -> &str {
+            "broken-fix"
+        }
+        fn description(&self) -> &str {
+            "test-only rule that always corrupts the source"
+        }
+        fn fixable(&self) -> bool {
+            true
+        }
+        fn check(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Vec<Violation> {
+            Vec::new()
+        }
+        fn fix(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Result<Option<String>> {
+            Ok(Some("def (((( not valid python".to_owned()))
+        }
+        fn explain(&self) -> String {
+            String::new()
+        }
+    }
+
+    /// A fake rule that always applies a trivial, syntactically valid fix.
+    /// Used alongside [`BrokenFixRule`] to prove the engine keeps applying
+    /// later rules after rejecting an earlier broken one.
+    struct GoodFixRule;
+
+    impl Rule for GoodFixRule {
+        fn code(&self) -> &str {
+            "ZZ998"
+        }
+        fn category(&self) -> &str {
+            "ZZ"
+        }
+        fn name(&self) -> &str {
+            "good-fix"
+        }
+        fn description(&self) -> &str {
+            "test-only rule that always applies a trivial valid fix"
+        }
+        fn fixable(&self) -> bool {
+            true
+        }
+        fn check(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Vec<Violation> {
+            Vec::new()
+        }
+        fn fix(&self, ctx: &FileContext, _cfg: &toml::Value) -> Result<Option<String>> {
+            // Idempotent, like a real rule: nothing left to fix once applied.
+            if ctx.source.contains("# fixed by GoodFixRule") {
+                return Ok(None);
+            }
+            Ok(Some(format!(
+                "{}\n# fixed by GoodFixRule\n",
+                ctx.source.trim_end()
+            )))
+        }
+        fn explain(&self) -> String {
+            String::new()
+        }
+    }
+
+    #[test]
+    fn run_fix_rejects_a_fix_that_produces_invalid_python() {
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(BrokenFixRule)];
+        let p = path();
+        let input = CheckInput::new(&p, "x = 1\n");
+        let result = run_fix(&input, &rules, &Config::default()).unwrap();
+        assert!(
+            result.is_none(),
+            "a fix that produces invalid Python must be rejected, not written out"
+        );
+    }
+
+    #[test]
+    fn run_fix_continues_past_a_rejected_fix() {
+        // BrokenFixRule's corrupting fix must not prevent GoodFixRule's
+        // legitimate, valid fix from still being applied.
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(BrokenFixRule), Box::new(GoodFixRule)];
+        let p = path();
+        let input = CheckInput::new(&p, "x = 1\n");
+        let result = run_fix(&input, &rules, &Config::default()).unwrap();
+        let fixed = result.expect("GoodFixRule's valid fix should still be applied");
+        assert!(fixed.contains("# fixed by GoodFixRule"), "got: {fixed:?}");
+        assert!(
+            ruff_python_parser::parse_module(&fixed).is_ok(),
+            "final result must remain valid Python"
+        );
+    }
+
+    /// Fake rule that only fires once its precondition (`NEEDS_A` in the
+    /// source) is met, and turns it into `NEEDS_B` -- deliberately modeling
+    /// a fix that *creates* a new violation for another rule to pick up.
+    struct RuleNeedsA;
+
+    impl Rule for RuleNeedsA {
+        fn code(&self) -> &str {
+            "ZZ997"
+        }
+        fn category(&self) -> &str {
+            "ZZ"
+        }
+        fn name(&self) -> &str {
+            "needs-a"
+        }
+        fn description(&self) -> &str {
+            "test-only rule: NEEDS_A -> NEEDS_B"
+        }
+        fn fixable(&self) -> bool {
+            true
+        }
+        fn check(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Vec<Violation> {
+            Vec::new()
+        }
+        fn fix(&self, ctx: &FileContext, _cfg: &toml::Value) -> Result<Option<String>> {
+            if !ctx.source.contains("NEEDS_A") {
+                return Ok(None);
+            }
+            Ok(Some(ctx.source.replace("NEEDS_A", "FIXED_A NEEDS_B")))
+        }
+        fn explain(&self) -> String {
+            String::new()
+        }
+    }
+
+    /// Fake rule that fires once `NEEDS_B` appears and resolves it. Listed
+    /// *before* [`RuleNeedsA`] in the rule set on purpose, so within a
+    /// single pass it runs too early to see the `NEEDS_B` that
+    /// `RuleNeedsA` is about to introduce -- only a second pass converges.
+    struct RuleNeedsB;
+
+    impl Rule for RuleNeedsB {
+        fn code(&self) -> &str {
+            "ZZ996"
+        }
+        fn category(&self) -> &str {
+            "ZZ"
+        }
+        fn name(&self) -> &str {
+            "needs-b"
+        }
+        fn description(&self) -> &str {
+            "test-only rule: NEEDS_B -> FIXED_B"
+        }
+        fn fixable(&self) -> bool {
+            true
+        }
+        fn check(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Vec<Violation> {
+            Vec::new()
+        }
+        fn fix(&self, ctx: &FileContext, _cfg: &toml::Value) -> Result<Option<String>> {
+            if !ctx.source.contains("NEEDS_B") {
+                return Ok(None);
+            }
+            Ok(Some(ctx.source.replace("NEEDS_B", "FIXED_B")))
+        }
+        fn explain(&self) -> String {
+            String::new()
+        }
+    }
+
+    #[test]
+    fn run_fix_iterates_across_passes_until_stable() {
+        // Single-pass semantics would leave this unresolved: within pass 1,
+        // RuleNeedsB runs first and finds nothing (NEEDS_B doesn't exist
+        // yet), then RuleNeedsA runs and introduces NEEDS_B. Only a second
+        // pass -- driven by the engine's fixed-point loop -- lets
+        // RuleNeedsB see and resolve it, mirroring Ruff's iterate-to-a-
+        // fixed-point `check --fix` behavior.
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(RuleNeedsB), Box::new(RuleNeedsA)];
+        let p = path();
+        let input = CheckInput::new(&p, "# NEEDS_A\nx = 1\n");
+        let result = run_fix(&input, &rules, &Config::default()).unwrap();
+        let fixed = result.expect("cascading fix should be applied");
+        assert!(
+            fixed.contains("FIXED_A") && fixed.contains("FIXED_B"),
+            "both the original and the cascaded violation should be resolved \
+             within a single run_fix call, got: {fixed:?}"
+        );
+        assert!(
+            !fixed.contains("NEEDS_A") && !fixed.contains("NEEDS_B"),
+            "no unresolved placeholder should remain, got: {fixed:?}"
+        );
+    }
+
+    /// Fake rule whose fix always flips the source between two states,
+    /// never converging. Models a hypothetical buggy rule to prove the
+    /// engine's iteration cap prevents an infinite loop.
+    struct OscillatingRule;
+
+    impl Rule for OscillatingRule {
+        fn code(&self) -> &str {
+            "ZZ995"
+        }
+        fn category(&self) -> &str {
+            "ZZ"
+        }
+        fn name(&self) -> &str {
+            "oscillating"
+        }
+        fn description(&self) -> &str {
+            "test-only rule that never converges"
+        }
+        fn fixable(&self) -> bool {
+            true
+        }
+        fn check(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Vec<Violation> {
+            Vec::new()
+        }
+        fn fix(&self, ctx: &FileContext, _cfg: &toml::Value) -> Result<Option<String>> {
+            if ctx.source.contains("STATE_A") {
+                Ok(Some(ctx.source.replace("STATE_A", "STATE_B")))
+            } else {
+                Ok(Some(ctx.source.replace("STATE_B", "STATE_A")))
+            }
+        }
+        fn explain(&self) -> String {
+            String::new()
+        }
+    }
+
+    #[test]
+    fn run_fix_terminates_when_a_rule_never_converges() {
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(OscillatingRule)];
+        let p = path();
+        let input = CheckInput::new(&p, "# STATE_A\nx = 1\n");
+        // Must return rather than loop forever; the iteration cap in
+        // run_fix bounds the pathological case.
+        let result = run_fix(&input, &rules, &Config::default()).unwrap();
+        assert!(
+            result.is_some(),
+            "an oscillating rule still reports a change"
         );
     }
 }

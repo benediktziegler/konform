@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name    = "konform"
-version = "0.1.0"
+version = "0.1.1"
 authors = [
   { name = "Benedikt Ziegler", email = "benediktziegler@gmail.com" },
 ]

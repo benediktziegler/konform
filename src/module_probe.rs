@@ -583,7 +583,7 @@ mod tests {
         // `is_module` inserted a `false` *sentinel* into the shared cache
         // before computing the real result, so a concurrent call for the
         // exact same (module, attr) key (e.g. two files both importing
-        // `vcc.conx_power.controller`, checked on different rayon worker
+        // `acme.sample_pkg.controller`, checked on different rayon worker
         // threads) could observe that sentinel and wrongly report "not a
         // module". This spins up many threads hammering the same key and
         // asserts every single one gets the correct answer.

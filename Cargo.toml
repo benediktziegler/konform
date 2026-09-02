@@ -1,6 +1,6 @@
 [package]
 name        = "konform"
-version     = "0.1.1"
+version     = "0.1.2"
 edition     = "2021"
 description = "Multi-rule Python linter and language server — module-only imports, pattern rules, and more"
 license     = "MIT"

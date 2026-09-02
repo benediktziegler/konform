@@ -1,3 +1,9 @@
+## v0.1.1 (2026-09-02)
+
+### Fix
+
+- **kis001**: detect src-layout and namespace subpackages as modules
+
 ## 0.1.0 (2026-09-02)
 
 ### Feat

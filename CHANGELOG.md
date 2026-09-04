@@ -1,3 +1,10 @@
+## v0.1.2 (2026-09-04)
+
+### Fix
+
+- **module_probe**: detect builtin stdlib modules
+- **engine**: iterate fixes to stable valid output
+
 ## v0.1.1 (2026-09-02)
 
 ### Fix

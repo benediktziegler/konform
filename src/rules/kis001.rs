@@ -490,6 +490,244 @@ fn collect_bound_names(stmts: &[Stmt]) -> HashSet<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Coarse two-level scope index (module vs. per-top-level-def/class bucket)
+// ---------------------------------------------------------------------------
+//
+// `collect_bound_names` above is deliberately flat: it can tell you *whether*
+// a name is bound *somewhere* in the file, but not *where*. That made the
+// shadow checks in `check_imports`/`apply_fixes` correct-but-overbroad: an
+// unrelated function's parameter or local variable (e.g. a `plugin` pytest
+// fixture, or a `server` parameter on some other helper) would block a fix
+// that never touches that function at all, just because the same identifier
+// happens to be bound *somewhere* in the file.
+//
+// `ScopeIndex` adds just enough location information to fix that: every name
+// bound directly at module level (not inside any `def`/`class`) goes into
+// `module_names`; everything bound anywhere inside a given top-level `def`/
+// `class` -- however deeply nested (inner functions, lambdas, comprehensions,
+// nested classes) -- shares *one* bucket keyed by that def/class's start
+// offset. This is coarser than real Python scoping (which would give each
+// nested function its own scope), but it's sufficient to stop conflating
+// unrelated sibling functions, and it never *under*-reports a collision: a
+// name is only ever folded into a *larger* bucket than true LEGB scoping
+// would use, never a smaller one, so every check built on it stays sound.
+struct ScopeIndex {
+    module_names: HashSet<String>,
+    /// bucket id (a top-level `def`/`class`'s start byte offset) -> every
+    /// name bound anywhere in its subtree.
+    scope_names: HashMap<u32, HashSet<String>>,
+    /// `(start, end, bucket id)` for every top-level `def`/`class`, used to
+    /// find which bucket (if any) contains a given byte offset.
+    buckets: Vec<(u32, u32, u32)>,
+}
+
+/// Collect every **Store**-context name bound anywhere within a single
+/// expression (assignment/`for`/`with`/walrus targets, which are usually
+/// `Expr::Name` but may be `Expr::Tuple`/`Expr::List`/`Expr::Starred` for
+/// unpacking). Also incidentally picks up any walrus (`:=`) bindings nested
+/// inside a non-target expression (e.g. a `for`/`while`/`if` test), which is
+/// exactly what's wanted there too.
+fn collect_names_bound_by_expr(expr: &Expr, out: &mut HashSet<String>) {
+    struct TargetNameVisitor<'a>(&'a mut HashSet<String>);
+
+    impl<'a, 'ast> ruff_python_ast::visitor::Visitor<'ast> for TargetNameVisitor<'a> {
+        fn visit_expr(&mut self, expr: &'ast Expr) {
+            if let Expr::Name(name) = expr {
+                if !name.ctx.is_load() {
+                    self.0.insert(name.id.to_string());
+                }
+            }
+            ruff_python_ast::visitor::walk_expr(self, expr);
+        }
+    }
+
+    let mut visitor = TargetNameVisitor(out);
+    ruff_python_ast::visitor::Visitor::visit_expr(&mut visitor, expr);
+}
+
+fn insert_scoped(name: String, bucket: Option<u32>, index: &mut ScopeIndex) {
+    match bucket {
+        Some(id) => {
+            index.scope_names.entry(id).or_default().insert(name);
+        }
+        None => {
+            index.module_names.insert(name);
+        }
+    }
+}
+
+/// Recursively assign every bound name in `stmts` to `bucket` (`None` means
+/// module level), discovering new buckets for any `def`/`class` found along
+/// the way -- including ones nested inside `if`/`for`/`while`/`with`/`try`
+/// blocks, which don't introduce a scope of their own in Python.
+fn collect_scopes(stmts: &[Stmt], bucket: Option<u32>, index: &mut ScopeIndex) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::FunctionDef(f) => {
+                // The function's own name binds in the *enclosing* scope.
+                insert_scoped(f.name.as_str().to_owned(), bucket, index);
+                let id = u32::from(f.range().start());
+                index.buckets.push((id, u32::from(f.range().end()), id));
+                // Everything inside -- params, body, however deeply nested --
+                // becomes this one bucket; reuse the existing flat collector
+                // rather than hand-walking every statement/expression kind.
+                let names = collect_bound_names(std::slice::from_ref(stmt));
+                index.scope_names.entry(id).or_default().extend(names);
+            }
+            Stmt::ClassDef(c) => {
+                insert_scoped(c.name.as_str().to_owned(), bucket, index);
+                let id = u32::from(c.range().start());
+                index.buckets.push((id, u32::from(c.range().end()), id));
+                let names = collect_bound_names(std::slice::from_ref(stmt));
+                index.scope_names.entry(id).or_default().extend(names);
+            }
+            Stmt::If(node) => {
+                let mut names = HashSet::new();
+                collect_names_bound_by_expr(&node.test, &mut names);
+                for n in names {
+                    insert_scoped(n, bucket, index);
+                }
+                collect_scopes(&node.body, bucket, index);
+                for clause in &node.elif_else_clauses {
+                    if let Some(test) = &clause.test {
+                        let mut names = HashSet::new();
+                        collect_names_bound_by_expr(test, &mut names);
+                        for n in names {
+                            insert_scoped(n, bucket, index);
+                        }
+                    }
+                    collect_scopes(&clause.body, bucket, index);
+                }
+            }
+            Stmt::For(node) => {
+                let mut names = HashSet::new();
+                collect_names_bound_by_expr(&node.target, &mut names);
+                collect_names_bound_by_expr(&node.iter, &mut names);
+                for n in names {
+                    insert_scoped(n, bucket, index);
+                }
+                collect_scopes(&node.body, bucket, index);
+                collect_scopes(&node.orelse, bucket, index);
+            }
+            Stmt::While(node) => {
+                let mut names = HashSet::new();
+                collect_names_bound_by_expr(&node.test, &mut names);
+                for n in names {
+                    insert_scoped(n, bucket, index);
+                }
+                collect_scopes(&node.body, bucket, index);
+                collect_scopes(&node.orelse, bucket, index);
+            }
+            Stmt::With(node) => {
+                let mut names = HashSet::new();
+                for item in &node.items {
+                    if let Some(vars) = &item.optional_vars {
+                        collect_names_bound_by_expr(vars, &mut names);
+                    }
+                    collect_names_bound_by_expr(&item.context_expr, &mut names);
+                }
+                for n in names {
+                    insert_scoped(n, bucket, index);
+                }
+                collect_scopes(&node.body, bucket, index);
+            }
+            Stmt::Try(node) => {
+                collect_scopes(&node.body, bucket, index);
+                for handler in &node.handlers {
+                    let ruff_python_ast::ExceptHandler::ExceptHandler(h) = handler;
+                    if let Some(name) = &h.name {
+                        insert_scoped(name.as_str().to_owned(), bucket, index);
+                    }
+                    collect_scopes(&h.body, bucket, index);
+                }
+                collect_scopes(&node.orelse, bucket, index);
+                collect_scopes(&node.finalbody, bucket, index);
+            }
+            Stmt::Global(g) => {
+                // `global`/`nonlocal` are rare escape hatches that reach into
+                // an outer scope; be conservative and always treat these as
+                // module-wide bound names regardless of the current bucket,
+                // matching the old flat (file-wide) behaviour for this rare
+                // case rather than risk under-reporting a real collision.
+                for n in &g.names {
+                    index.module_names.insert(n.as_str().to_owned());
+                }
+            }
+            Stmt::Nonlocal(n) => {
+                for name in &n.names {
+                    index.module_names.insert(name.as_str().to_owned());
+                }
+            }
+            _ => {
+                let names = collect_bound_names(std::slice::from_ref(stmt));
+                for n in names {
+                    insert_scoped(n, bucket, index);
+                }
+            }
+        }
+    }
+}
+
+fn build_scope_index(stmts: &[Stmt]) -> ScopeIndex {
+    let mut index = ScopeIndex {
+        module_names: HashSet::new(),
+        scope_names: HashMap::new(),
+        buckets: Vec::new(),
+    };
+    collect_scopes(stmts, None, &mut index);
+    index
+}
+
+/// Which bucket (if any) contains byte offset `offset` -- `None` means
+/// module level.
+fn bucket_for_offset(index: &ScopeIndex, offset: u32) -> Option<u32> {
+    index
+        .buckets
+        .iter()
+        .find(|&&(start, end, _)| start <= offset && offset < end)
+        .map(|&(_, _, id)| id)
+}
+
+/// Is `name` bound in `bucket` (or at module level)?
+fn is_name_shadowed(name: &str, bucket: Option<u32>, index: &ScopeIndex) -> bool {
+    index.module_names.contains(name)
+        || bucket.is_some_and(|b| {
+            index
+                .scope_names
+                .get(&b)
+                .is_some_and(|names| names.contains(name))
+        })
+}
+
+/// Is `check_name` shadowed at any Load-context occurrence of
+/// `occurrence_name`? Used to answer two different questions with the same
+/// per-occurrence machinery:
+///   - is `effective`'s own occurrence shadowed, i.e. does it reliably refer
+///     to the import at all (`check_name == occurrence_name == effective`)?
+///   - would the qualified replacement text fail to resolve because
+///     `new_bound_name` is itself shadowed at that same spot
+///     (`check_name == new_bound_name`, `occurrence_name == effective`)?
+/// Occurrences the name never appears at (e.g. an unused import) can't be
+/// shadowed anywhere that matters, so this is vacuously `false` for those.
+fn shadowed_at_occurrences_of(
+    check_name: &str,
+    occurrence_name: &str,
+    load_names: &[(u32, u32, String)],
+    scope_index: &ScopeIndex,
+) -> bool {
+    load_names
+        .iter()
+        .filter(|(_, _, name)| name == occurrence_name)
+        .any(|&(start, _, _)| {
+            is_name_shadowed(
+                check_name,
+                bucket_for_offset(scope_index, start),
+                scope_index,
+            )
+        })
+}
+
+// ---------------------------------------------------------------------------
 // AST-based __all__ collection
 // ---------------------------------------------------------------------------
 
@@ -671,7 +909,9 @@ fn check_imports(
 ) -> Vec<Violation> {
     let lines: Vec<&str> = source.lines().collect();
     let (imports, all_exports) = parse_ast(source);
-    let bound_names = collect_bound_names(&parse_module_stmts(source));
+    let stmts = parse_module_stmts(source);
+    let scope_index = build_scope_index(&stmts);
+    let load_names = collect_load_names(&stmts);
     let mut violations = Vec::new();
 
     let exception_set: HashSet<&str> = exceptions.iter().map(String::as_str).collect();
@@ -723,7 +963,8 @@ fn check_imports(
                 continue;
             }
 
-            let name_shadowed = bound_names.contains(effective);
+            let name_shadowed =
+                shadowed_at_occurrences_of(effective, effective, &load_names, &scope_index);
             let candidate_fix = if name_shadowed {
                 None
             } else {
@@ -732,12 +973,22 @@ fn check_imports(
             // Even when the *old* alias name isn't shadowed, the fix may
             // introduce a *new* bound name (e.g. `plugin` from
             // `from parent import plugin`) that collides with an existing
-            // local binding elsewhere in the file. That's equally unsafe to
-            // auto-fix -- but the colliding name to report is the *new*
-            // one, not the original alias name.
+            // local binding at one of `effective`'s own call sites -- the
+            // qualified replacement text (`plugin.Something`) inserted right
+            // there would resolve `plugin` to that local binding instead of
+            // our new import. That's equally unsafe to auto-fix -- but the
+            // colliding name to report is the *new* one, not the original
+            // alias name.
             let new_bound_shadow: Option<String> = candidate_fix
                 .as_ref()
-                .filter(|f| bound_names.contains(&f.new_bound_name))
+                .filter(|f| {
+                    shadowed_at_occurrences_of(
+                        &f.new_bound_name,
+                        effective,
+                        &load_names,
+                        &scope_index,
+                    )
+                })
                 .map(|f| f.new_bound_name.clone());
             let fix = if new_bound_shadow.is_some() {
                 None
@@ -795,7 +1046,8 @@ fn apply_fixes(
     let lines: Vec<&str> = source.lines().collect();
     let (imports, all_exports) = parse_ast(source);
     let stmts = parse_module_stmts(source);
-    let bound_names = collect_bound_names(&stmts);
+    let scope_index = build_scope_index(&stmts);
+    let load_names = collect_load_names(&stmts);
     let exception_set: HashSet<&str> = exceptions.iter().map(String::as_str).collect();
 
     // ── Phase 1: collect fix instructions ────────────────────────────────
@@ -803,8 +1055,11 @@ fn apply_fixes(
     let mut aliases_to_remove: HashMap<usize, HashSet<String>> = HashMap::new();
     // import_spans       : 0-based start_line → 0-based end_line
     let mut import_spans: HashMap<usize, usize> = HashMap::new();
-    // new_imports        : import_key -> import statement string (deduped)
-    let mut new_imports: HashMap<String, String> = HashMap::new();
+    // top_level_new_imports : import_key -> import statement string (deduped)
+    let mut top_level_new_imports: HashMap<String, String> = HashMap::new();
+    // nested_import_anchors : (enclosing block, import statement) -> earliest
+    // line in that block where this new import must be inserted.
+    let mut nested_import_anchors: HashMap<(u32, String), usize> = HashMap::new();
     // renames            : old_local_name → new_qualified_name
     let mut renames: HashMap<String, String> = HashMap::new();
     let mut last_import_line: Option<usize> = None;
@@ -830,12 +1085,12 @@ fn apply_fixes(
             if all_exports.contains(effective) || all_exports.contains(&alias.name) {
                 continue;
             }
-            if bound_names.contains(effective) {
-                // `effective` is also assigned/bound somewhere else in this
-                // file (e.g. shadowed by a local variable of the same
-                // name). We have no scope resolution, so we can't tell
-                // which `Load` occurrences of that name refer to the import
-                // versus the local binding -- renaming would silently
+            if shadowed_at_occurrences_of(effective, effective, &load_names, &scope_index) {
+                // `effective`'s own occurrences aren't reliably reads of the
+                // import: a local binding of the same name shares the scope
+                // of at least one of them, and with no full scope resolution
+                // we can't tell which `Load` occurrences refer to the import
+                // versus that local binding -- renaming would silently
                 // change behaviour rather than raise a syntax error. Skip
                 // the fix; `check_imports` reports this same condition as a
                 // non-fixable violation with an explanatory `help` message.
@@ -850,17 +1105,19 @@ fn apply_fixes(
             }
 
             if let Some(fix) = can_fix(&imp.module, &alias.name, probe) {
-                if bound_names.contains(&fix.new_bound_name) {
-                    // The fix would bind `fix.new_bound_name` at module
-                    // scope (e.g. `plugin` from `from parent import
-                    // plugin`), but that name is already assigned/bound
-                    // elsewhere in the file. Applying the fix would
-                    // silently shadow that binding (or, if the collision is
-                    // inside a function, turn every reference in that
-                    // function into a local before its assignment -- an
-                    // `UnboundLocalError` at runtime). Skip the fix;
-                    // `check_imports` reports this same condition as a
-                    // non-fixable violation.
+                if shadowed_at_occurrences_of(
+                    &fix.new_bound_name,
+                    effective,
+                    &load_names,
+                    &scope_index,
+                ) {
+                    // The fix would replace `effective`'s occurrences with
+                    // `fix.new_bound_name.attr` -- but at (at least) one of
+                    // those exact spots, `fix.new_bound_name` is itself
+                    // shadowed by a local binding, so the qualified
+                    // replacement wouldn't resolve to our new import there.
+                    // Skip the fix; `check_imports` reports this same
+                    // condition as a non-fixable violation.
                     continue;
                 }
                 let old_local = alias
@@ -871,9 +1128,16 @@ fn apply_fixes(
                 renames
                     .entry(old_local)
                     .or_insert_with(|| fix.new_qualified.clone());
-                new_imports
-                    .entry(fix.import_key.clone())
-                    .or_insert(fix.import_stmt);
+                if imp.is_top_level {
+                    top_level_new_imports
+                        .entry(fix.import_key.clone())
+                        .or_insert_with(|| fix.import_stmt.clone());
+                } else {
+                    nested_import_anchors
+                        .entry((imp.block_id, fix.import_stmt.clone()))
+                        .and_modify(|line| *line = (*line).min(imp.start_line - 1))
+                        .or_insert(imp.start_line - 1);
+                }
                 aliases_to_remove
                     .entry(imp.start_line - 1) // 0-based
                     .or_default()
@@ -895,6 +1159,18 @@ fn apply_fixes(
 
     if renames.is_empty() {
         return None;
+    }
+
+    let mut nested_new_imports_by_line: HashMap<usize, Vec<String>> = HashMap::new();
+    for ((_, stmt), line_idx) in nested_import_anchors {
+        nested_new_imports_by_line
+            .entry(line_idx)
+            .or_default()
+            .push(stmt);
+    }
+    for stmts in nested_new_imports_by_line.values_mut() {
+        stmts.sort();
+        stmts.dedup();
     }
 
     let mut block_removed_count: HashMap<u32, usize> = HashMap::new();
@@ -930,21 +1206,21 @@ fn apply_fixes(
         }
     }
 
-    // ── Phase 2: drop imports already present in the file ────────────────
+    // ── Phase 2: drop top-level imports already present in the file ───────
     for line in &lines {
         let trimmed = line.trim();
-        for key in new_imports.clone().keys() {
+        for key in top_level_new_imports.clone().keys() {
             if key.contains('.') {
                 if let Some((parent, child)) = key.split_once('.') {
                     let pat = format!("from {parent} import {child}");
                     if trimmed == pat || trimmed.starts_with(&format!("{pat} ")) {
-                        new_imports.remove(key);
+                        top_level_new_imports.remove(key);
                     }
                 }
             } else {
                 let pat = format!("import {key}");
                 if trimmed == pat || trimmed.starts_with(&format!("{pat} ")) {
-                    new_imports.remove(key);
+                    top_level_new_imports.remove(key);
                 }
             }
         }
@@ -957,11 +1233,16 @@ fn apply_fixes(
         "\n"
     };
     let mut lines_out: Vec<String> = source.lines().map(|l| format!("{l}{eol}")).collect();
+    let mut deferred_nested_inserts: Vec<(usize, String)> = Vec::new();
 
     for (line_idx, remove_set) in &aliases_to_remove {
         if *line_idx >= lines_out.len() {
             continue;
         }
+        let nested_new_imports = nested_new_imports_by_line
+            .get(line_idx)
+            .cloned()
+            .unwrap_or_default();
         let original = lines[*line_idx];
         let trimmed = original.trim_start();
         let leading = &original[..original.len() - trimmed.len()];
@@ -1037,7 +1318,13 @@ fn apply_fixes(
                         lines_out[i] = eol.to_owned();
                     }
                 }
-                if pass_line.contains(line_idx) {
+                if let Some(first_stmt) = nested_new_imports.first() {
+                    lines_out[*line_idx] = format!("{leading}{first_stmt}{eol}");
+                    for stmt in nested_new_imports.iter().skip(1) {
+                        deferred_nested_inserts
+                            .push((*line_idx + 1, format!("{leading}{stmt}{eol}")));
+                    }
+                } else if pass_line.contains(line_idx) {
                     // This block would otherwise become empty: a blank body
                     // is not valid Python, so leave a `pass` behind.
                     lines_out[*line_idx] = format!("{leading}pass{eol}");
@@ -1050,6 +1337,10 @@ fn apply_fixes(
                     if i < lines_out.len() {
                         lines_out[i] = eol.to_owned();
                     }
+                }
+                for stmt in &nested_new_imports {
+                    deferred_nested_inserts
+                        .push((end_line_idx + 1, format!("{leading}{stmt}{eol}")));
                 }
             } else {
                 // Reconstruct a parenthesised block.
@@ -1073,6 +1364,10 @@ fn apply_fixes(
                         lines_out[i] = eol.to_owned();
                     }
                 }
+                for stmt in &nested_new_imports {
+                    deferred_nested_inserts
+                        .push((end_line_idx + 1, format!("{leading}{stmt}{eol}")));
+                }
             }
         } else {
             // No parens: handle only single-line imports.
@@ -1093,21 +1388,31 @@ fn apply_fixes(
                         })
                         .collect();
 
-                    lines_out[*line_idx] = if survivors.is_empty() {
-                        if pass_line.contains(line_idx) {
+                    if survivors.is_empty() {
+                        if let Some(first_stmt) = nested_new_imports.first() {
+                            lines_out[*line_idx] = format!("{leading}{first_stmt}{eol}");
+                            for stmt in nested_new_imports.iter().skip(1) {
+                                deferred_nested_inserts
+                                    .push((*line_idx + 1, format!("{leading}{stmt}{eol}")));
+                            }
+                        } else if pass_line.contains(line_idx) {
                             // This block would otherwise become empty: a
                             // blank body is not valid Python, so leave a
                             // `pass` behind.
-                            format!("{leading}pass{eol}")
+                            lines_out[*line_idx] = format!("{leading}pass{eol}");
                         } else {
-                            eol.to_owned() // blank preserves subsequent line numbers
+                            lines_out[*line_idx] = eol.to_owned(); // blank preserves line numbers
                         }
                     } else {
-                        format!(
+                        lines_out[*line_idx] = format!(
                             "{leading}from {module_part} import {}{eol}",
                             survivors.join(", ")
-                        )
-                    };
+                        );
+                        for stmt in &nested_new_imports {
+                            deferred_nested_inserts
+                                .push((end_line_idx + 1, format!("{leading}{stmt}{eol}")));
+                        }
+                    }
                 }
             }
         }
@@ -1170,19 +1475,34 @@ fn apply_fixes(
         }
     }
 
-    // ── Phase 5: inject new imports after the last top-level import line ──
-    if !new_imports.is_empty() {
+    // ── Phase 5a: inject deferred nested-scope imports in place ───────────
+    deferred_nested_inserts.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let mut nested_insert_offset = 0usize;
+    for (insert_pos, line) in &deferred_nested_inserts {
+        let pos = (*insert_pos + nested_insert_offset).min(lines_out.len());
+        lines_out.insert(pos, line.clone());
+        nested_insert_offset += 1;
+    }
+
+    // ── Phase 5b: inject top-level imports after the last top-level import ─
+    if !top_level_new_imports.is_empty() {
         // When there is no top-level import to anchor on (e.g. every import
         // in the file lives inside `if TYPE_CHECKING:` or a function), the
         // only always-safe place to add a new `import X` statement is the
         // very top of the file (position 0) -- never "after line 0", since
         // line 0 could be the first line of an unrelated block (as in the
         // `if TYPE_CHECKING:` case) rather than a docstring/shebang.
-        let inject_pos = match last_import_line {
+        let base_inject_pos = match last_import_line {
             Some(line) => (line + 1).min(lines_out.len()),
             None => 0,
         };
-        let mut sorted: Vec<&String> = new_imports.values().collect();
+        let nested_lines_before_anchor = deferred_nested_inserts
+            .iter()
+            .filter(|(insert_pos, _)| *insert_pos < base_inject_pos)
+            .count();
+        let inject_pos = (base_inject_pos + nested_lines_before_anchor).min(lines_out.len());
+
+        let mut sorted: Vec<&String> = top_level_new_imports.values().collect();
         sorted.sort();
         for (offset, stmt) in sorted.into_iter().enumerate() {
             lines_out.insert(inject_pos + offset, format!("{stmt}{eol}"));
@@ -1734,6 +2054,154 @@ mod tests {
         assert!(
             result.is_none(),
             "import with a colliding new-bound-name must not be auto-fixed, got: {result:?}"
+        );
+    }
+
+    // ── regression tests: shadow checks are scope-aware, not file-wide ────
+
+    #[test]
+    fn unrelated_sibling_function_parameter_does_not_block_fix() {
+        // `metadata` is a parameter of a completely unrelated function; the
+        // fix's own usage site (`distributions()` inside
+        // `_installed_packages`) is never affected by it, so a file-wide
+        // "is `metadata` bound anywhere" check must not block this fix.
+        let source = concat!(
+            "from importlib.metadata import distributions\n",
+            "\n\n",
+            "def _installed_packages():\n",
+            "    return list(distributions())\n",
+            "\n\n",
+            "def pytest_metadata(metadata: dict) -> None:\n",
+            "    metadata[\"Packages\"] = _installed_packages()\n",
+        );
+        let violations = rule().check(&ctx(source), &empty_cfg());
+        assert_eq!(violations.len(), 1, "expected exactly one violation");
+        assert!(
+            violations[0].fixable,
+            "an unrelated function's parameter must not block this fix, got: {:?}",
+            violations[0]
+        );
+
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        let fixed = result.expect("fixable file should be rewritten");
+        assert!(
+            fixed.contains("from importlib import metadata"),
+            "got:\n{fixed}"
+        );
+        assert!(fixed.contains("metadata.distributions()"), "got:\n{fixed}");
+        assert!(
+            parse_module(&fixed).is_ok(),
+            "fixed source must remain valid Python:\n{fixed}"
+        );
+    }
+
+    #[test]
+    fn same_new_bound_name_partially_fixable_depending_on_call_site_scope() {
+        // Two separate imports would both introduce `from http import
+        // server`. `HTTPServer` is used at module level (safe);
+        // `BaseHTTPRequestHandler` is used inside a function that has its
+        // own `server` parameter, so rewriting it to
+        // `server.BaseHTTPRequestHandler` there would resolve `server` to
+        // the parameter instead of the new import. A file-wide shadow check
+        // would conservatively block *both*; a scope-aware one blocks only
+        // the second.
+        let source = concat!(
+            "from http.server import BaseHTTPRequestHandler\n",
+            "from http.server import HTTPServer\n",
+            "\n\n",
+            "class ThreadedHTTPServer(HTTPServer):\n",
+            "    pass\n",
+            "\n\n",
+            "def build_handler(server):\n",
+            "    class Handler(BaseHTTPRequestHandler):\n",
+            "        pass\n",
+            "    return Handler\n",
+        );
+        let violations = rule().check(&ctx(source), &empty_cfg());
+        assert_eq!(
+            violations.len(),
+            2,
+            "expected two violations, got: {violations:?}"
+        );
+        let http_server_violation = violations
+            .iter()
+            .find(|v| v.message.contains("'HTTPServer'"))
+            .expect("HTTPServer violation present");
+        let base_handler_violation = violations
+            .iter()
+            .find(|v| v.message.contains("'BaseHTTPRequestHandler'"))
+            .expect("BaseHTTPRequestHandler violation present");
+        assert!(
+            http_server_violation.fixable,
+            "module-level usage is not shadowed, should be fixable"
+        );
+        assert!(
+            !base_handler_violation.fixable,
+            "usage inside build_handler is shadowed by its own `server` parameter"
+        );
+
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        let fixed = result.expect("partially fixable file should be rewritten");
+        assert!(
+            fixed.contains("class ThreadedHTTPServer(server.HTTPServer):"),
+            "HTTPServer usage should be qualified, got:\n{fixed}"
+        );
+        assert!(
+            fixed.contains("class Handler(BaseHTTPRequestHandler):"),
+            "BaseHTTPRequestHandler usage must remain untouched, got:\n{fixed}"
+        );
+        assert!(
+            fixed.contains("from http.server import BaseHTTPRequestHandler\n"),
+            "unfixed import line should remain, got:\n{fixed}"
+        );
+        assert!(
+            parse_module(&fixed).is_ok(),
+            "fixed source must remain valid Python:\n{fixed}"
+        );
+    }
+
+    #[test]
+    fn late_function_import_fix_stays_in_function_scope() {
+        let source = "def f():\n    from os.path import join\n    return join('a', 'b')\n";
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        let fixed = result.expect("fixable file should be rewritten");
+
+        assert!(
+            fixed.starts_with("def f():\n"),
+            "late imports should not be moved to module top-level, got:\n{fixed}"
+        );
+        assert!(
+            fixed.contains("def f():\n    import os.path\n"),
+            "late import should stay in function scope, got:\n{fixed}"
+        );
+        assert!(
+            fixed.contains("return os.path.join('a', 'b')"),
+            "call site should be rewritten to qualified form, got:\n{fixed}"
+        );
+        assert!(
+            parse_module(&fixed).is_ok(),
+            "fixed source must remain valid Python:\n{fixed}"
+        );
+    }
+
+    #[test]
+    fn type_checking_import_fix_stays_in_type_checking_block() {
+        let source =
+            "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from os.path import join\n";
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        let fixed = result.expect("fixable file should be rewritten");
+
+        assert!(
+            fixed.contains("if TYPE_CHECKING:\n    import os.path\n"),
+            "TYPE_CHECKING import should stay in guarded block, got:\n{fixed}"
+        );
+        assert!(
+            !fixed.starts_with("import os.path\n"),
+            "TYPE_CHECKING-only imports should not become unconditional top-level imports, got:\n{fixed}"
+        );
+        assert!(
+            parse_module(&fixed).is_ok(),
+            "fixed source must remain valid Python:\n{fixed}"
         );
     }
 }

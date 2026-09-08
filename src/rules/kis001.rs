@@ -17,7 +17,7 @@ use super::{has_noqa, FileContext, Rule};
 use crate::module_probe::{ModuleCheck, ModuleProbe};
 use crate::types::{Level, Violation};
 use anyhow::Result;
-use ruff_python_ast::{Expr, Stmt};
+use ruff_python_ast::{Expr, Pattern, Stmt};
 use ruff_python_parser::parse_module;
 use ruff_text_size::Ranged;
 use std::collections::{HashMap, HashSet};
@@ -579,6 +579,58 @@ fn insert_scoped(name: String, bucket: Option<u32>, index: &mut ScopeIndex) {
     }
 }
 
+/// Collect every capture-binding identifier in a `match` pattern (`case x:`,
+/// `case [a, *rest]:`, `case {**rest}:`, `case Point(x=0) as p:`, `case a | b:`,
+/// ...). Unlike assignment/`for`/`with` targets, pattern-bound names are
+/// plain `Identifier`s rather than `Expr::Name` nodes in Store context (and
+/// the default AST walk doesn't visit them at all, see `walk_pattern`), so
+/// `collect_names_bound_by_expr` can't see them -- this walks the `Pattern`
+/// tree by hand instead.
+fn collect_names_bound_by_pattern(pattern: &Pattern, out: &mut HashSet<String>) {
+    match pattern {
+        Pattern::MatchValue(_) | Pattern::MatchSingleton(_) => {}
+        Pattern::MatchSequence(p) => {
+            for sub in &p.patterns {
+                collect_names_bound_by_pattern(sub, out);
+            }
+        }
+        Pattern::MatchMapping(p) => {
+            if let Some(rest) = &p.rest {
+                out.insert(rest.as_str().to_owned());
+            }
+            for sub in &p.patterns {
+                collect_names_bound_by_pattern(sub, out);
+            }
+        }
+        Pattern::MatchClass(p) => {
+            for sub in &p.arguments.patterns {
+                collect_names_bound_by_pattern(sub, out);
+            }
+            for kw in &p.arguments.keywords {
+                collect_names_bound_by_pattern(&kw.pattern, out);
+            }
+        }
+        Pattern::MatchStar(p) => {
+            if let Some(name) = &p.name {
+                out.insert(name.as_str().to_owned());
+            }
+        }
+        Pattern::MatchAs(p) => {
+            if let Some(name) = &p.name {
+                out.insert(name.as_str().to_owned());
+            }
+            if let Some(sub) = &p.pattern {
+                collect_names_bound_by_pattern(sub, out);
+            }
+        }
+        Pattern::MatchOr(p) => {
+            for sub in &p.patterns {
+                collect_names_bound_by_pattern(sub, out);
+            }
+        }
+    }
+}
+
 /// Recursively assign every bound name in `stmts` to `bucket` (`None` means
 /// module level), discovering new buckets for any `def`/`class` found along
 /// the way -- including ones nested inside `if`/`for`/`while`/`with`/`try`
@@ -634,6 +686,20 @@ fn collect_scopes(stmts: &[Stmt], bucket: Option<u32>, index: &mut ScopeIndex) {
                 }
                 bind_exprs_scoped(&targets, bucket, index);
                 collect_scopes(&node.body, bucket, index);
+            }
+            Stmt::Match(node) => {
+                bind_exprs_scoped(&[&node.subject], bucket, index);
+                for case in &node.cases {
+                    let mut names = HashSet::new();
+                    collect_names_bound_by_pattern(&case.pattern, &mut names);
+                    if let Some(guard) = &case.guard {
+                        collect_names_bound_by_expr(guard, &mut names);
+                    }
+                    for n in names {
+                        insert_scoped(n, bucket, index);
+                    }
+                    collect_scopes(&case.body, bucket, index);
+                }
             }
             Stmt::Try(node) => {
                 collect_scopes(&node.body, bucket, index);
@@ -2244,8 +2310,89 @@ mod tests {
             "TYPE_CHECKING import should stay in guarded block, got:\n{fixed}"
         );
         assert!(
-            !fixed.starts_with("import os.path\n"),
-            "TYPE_CHECKING-only imports should not become unconditional top-level imports, got:\n{fixed}"
+            parse_module(&fixed).is_ok(),
+            "fixed source must remain valid Python:\n{fixed}"
+        );
+    }
+
+    #[test]
+    fn match_case_nested_function_gets_own_scope_bucket() {
+        // A `def` nested inside a module-level `match`/`case` block must
+        // still get its own scope bucket -- just like a plain sibling
+        // function does (see `unrelated_sibling_function_parameter_does_not_block_fix`)
+        // -- rather than folding its parameter names into the enclosing
+        // (module) scope, which would incorrectly report the
+        // `distributions()` fix below as unsafe.
+        let source = concat!(
+            "from importlib.metadata import distributions\n",
+            "\n\n",
+            "match 'mode':\n",
+            "    case 'prod':\n",
+            "        def pytest_metadata(metadata: dict) -> None:\n",
+            "            metadata['env'] = 'prod'\n",
+            "    case _:\n",
+            "        def pytest_metadata(metadata: dict) -> None:\n",
+            "            metadata['env'] = 'dev'\n",
+            "\n\n",
+            "def _installed_packages():\n",
+            "    return list(distributions())\n",
+        );
+        let violations = rule().check(&ctx(source), &empty_cfg());
+        assert_eq!(violations.len(), 1, "expected exactly one violation");
+        assert!(
+            violations[0].fixable,
+            "a match-case-nested function's parameter must not block this fix, got: {:?}",
+            violations[0]
+        );
+
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        let fixed = result.expect("fixable file should be rewritten");
+        assert!(
+            fixed.contains("from importlib import metadata"),
+            "got:\n{fixed}"
+        );
+        assert!(fixed.contains("metadata.distributions()"), "got:\n{fixed}");
+        assert!(
+            parse_module(&fixed).is_ok(),
+            "fixed source must remain valid Python:\n{fixed}"
+        );
+    }
+
+    #[test]
+    fn nested_plain_import_alongside_fixable_import_is_left_untouched() {
+        // KIS001 only recognizes `from X import Y` statements (`collect_imports`
+        // matches `Stmt::ImportFrom` only) -- a bare `import a, b` is never
+        // turned into a fix candidate. Pin that behavior for a nested block
+        // that mixes a plain import with a fixable `from` import sharing the
+        // same block: the plain import must survive completely untouched
+        // even as its sibling is rewritten and a new nested-scope import is
+        // anchored into the same block.
+        let source = concat!(
+            "from typing import TYPE_CHECKING\n",
+            "\n",
+            "if TYPE_CHECKING:\n",
+            "    import os, sys\n",
+            "    from os.path import join\n",
+            "\n\n",
+            "def use():\n",
+            "    return join('a', 'b')\n",
+        );
+        let violations = rule().check(&ctx(source), &empty_cfg());
+        assert_eq!(violations.len(), 1, "expected exactly one violation");
+
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        let fixed = result.expect("fixable file should be rewritten");
+        assert!(
+            fixed.contains("    import os, sys\n"),
+            "plain import must survive untouched, got:\n{fixed}"
+        );
+        assert!(
+            fixed.contains("if TYPE_CHECKING:\n    import os, sys\n    import os.path\n"),
+            "new nested import should replace the fixed import in place, right after the untouched plain import, got:\n{fixed}"
+        );
+        assert!(
+            fixed.contains("return os.path.join('a', 'b')"),
+            "got:\n{fixed}"
         );
         assert!(
             parse_module(&fixed).is_ok(),

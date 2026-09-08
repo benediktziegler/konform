@@ -777,6 +777,7 @@ fn is_name_shadowed(name: &str, bucket: Option<u32>, index: &ScopeIndex) -> bool
 ///   - would the qualified replacement text fail to resolve because
 ///     `new_bound_name` is itself shadowed at that same spot
 ///     (`check_name == new_bound_name`, `occurrence_name == effective`)?
+///
 /// Occurrences the name never appears at (e.g. an unused import) can't be
 /// shadowed anywhere that matters, so this is vacuously `false` for those.
 fn shadowed_at_occurrences_of(
@@ -1591,11 +1592,9 @@ fn apply_fixes(
 
     // ── Phase 5a: inject deferred nested-scope imports in place ───────────
     deferred_nested_inserts.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    let mut nested_insert_offset = 0usize;
-    for (insert_pos, line) in &deferred_nested_inserts {
+    for (nested_insert_offset, (insert_pos, line)) in deferred_nested_inserts.iter().enumerate() {
         let pos = (*insert_pos + nested_insert_offset).min(lines_out.len());
         lines_out.insert(pos, line.clone());
-        nested_insert_offset += 1;
     }
 
     // ── Phase 5b: inject top-level imports after the last top-level import ─

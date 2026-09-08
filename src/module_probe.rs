@@ -54,8 +54,16 @@ impl ModuleProbe {
     ///
     /// Pass the result of [`crate::config::resolve_python`] here so the probe
     /// searches the same environment that owns the files being checked.
-    pub fn new(python: &Path) -> Self {
-        let sys_path = Self::get_sys_path(python).unwrap_or_default();
+    ///
+    /// `project_root` stands in for "current working directory" when
+    /// resolving the empty-string entry in `sys.path` (see
+    /// [`ModuleProbe::resolve_sys_path`]). It should be the root of the
+    /// project being linted (e.g. `config.config_dir`, or the target path's
+    /// repo root) — **not** necessarily the konform process's own OS working
+    /// directory, since `konform check some/other/project` may be invoked
+    /// from anywhere.
+    pub fn new(python: &Path, project_root: &Path) -> Self {
+        let sys_path = Self::get_sys_path(python, project_root).unwrap_or_default();
         let builtin_modules = Self::get_builtin_modules(python).unwrap_or_default();
         Self {
             sys_path,
@@ -97,7 +105,7 @@ impl ModuleProbe {
         h.finish()
     }
 
-    fn get_sys_path(python: &Path) -> Option<Vec<PathBuf>> {
+    fn get_sys_path(python: &Path, project_root: &Path) -> Option<Vec<PathBuf>> {
         let output = Command::new(python)
             .args(["-c", "import json,sys; print(json.dumps(sys.path))"])
             .output()
@@ -107,8 +115,7 @@ impl ModuleProbe {
         }
         let stdout = String::from_utf8(output.stdout).ok()?;
         let paths: Vec<String> = serde_json::from_str(stdout.trim()).ok()?;
-        let cwd = std::env::current_dir().ok();
-        Some(Self::resolve_sys_path(paths, cwd.as_deref()))
+        Some(Self::resolve_sys_path(paths, Some(project_root)))
     }
 
     /// Ask the interpreter for the set of standard-library module names that
@@ -142,17 +149,22 @@ impl ModuleProbe {
     ///
     /// Python represents "current working directory" as an empty string in
     /// `sys.path` (e.g. `sys.path[0]` for `python -c "..."` / interactive
-    /// use). Since `python` is spawned without overriding its working
-    /// directory, that empty string means *this process's* `cwd` — resolve
-    /// it rather than silently dropping it, otherwise modules/packages only
-    /// reachable via cwd (e.g. namespace packages rooted at the repo root,
-    /// such as a `tests/mocks` directory with no `__init__.py`) are never
-    /// found and get incorrectly flagged as "not a module".
+    /// use). `python` is spawned without overriding its working directory,
+    /// so that empty string would otherwise mean *this process's* OS `cwd` —
+    /// which is wrong here, since konform may be checking a project that
+    /// isn't the directory it was launched from (e.g.
+    /// `konform check ../other-project`). Substitute `project_root` (the
+    /// root of the project actually being linted) instead of silently
+    /// dropping the entry or using the wrong directory, otherwise
+    /// modules/packages only reachable via that root (e.g. namespace
+    /// packages rooted at the repo root, such as a `tests/mocks` directory
+    /// with no `__init__.py`) are never found and get incorrectly flagged as
+    /// "not a module".
     ///
-    /// Also include `<cwd>/src` when present. Many projects use a "src layout"
-    /// (packages live under `src/` but are not installed into site-packages
-    /// during local development). Without this, valid local imports can be
-    /// misclassified as non-modules.
+    /// Also include `<project_root>/src` when present. Many projects use a
+    /// "src layout" (packages live under `src/` but are not installed into
+    /// site-packages during local development). Without this, valid local
+    /// imports can be misclassified as non-modules.
     fn resolve_sys_path(paths: Vec<String>, cwd: Option<&Path>) -> Vec<PathBuf> {
         let mut resolved: Vec<PathBuf> = paths
             .into_iter()
@@ -395,13 +407,17 @@ impl ModuleProbe {
 impl Default for ModuleProbe {
     /// Convenience constructor using the system `python3`.
     /// Prefer [`ModuleProbe::new`] with [`crate::config::resolve_python`]
-    /// when a project config is available.
+    /// and an explicit project root when a project config is available.
     fn default() -> Self {
-        Self::new(Path::new(if cfg!(windows) {
-            "python.exe"
-        } else {
-            "python3"
-        }))
+        let cwd = std::env::current_dir().unwrap_or_default();
+        Self::new(
+            Path::new(if cfg!(windows) {
+                "python.exe"
+            } else {
+                "python3"
+            }),
+            &cwd,
+        )
     }
 }
 
@@ -702,6 +718,41 @@ mod tests {
             cache: DashMap::new(),
             root_cache: DashMap::new(),
         };
+        assert!(probe.is_module("tests.mocks", "mock_adb_server"));
+    }
+
+    #[test]
+    fn new_resolves_cwd_entry_against_project_root_not_process_cwd() {
+        // End-to-end regression test for the real bug: `ModuleProbe::new`
+        // must resolve sys.path's cwd ("") entry against the project being
+        // linted (`project_root`), not wherever the konform process itself
+        // happens to be running from (`std::env::current_dir()`).
+        //
+        // The test process's actual cwd is the crate root, deliberately
+        // different from `tmp` here -- if `new`/`get_sys_path` regress to
+        // using `std::env::current_dir()` internally, this namespace
+        // package would no longer be found and the test fails.
+        let tmp = TempDir::new().unwrap();
+        let tests_dir = tmp.path().join("tests");
+        let mocks_dir = tests_dir.join("mocks");
+        fs::create_dir_all(&mocks_dir).unwrap();
+        fs::write(tests_dir.join("__init__.py"), "").unwrap();
+        // Deliberately no mocks/__init__.py: implicit namespace package,
+        // only discoverable via the resolved cwd entry.
+        fs::write(mocks_dir.join("mock_adb_server.py"), "").unwrap();
+
+        assert_ne!(
+            std::env::current_dir().unwrap(),
+            tmp.path(),
+            "test is only meaningful if the process cwd differs from project_root"
+        );
+
+        let python = if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python3"
+        };
+        let probe = ModuleProbe::new(Path::new(python), tmp.path());
         assert!(probe.is_module("tests.mocks", "mock_adb_server"));
     }
 

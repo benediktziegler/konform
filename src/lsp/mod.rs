@@ -24,7 +24,8 @@ pub fn run() {
     let cwd = std::env::current_dir().unwrap_or_default();
     let config = load_config(Some(&cwd), None);
     let python = resolve_python(&config);
-    let probe = Arc::new(ModuleProbe::new(&python));
+    let module_probe_root = config.config_dir.clone().unwrap_or_else(|| cwd.clone());
+    let probe = Arc::new(ModuleProbe::new(&python, &module_probe_root));
 
     // ── Build the shared session ───────────────────────────────────────────
     let session = Arc::new(RwLock::new(Session::new(config, probe, cwd)));

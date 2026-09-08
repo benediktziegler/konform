@@ -384,13 +384,24 @@ fn run_check(args: CheckArgs, isolated: bool) {
         None
     };
 
-    let python = resolve_python(&config);
-    let probe = Arc::new(ModuleProbe::new(&python));
-    let active_rules = all_rules(Arc::clone(&probe), config.config_dir.clone());
-
     let repo_root = anchor
         .and_then(find_repo_root)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let python = resolve_python(&config);
+    // `sys.path`'s empty-string ("current working directory") entry must
+    // resolve against the project actually being linted, not wherever the
+    // konform process happens to have been launched from (e.g.
+    // `konform check ../other-project` run from a sibling directory).
+    // Prefer the directory holding the discovered config file; fall back to
+    // the repo root anchored at the target path.
+    let module_probe_root = config
+        .config_dir
+        .clone()
+        .unwrap_or_else(|| repo_root.clone());
+    let probe = Arc::new(ModuleProbe::new(&python, &module_probe_root));
+    let active_rules = all_rules(Arc::clone(&probe), config.config_dir.clone());
+
     let level_str = args.level.to_string();
     let cache_root = repo_root.join(&config.cache_dir);
     let _ = cache::init(&cache_root);

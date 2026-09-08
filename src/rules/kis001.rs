@@ -398,18 +398,26 @@ fn collect_imports(
 /// spans (rather than a textual word-boundary scan) also naturally skips
 /// occurrences inside string literals, docstrings and comments, since those
 /// never produce `Expr::Name` nodes.
-fn collect_load_names(stmts: &[Stmt]) -> Vec<(u32, u32, String)> {
-    struct LoadNameVisitor(Vec<(u32, u32, String)>);
+/// A byte-offset half-open span `[start, end)` into the source, paired with
+/// the name it covers (a Load-context occurrence of that name).
+struct NamedSpan {
+    start: u32,
+    end: u32,
+    name: String,
+}
+
+fn collect_load_names(stmts: &[Stmt]) -> Vec<NamedSpan> {
+    struct LoadNameVisitor(Vec<NamedSpan>);
 
     impl<'a> ruff_python_ast::visitor::Visitor<'a> for LoadNameVisitor {
         fn visit_expr(&mut self, expr: &'a Expr) {
             if let Expr::Name(name) = expr {
                 if name.ctx.is_load() {
-                    self.0.push((
-                        u32::from(name.range().start()),
-                        u32::from(name.range().end()),
-                        name.id.to_string(),
-                    ));
+                    self.0.push(NamedSpan {
+                        start: u32::from(name.range().start()),
+                        end: u32::from(name.range().end()),
+                        name: name.id.to_string(),
+                    });
                 }
             }
             ruff_python_ast::visitor::walk_expr(self, expr);
@@ -516,9 +524,10 @@ struct ScopeIndex {
     /// bucket id (a top-level `def`/`class`'s start byte offset) -> every
     /// name bound anywhere in its subtree.
     scope_names: HashMap<u32, HashSet<String>>,
-    /// `(start, end, bucket id)` for every top-level `def`/`class`, used to
-    /// find which bucket (if any) contains a given byte offset.
-    buckets: Vec<(u32, u32, u32)>,
+    /// `(start, end)` for every top-level `def`/`class`, used to find which
+    /// bucket (if any) contains a given byte offset. The bucket id (the key
+    /// into `scope_names`) is always the block's `start` offset.
+    buckets: Vec<(u32, u32)>,
 }
 
 /// Collect every **Store**-context name bound anywhere within a single
@@ -545,6 +554,20 @@ fn collect_names_bound_by_expr(expr: &Expr, out: &mut HashSet<String>) {
     ruff_python_ast::visitor::Visitor::visit_expr(&mut visitor, expr);
 }
 
+/// Collect the names bound by each of `exprs` (assignment/`for`/`with`/
+/// walrus targets) and record them all in `bucket` (or module scope). Shared
+/// by every `collect_scopes` arm that binds a handful of target expressions
+/// before recursing into a body.
+fn bind_exprs_scoped(exprs: &[&Expr], bucket: Option<u32>, index: &mut ScopeIndex) {
+    let mut names = HashSet::new();
+    for expr in exprs {
+        collect_names_bound_by_expr(expr, &mut names);
+    }
+    for n in names {
+        insert_scoped(n, bucket, index);
+    }
+}
+
 fn insert_scoped(name: String, bucket: Option<u32>, index: &mut ScopeIndex) {
     match bucket {
         Some(id) => {
@@ -567,7 +590,7 @@ fn collect_scopes(stmts: &[Stmt], bucket: Option<u32>, index: &mut ScopeIndex) {
                 // The function's own name binds in the *enclosing* scope.
                 insert_scoped(f.name.as_str().to_owned(), bucket, index);
                 let id = u32::from(f.range().start());
-                index.buckets.push((id, u32::from(f.range().end()), id));
+                index.buckets.push((id, u32::from(f.range().end())));
                 // Everything inside -- params, body, however deeply nested --
                 // becomes this one bucket; reuse the existing flat collector
                 // rather than hand-walking every statement/expression kind.
@@ -577,58 +600,39 @@ fn collect_scopes(stmts: &[Stmt], bucket: Option<u32>, index: &mut ScopeIndex) {
             Stmt::ClassDef(c) => {
                 insert_scoped(c.name.as_str().to_owned(), bucket, index);
                 let id = u32::from(c.range().start());
-                index.buckets.push((id, u32::from(c.range().end()), id));
+                index.buckets.push((id, u32::from(c.range().end())));
                 let names = collect_bound_names(std::slice::from_ref(stmt));
                 index.scope_names.entry(id).or_default().extend(names);
             }
             Stmt::If(node) => {
-                let mut names = HashSet::new();
-                collect_names_bound_by_expr(&node.test, &mut names);
-                for n in names {
-                    insert_scoped(n, bucket, index);
-                }
+                bind_exprs_scoped(&[&node.test], bucket, index);
                 collect_scopes(&node.body, bucket, index);
                 for clause in &node.elif_else_clauses {
                     if let Some(test) = &clause.test {
-                        let mut names = HashSet::new();
-                        collect_names_bound_by_expr(test, &mut names);
-                        for n in names {
-                            insert_scoped(n, bucket, index);
-                        }
+                        bind_exprs_scoped(&[test], bucket, index);
                     }
                     collect_scopes(&clause.body, bucket, index);
                 }
             }
             Stmt::For(node) => {
-                let mut names = HashSet::new();
-                collect_names_bound_by_expr(&node.target, &mut names);
-                collect_names_bound_by_expr(&node.iter, &mut names);
-                for n in names {
-                    insert_scoped(n, bucket, index);
-                }
+                bind_exprs_scoped(&[&node.target, &node.iter], bucket, index);
                 collect_scopes(&node.body, bucket, index);
                 collect_scopes(&node.orelse, bucket, index);
             }
             Stmt::While(node) => {
-                let mut names = HashSet::new();
-                collect_names_bound_by_expr(&node.test, &mut names);
-                for n in names {
-                    insert_scoped(n, bucket, index);
-                }
+                bind_exprs_scoped(&[&node.test], bucket, index);
                 collect_scopes(&node.body, bucket, index);
                 collect_scopes(&node.orelse, bucket, index);
             }
             Stmt::With(node) => {
-                let mut names = HashSet::new();
+                let mut targets: Vec<&Expr> = Vec::new();
                 for item in &node.items {
                     if let Some(vars) = &item.optional_vars {
-                        collect_names_bound_by_expr(vars, &mut names);
+                        targets.push(vars);
                     }
-                    collect_names_bound_by_expr(&item.context_expr, &mut names);
+                    targets.push(&item.context_expr);
                 }
-                for n in names {
-                    insert_scoped(n, bucket, index);
-                }
+                bind_exprs_scoped(&targets, bucket, index);
                 collect_scopes(&node.body, bucket, index);
             }
             Stmt::Try(node) => {
@@ -684,8 +688,8 @@ fn bucket_for_offset(index: &ScopeIndex, offset: u32) -> Option<u32> {
     index
         .buckets
         .iter()
-        .find(|&&(start, end, _)| start <= offset && offset < end)
-        .map(|&(_, _, id)| id)
+        .find(|&&(start, end)| start <= offset && offset < end)
+        .map(|&(start, _)| start)
 }
 
 /// Is `name` bound in `bucket` (or at module level)?
@@ -712,16 +716,16 @@ fn is_name_shadowed(name: &str, bucket: Option<u32>, index: &ScopeIndex) -> bool
 fn shadowed_at_occurrences_of(
     check_name: &str,
     occurrence_name: &str,
-    load_names: &[(u32, u32, String)],
+    load_names: &[NamedSpan],
     scope_index: &ScopeIndex,
 ) -> bool {
     load_names
         .iter()
-        .filter(|(_, _, name)| name == occurrence_name)
-        .any(|&(start, _, _)| {
+        .filter(|occ| occ.name == occurrence_name)
+        .any(|occ| {
             is_name_shadowed(
                 check_name,
-                bucket_for_offset(scope_index, start),
+                bucket_for_offset(scope_index, occ.start),
                 scope_index,
             )
         })
@@ -1036,6 +1040,48 @@ fn strip_comment(s: &str) -> &str {
     s.trim_end()
 }
 
+/// Fill in the anchor line for an import block whose aliases were all
+/// removed: the first pending nested-scope import if there is one, else a
+/// `pass` if the block would otherwise be left with an empty body, else a
+/// blank line (matching the pre-blanked/absent line already there). Any
+/// nested imports beyond the first are returned as deferred
+/// `(insert_after_line, text)` pairs for the caller to queue.
+fn emptied_import_line(
+    nested_new_imports: &[String],
+    needs_pass: bool,
+    line_idx: usize,
+    leading: &str,
+    eol: &str,
+) -> (String, Vec<(usize, String)>) {
+    if let Some(first_stmt) = nested_new_imports.first() {
+        let deferred = nested_new_imports[1..]
+            .iter()
+            .map(|stmt| (line_idx + 1, format!("{leading}{stmt}{eol}")))
+            .collect();
+        (format!("{leading}{first_stmt}{eol}"), deferred)
+    } else if needs_pass {
+        // This block would otherwise become empty: a blank body is not
+        // valid Python, so leave a `pass` behind.
+        (format!("{leading}pass{eol}"), Vec::new())
+    } else {
+        (eol.to_owned(), Vec::new()) // blank preserves line numbers
+    }
+}
+
+/// Queue every pending nested-scope import to be inserted right after
+/// `after_line`.
+fn queue_nested_imports(
+    nested_new_imports: &[String],
+    after_line: usize,
+    leading: &str,
+    eol: &str,
+    deferred_nested_inserts: &mut Vec<(usize, String)>,
+) {
+    for stmt in nested_new_imports {
+        deferred_nested_inserts.push((after_line, format!("{leading}{stmt}{eol}")));
+    }
+}
+
 fn apply_fixes(
     source: &str,
     probe: &ModuleProbe,
@@ -1318,17 +1364,15 @@ fn apply_fixes(
                         lines_out[i] = eol.to_owned();
                     }
                 }
-                if let Some(first_stmt) = nested_new_imports.first() {
-                    lines_out[*line_idx] = format!("{leading}{first_stmt}{eol}");
-                    for stmt in nested_new_imports.iter().skip(1) {
-                        deferred_nested_inserts
-                            .push((*line_idx + 1, format!("{leading}{stmt}{eol}")));
-                    }
-                } else if pass_line.contains(line_idx) {
-                    // This block would otherwise become empty: a blank body
-                    // is not valid Python, so leave a `pass` behind.
-                    lines_out[*line_idx] = format!("{leading}pass{eol}");
-                }
+                let (anchor_line, deferred) = emptied_import_line(
+                    &nested_new_imports,
+                    pass_line.contains(line_idx),
+                    *line_idx,
+                    leading,
+                    eol,
+                );
+                lines_out[*line_idx] = anchor_line;
+                deferred_nested_inserts.extend(deferred);
             } else if survivors.len() == 1 {
                 // Collapse to a single line.
                 lines_out[*line_idx] =
@@ -1338,10 +1382,13 @@ fn apply_fixes(
                         lines_out[i] = eol.to_owned();
                     }
                 }
-                for stmt in &nested_new_imports {
-                    deferred_nested_inserts
-                        .push((end_line_idx + 1, format!("{leading}{stmt}{eol}")));
-                }
+                queue_nested_imports(
+                    &nested_new_imports,
+                    end_line_idx + 1,
+                    leading,
+                    eol,
+                    &mut deferred_nested_inserts,
+                );
             } else {
                 // Reconstruct a parenthesised block.
                 let mut new_block: Vec<String> = Vec::new();
@@ -1364,10 +1411,13 @@ fn apply_fixes(
                         lines_out[i] = eol.to_owned();
                     }
                 }
-                for stmt in &nested_new_imports {
-                    deferred_nested_inserts
-                        .push((end_line_idx + 1, format!("{leading}{stmt}{eol}")));
-                }
+                queue_nested_imports(
+                    &nested_new_imports,
+                    end_line_idx + 1,
+                    leading,
+                    eol,
+                    &mut deferred_nested_inserts,
+                );
             }
         } else {
             // No parens: handle only single-line imports.
@@ -1389,29 +1439,27 @@ fn apply_fixes(
                         .collect();
 
                     if survivors.is_empty() {
-                        if let Some(first_stmt) = nested_new_imports.first() {
-                            lines_out[*line_idx] = format!("{leading}{first_stmt}{eol}");
-                            for stmt in nested_new_imports.iter().skip(1) {
-                                deferred_nested_inserts
-                                    .push((*line_idx + 1, format!("{leading}{stmt}{eol}")));
-                            }
-                        } else if pass_line.contains(line_idx) {
-                            // This block would otherwise become empty: a
-                            // blank body is not valid Python, so leave a
-                            // `pass` behind.
-                            lines_out[*line_idx] = format!("{leading}pass{eol}");
-                        } else {
-                            lines_out[*line_idx] = eol.to_owned(); // blank preserves line numbers
-                        }
+                        let (anchor_line, deferred) = emptied_import_line(
+                            &nested_new_imports,
+                            pass_line.contains(line_idx),
+                            *line_idx,
+                            leading,
+                            eol,
+                        );
+                        lines_out[*line_idx] = anchor_line;
+                        deferred_nested_inserts.extend(deferred);
                     } else {
                         lines_out[*line_idx] = format!(
                             "{leading}from {module_part} import {}{eol}",
                             survivors.join(", ")
                         );
-                        for stmt in &nested_new_imports {
-                            deferred_nested_inserts
-                                .push((end_line_idx + 1, format!("{leading}{stmt}{eol}")));
-                        }
+                        queue_nested_imports(
+                            &nested_new_imports,
+                            end_line_idx + 1,
+                            leading,
+                            eol,
+                            &mut deferred_nested_inserts,
+                        );
                     }
                 }
             }
@@ -1439,12 +1487,12 @@ fn apply_fixes(
     let line_starts = build_line_starts(source);
     let mut replacements: Vec<(usize, usize, usize, String)> = Vec::new();
 
-    for (start_off, end_off, name) in collect_load_names(&stmts) {
-        let Some(new_qualified) = renames.get(&name) else {
+    for occ in collect_load_names(&stmts) {
+        let Some(new_qualified) = renames.get(&occ.name) else {
             continue;
         };
-        let (start_line, col_start) = offset_to_line_col(&line_starts, start_off);
-        let (end_line, col_end) = offset_to_line_col(&line_starts, end_off);
+        let (start_line, col_start) = offset_to_line_col(&line_starts, occ.start);
+        let (end_line, col_end) = offset_to_line_col(&line_starts, occ.end);
         if start_line != end_line {
             continue; // a bare Name never spans multiple lines
         }

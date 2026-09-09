@@ -59,11 +59,15 @@ impl ModuleProbe {
     /// resolving the empty-string entry in `sys.path` (see
     /// [`ModuleProbe::resolve_sys_path`]). It should be the root of the
     /// project being linted (e.g. `config.config_dir`, or the target path's
-    /// repo root) — **not** necessarily the konform process's own OS working
+    /// repo root) -- **not** necessarily the konform process's own OS working
     /// directory, since `konform check some/other/project` may be invoked
     /// from anywhere.
-    pub fn new(python: &Path, project_root: &Path) -> Self {
-        let sys_path = Self::get_sys_path(python, project_root).unwrap_or_default();
+    ///
+    /// `src_roots` is `config.src` -- directories (relative to `project_root`)
+    /// to additionally search, mirroring Ruff's `src` setting (defaults to
+    /// `[".", "src"]`).
+    pub fn new(python: &Path, project_root: &Path, src_roots: &[String]) -> Self {
+        let sys_path = Self::get_sys_path(python, project_root, src_roots).unwrap_or_default();
         let builtin_modules = Self::get_builtin_modules(python).unwrap_or_default();
         Self {
             sys_path,
@@ -105,7 +109,11 @@ impl ModuleProbe {
         h.finish()
     }
 
-    fn get_sys_path(python: &Path, project_root: &Path) -> Option<Vec<PathBuf>> {
+    fn get_sys_path(
+        python: &Path,
+        project_root: &Path,
+        src_roots: &[String],
+    ) -> Option<Vec<PathBuf>> {
         let output = Command::new(python)
             .args(["-c", "import json,sys; print(json.dumps(sys.path))"])
             .output()
@@ -115,7 +123,7 @@ impl ModuleProbe {
         }
         let stdout = String::from_utf8(output.stdout).ok()?;
         let paths: Vec<String> = serde_json::from_str(stdout.trim()).ok()?;
-        Some(Self::resolve_sys_path(paths, Some(project_root)))
+        Some(Self::resolve_sys_path(paths, Some(project_root), src_roots))
     }
 
     /// Ask the interpreter for the set of standard-library module names that
@@ -150,7 +158,7 @@ impl ModuleProbe {
     /// Python represents "current working directory" as an empty string in
     /// `sys.path` (e.g. `sys.path[0]` for `python -c "..."` / interactive
     /// use). `python` is spawned without overriding its working directory,
-    /// so that empty string would otherwise mean *this process's* OS `cwd` —
+    /// so that empty string would otherwise mean *this process's* OS `cwd` --
     /// which is wrong here, since konform may be checking a project that
     /// isn't the directory it was launched from (e.g.
     /// `konform check ../other-project`). Substitute `project_root` (the
@@ -161,11 +169,18 @@ impl ModuleProbe {
     /// with no `__init__.py`) are never found and get incorrectly flagged as
     /// "not a module".
     ///
-    /// Also include `<project_root>/src` when present. Many projects use a
+    /// Also resolve each entry of `src_roots` (`config.src`, mirroring
+    /// Ruff's `src` setting) relative to `project_root` and append any that
+    /// exist as a directory and aren't already present. Many projects use a
     /// "src layout" (packages live under `src/` but are not installed into
-    /// site-packages during local development). Without this, valid local
-    /// imports can be misclassified as non-modules.
-    fn resolve_sys_path(paths: Vec<String>, cwd: Option<&Path>) -> Vec<PathBuf> {
+    /// site-packages during local development), or a non-standard layout
+    /// entirely; without this, valid local imports in such layouts can be
+    /// misclassified as non-modules.
+    fn resolve_sys_path(
+        paths: Vec<String>,
+        cwd: Option<&Path>,
+        src_roots: &[String],
+    ) -> Vec<PathBuf> {
         let mut resolved: Vec<PathBuf> = paths
             .into_iter()
             .filter_map(|p| {
@@ -178,9 +193,15 @@ impl ModuleProbe {
             .collect();
 
         if let Some(cwd) = cwd {
-            let src = cwd.join("src");
-            if src.is_dir() && !resolved.iter().any(|p| p == &src) {
-                resolved.push(src);
+            for root in src_roots {
+                let dir = if root == "." {
+                    cwd.to_path_buf()
+                } else {
+                    cwd.join(root)
+                };
+                if dir.is_dir() && !resolved.iter().any(|p| p == &dir) {
+                    resolved.push(dir);
+                }
             }
         }
 
@@ -410,6 +431,7 @@ impl Default for ModuleProbe {
     /// and an explicit project root when a project config is available.
     fn default() -> Self {
         let cwd = std::env::current_dir().unwrap_or_default();
+        let default_src = vec![".".to_owned(), "src".to_owned()];
         Self::new(
             Path::new(if cfg!(windows) {
                 "python.exe"
@@ -417,6 +439,7 @@ impl Default for ModuleProbe {
                 "python3"
             }),
             &cwd,
+            &default_src,
         )
     }
 }
@@ -661,7 +684,7 @@ mod tests {
             "/usr/lib/python3.10".to_owned(),
             "/some/repo/root/src".to_owned(),
         ];
-        let resolved = ModuleProbe::resolve_sys_path(raw, Some(&cwd));
+        let resolved = ModuleProbe::resolve_sys_path(raw, Some(&cwd), &[]);
         assert_eq!(
             resolved,
             vec![
@@ -675,7 +698,7 @@ mod tests {
     #[test]
     fn resolve_sys_path_drops_empty_string_when_cwd_unavailable() {
         let raw = vec!["".to_owned(), "/usr/lib/python3.10".to_owned()];
-        let resolved = ModuleProbe::resolve_sys_path(raw, None);
+        let resolved = ModuleProbe::resolve_sys_path(raw, None, &[]);
         assert_eq!(resolved, vec![PathBuf::from("/usr/lib/python3.10")]);
     }
 
@@ -686,7 +709,8 @@ mod tests {
         fs::create_dir_all(cwd.join("src")).unwrap();
 
         let raw = vec!["".to_owned(), "/usr/lib/python3.10".to_owned()];
-        let resolved = ModuleProbe::resolve_sys_path(raw, Some(cwd));
+        let default_src = vec![".".to_owned(), "src".to_owned()];
+        let resolved = ModuleProbe::resolve_sys_path(raw, Some(cwd), &default_src);
 
         assert_eq!(
             resolved,
@@ -711,7 +735,7 @@ mod tests {
         // Deliberately no mocks/__init__.py.
         fs::write(mocks_dir.join("mock_adb_server.py"), "").unwrap();
 
-        let sys_path = ModuleProbe::resolve_sys_path(vec![String::new()], Some(tmp.path()));
+        let sys_path = ModuleProbe::resolve_sys_path(vec![String::new()], Some(tmp.path()), &[]);
         let probe = ModuleProbe {
             sys_path,
             builtin_modules: HashSet::new(),
@@ -752,7 +776,8 @@ mod tests {
         } else {
             "python3"
         };
-        let probe = ModuleProbe::new(Path::new(python), tmp.path());
+        let default_src = vec![".".to_owned(), "src".to_owned()];
+        let probe = ModuleProbe::new(Path::new(python), tmp.path(), &default_src);
         assert!(probe.is_module("tests.mocks", "mock_adb_server"));
     }
 
@@ -774,7 +799,11 @@ mod tests {
         fs::write(xcp_dir.join("__init__.py"), "").unwrap();
         fs::write(xcp_dir.join("plugin.py"), "").unwrap();
 
-        let sys_path = ModuleProbe::resolve_sys_path(vec![String::new()], Some(tmp.path()));
+        let sys_path = ModuleProbe::resolve_sys_path(
+            vec![String::new()],
+            Some(tmp.path()),
+            &[".".to_owned(), "src".to_owned()],
+        );
         let probe = ModuleProbe {
             sys_path,
             builtin_modules: HashSet::new(),
@@ -790,6 +819,29 @@ mod tests {
     }
 
     // ── concurrency ─────────────────────────────────────────────────
+
+    #[test]
+    fn arbitrary_configured_src_root_is_honoured() {
+        let tmp = TempDir::new().unwrap();
+        let pkg_dir = tmp.path().join("lib").join("mypkg");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+        fs::write(pkg_dir.join("utils.py"), "").unwrap();
+
+        let sys_path = ModuleProbe::resolve_sys_path(
+            vec![String::new()],
+            Some(tmp.path()),
+            &["lib".to_owned()],
+        );
+        let probe = ModuleProbe {
+            sys_path,
+            builtin_modules: HashSet::new(),
+            cache: DashMap::new(),
+            root_cache: DashMap::new(),
+        };
+
+        assert!(probe.is_module("mypkg", "utils"));
+    }
 
     #[test]
     fn concurrent_queries_for_the_same_key_never_see_a_placeholder() {

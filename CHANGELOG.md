@@ -1,3 +1,21 @@
+## v0.2.0 (2026-09-09)
+
+### Feat
+
+- **config**: add configurable module probe src roots
+
+### Fix
+
+- **kis001**: track nested global names as module scope
+- resolve module probe cwd from lint target root
+- **kis001**: handle match-case pattern scope bindings
+- **kis001**: preserve import scope and use scope-aware shadow checks
+
+### Refactor
+
+- **kis001**: simplify nested insert loop indexing
+- **kis001**: extract scope and import fix helpers
+
 ## v0.1.2 (2026-09-04)
 
 ### Fix

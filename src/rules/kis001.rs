@@ -631,6 +631,62 @@ fn collect_names_bound_by_pattern(pattern: &Pattern, out: &mut HashSet<String>) 
     }
 }
 
+/// Recursively collect every name declared in a `global` statement anywhere
+/// within `stmts`, including inside further-nested `def`/`class` bodies.
+///
+/// This exists because `collect_scopes` itself never walks into a `def`/
+/// `class` body (it flattens it wholesale into one bucket via
+/// `collect_bound_names` instead, see the `FunctionDef`/`ClassDef` arms
+/// below) -- so a `global x` written *inside* a function would otherwise
+/// never be seen at all, and `x` would incorrectly end up bucketed as local
+/// to that function instead of module-wide, even though `global` makes it a
+/// real module-scope binding. `collect_bound_names` doesn't help either: it
+/// only looks at `Expr::Name` nodes, and a bare `global x` (with no
+/// subsequent assignment in that function) never produces one.
+fn collect_global_declared_names(stmts: &[Stmt], out: &mut HashSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Global(g) => {
+                for n in &g.names {
+                    out.insert(n.as_str().to_owned());
+                }
+            }
+            Stmt::FunctionDef(f) => collect_global_declared_names(&f.body, out),
+            Stmt::ClassDef(c) => collect_global_declared_names(&c.body, out),
+            Stmt::If(node) => {
+                collect_global_declared_names(&node.body, out);
+                for clause in &node.elif_else_clauses {
+                    collect_global_declared_names(&clause.body, out);
+                }
+            }
+            Stmt::For(node) => {
+                collect_global_declared_names(&node.body, out);
+                collect_global_declared_names(&node.orelse, out);
+            }
+            Stmt::While(node) => {
+                collect_global_declared_names(&node.body, out);
+                collect_global_declared_names(&node.orelse, out);
+            }
+            Stmt::With(node) => collect_global_declared_names(&node.body, out),
+            Stmt::Match(node) => {
+                for case in &node.cases {
+                    collect_global_declared_names(&case.body, out);
+                }
+            }
+            Stmt::Try(node) => {
+                collect_global_declared_names(&node.body, out);
+                for handler in &node.handlers {
+                    let ruff_python_ast::ExceptHandler::ExceptHandler(h) = handler;
+                    collect_global_declared_names(&h.body, out);
+                }
+                collect_global_declared_names(&node.orelse, out);
+                collect_global_declared_names(&node.finalbody, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Recursively assign every bound name in `stmts` to `bucket` (`None` means
 /// module level), discovering new buckets for any `def`/`class` found along
 /// the way -- including ones nested inside `if`/`for`/`while`/`with`/`try`
@@ -648,6 +704,10 @@ fn collect_scopes(stmts: &[Stmt], bucket: Option<u32>, index: &mut ScopeIndex) {
                 // rather than hand-walking every statement/expression kind.
                 let names = collect_bound_names(std::slice::from_ref(stmt));
                 index.scope_names.entry(id).or_default().extend(names);
+                // `global x` anywhere inside (however deeply nested) makes
+                // `x` a real module-scope binding, regardless of which
+                // bucket it's coarsely filed under above.
+                collect_global_declared_names(&f.body, &mut index.module_names);
             }
             Stmt::ClassDef(c) => {
                 insert_scoped(c.name.as_str().to_owned(), bucket, index);
@@ -655,6 +715,7 @@ fn collect_scopes(stmts: &[Stmt], bucket: Option<u32>, index: &mut ScopeIndex) {
                 index.buckets.push((id, u32::from(c.range().end())));
                 let names = collect_bound_names(std::slice::from_ref(stmt));
                 index.scope_names.entry(id).or_default().extend(names);
+                collect_global_declared_names(&c.body, &mut index.module_names);
             }
             Stmt::If(node) => {
                 bind_exprs_scoped(&[&node.test], bucket, index);
@@ -714,11 +775,17 @@ fn collect_scopes(stmts: &[Stmt], bucket: Option<u32>, index: &mut ScopeIndex) {
                 collect_scopes(&node.finalbody, bucket, index);
             }
             Stmt::Global(g) => {
-                // `global`/`nonlocal` are rare escape hatches that reach into
-                // an outer scope; be conservative and always treat these as
-                // module-wide bound names regardless of the current bucket,
-                // matching the old flat (file-wide) behaviour for this rare
-                // case rather than risk under-reporting a real collision.
+                // Reached only for a `global` statement that isn't nested
+                // inside a `def`/`class` (e.g. directly at module level, or
+                // inside a module-level `if`/`for`/`while`/`with`/`match`/
+                // `try`) -- the `def`/`class`-nested case is handled by
+                // `collect_global_declared_names` in the `FunctionDef`/
+                // `ClassDef` arms above, since this function never
+                // recurses into their bodies. Either way, be conservative
+                // and always treat these as module-wide bound names
+                // regardless of the current bucket, matching the old flat
+                // (file-wide) behaviour rather than risk under-reporting a
+                // real collision.
                 for n in &g.names {
                     index.module_names.insert(n.as_str().to_owned());
                 }
@@ -2396,6 +2463,88 @@ mod tests {
         assert!(
             parse_module(&fixed).is_ok(),
             "fixed source must remain valid Python:\n{fixed}"
+        );
+    }
+
+    // ── regression tests: `global` inside a function is a real module-scope
+    // binding, not just local to that function's bucket ───────────────────
+
+    #[test]
+    fn global_declared_name_inside_function_is_bucketed_module_wide() {
+        // `counter` is only ever bound via `global counter; counter = 1`
+        // inside `bump` -- no top-level assignment at all. Even so, because
+        // of `global`, it's a real module-scope name and must show up in
+        // `module_names`, not just in `bump`'s own bucket.
+        let source = concat!("def bump():\n", "    global counter\n", "    counter = 1\n",);
+        let stmts = parse_module_stmts(source);
+        let index = build_scope_index(&stmts);
+        assert!(
+            index.module_names.contains("counter"),
+            "expected `global counter` inside a function to register as a \
+             module-wide binding, got module_names={:?}",
+            index.module_names
+        );
+    }
+
+    #[test]
+    fn global_declared_name_nested_two_levels_deep_is_still_module_wide() {
+        // Same as above, but the `global` statement is buried inside an
+        // `if` block nested inside a function nested inside a class, to
+        // pin that `collect_global_declared_names` recurses through every
+        // compound-statement/def/class kind, not just the immediate body.
+        let source = concat!(
+            "class Counter:\n",
+            "    def bump(self, flag):\n",
+            "        if flag:\n",
+            "            global counter\n",
+            "            counter = 1\n",
+        );
+        let stmts = parse_module_stmts(source);
+        let index = build_scope_index(&stmts);
+        assert!(
+            index.module_names.contains("counter"),
+            "expected deeply nested `global counter` to register as a \
+             module-wide binding, got module_names={:?}",
+            index.module_names
+        );
+    }
+
+    #[test]
+    fn fix_is_blocked_by_global_name_declared_inside_unrelated_function() {
+        // Fixing `from importlib.metadata import distributions` would
+        // introduce `metadata` as the new bound name (`import importlib.metadata`
+        // + `metadata.distributions()`). `metadata` is never assigned at
+        // module level and is only ever *read* inside `clear_cache` in a way
+        // the old flat `collect_bound_names` check would have caught -- but
+        // `clear_cache` declares it `global` and assigns it there, resetting
+        // a module-level cache dict. That makes `metadata` a genuine
+        // module-scope name despite living entirely inside a function body;
+        // applying the fix would silently shadow it for the rest of the
+        // module, so the fix must be rejected.
+        let source = concat!(
+            "from importlib.metadata import distributions\n",
+            "\n\n",
+            "def clear_cache():\n",
+            "    global metadata\n",
+            "    metadata = {}\n",
+            "\n\n",
+            "def use():\n",
+            "    return list(distributions())\n",
+        );
+        let violations = rule().check(&ctx(source), &empty_cfg());
+        assert_eq!(violations.len(), 1, "expected exactly one violation");
+        assert!(
+            !violations[0].fixable,
+            "fix introducing `metadata` must be rejected: `clear_cache` \
+             declares it `global` and assigns it, so it's a real module-level \
+             name, got: {:?}",
+            violations[0]
+        );
+
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        assert!(
+            result.is_none(),
+            "file has no safely-fixable violations, fix() must return None"
         );
     }
 }

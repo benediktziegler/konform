@@ -399,7 +399,7 @@ fn run_check(args: CheckArgs, isolated: bool) {
         .config_dir
         .clone()
         .unwrap_or_else(|| repo_root.clone());
-    let probe = Arc::new(ModuleProbe::new(&python, &module_probe_root));
+    let probe = Arc::new(ModuleProbe::new(&python, &module_probe_root, &config.src));
     let active_rules = all_rules(Arc::clone(&probe), config.config_dir.clone());
 
     let level_str = args.level.to_string();

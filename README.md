@@ -86,6 +86,8 @@ ignore    = []
 level     = "error"   # "warning" | "error"
 cache_dir = ".konform_cache"
 workers   = 0         # 0 = os.cpu_count()
+src       = [".", "src"]   # search roots for KIS001's module-existence probe;
+                            # see "Module search roots" below.
 
 # ── KIS — import style ────────────────────────────────────────────────────
 [tool.konform.KIS]
@@ -138,6 +140,31 @@ id      = "KPT002"
 message = "Remove breakpoint() — debugging artefact."
 pattern = '^\s*breakpoint\s*\(\s*\)'
 level   = "error"
+```
+
+### Module search roots
+
+KIS001 needs to know whether an imported name is a real module (`import os.path`)
+or just an attribute of one (`from os.path import join`). It answers this by
+searching the filesystem, starting from your Python environment's `sys.path`
+plus a configurable set of extra roots -- this matters for local packages that
+aren't installed (e.g. a `src/` layout, or code laid out some other way).
+
+The extra roots are resolved the same way as Ruff's `src` setting, including
+its precedence:
+
+1. `[tool.konform] src = [...]`, if set.
+2. Otherwise, `[tool.ruff] src = [...]`, if your project already configures
+   Ruff for a non-standard layout.
+3. Otherwise, the default `[".", "src"]` (covers both flat and `src` layouts
+   out of the box).
+
+Each entry is resolved relative to the directory containing `pyproject.toml`
+/ `konform.toml`. For example, if your package lives under `lib/`:
+
+```toml
+[tool.konform]
+src = ["lib"]
 ```
 
 ## Suppressing violations

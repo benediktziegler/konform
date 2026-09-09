@@ -62,6 +62,19 @@ pub struct Config {
     /// alias an entire category at once.
     #[serde(skip)]
     pub noqa_aliases: HashMap<String, String>,
+
+    // ── Module-probe search roots ──────────────────────────────────────────
+    /// Directories (relative to `config_dir`) to search when resolving
+    /// whether an imported name is a first-party module/package (used by
+    /// KIS001's `ModuleProbe`).
+    ///
+    /// Mirrors Ruff's `src` setting exactly, including its resolution order:
+    /// `[tool.konform] src = [...]` takes precedence; if absent, falls back
+    /// to `[tool.ruff] src = [...]` (so projects that already configured
+    /// Ruff for a non-standard layout don't have to repeat themselves); if
+    /// neither is set, defaults to `[".", "src"]`.
+    #[serde(skip)]
+    pub src: Vec<String>,
 }
 
 impl Default for Config {
@@ -78,6 +91,7 @@ impl Default for Config {
             ignore_noqa: false,
             per_file_ignores: HashMap::new(),
             noqa_aliases: HashMap::new(),
+            src: vec![".".to_owned(), "src".to_owned()],
         }
     }
 }
@@ -248,9 +262,29 @@ pub fn load_config(start: Option<&Path>, explicit_path: Option<&Path>) -> Config
         cfg.workers = v.max(0) as usize;
     }
 
-    // ── Python interpreter ─────────────────────────────────────────────────
+    // ── Python interpreter ───────────────────────────────────────────────
     if let Some(v) = section.get("python").and_then(|v| v.as_str()) {
         cfg.python = Some(v.to_owned());
+    }
+
+    // ── Module-probe search roots (mirrors Ruff's `src` resolution order) ───
+    let str_array = |v: &toml::Value| -> Option<Vec<String>> {
+        v.as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|e| e.as_str())
+                .map(str::to_owned)
+                .collect()
+        })
+    };
+    if let Some(v) = section.get("src").and_then(str_array) {
+        cfg.src = v;
+    } else if let Some(v) = raw
+        .get("tool")
+        .and_then(|t| t.get("ruff"))
+        .and_then(|r| r.get("src"))
+        .and_then(str_array)
+    {
+        cfg.src = v;
     }
 
     // ── Per-category subtables → rules map ────────────────────────────────────
@@ -479,5 +513,49 @@ mod tests {
             !cfg.rules.contains_key("noqa_aliases"),
             "noqa_aliases must not be in the rules map"
         );
+    }
+
+    #[test]
+    fn src_defaults_to_dot_and_src_when_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pyproject = tmp.path().join("pyproject.toml");
+        std::fs::write(&pyproject, "[tool.konform]\nlevel = \"error\"").unwrap();
+        let cfg = load_config(Some(tmp.path()), None);
+        assert_eq!(cfg.src, vec![".".to_owned(), "src".to_owned()]);
+    }
+
+    #[test]
+    fn src_read_from_tool_konform() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pyproject = tmp.path().join("pyproject.toml");
+        std::fs::write(&pyproject, "[tool.konform]\nsrc = [\"lib\"]").unwrap();
+        let cfg = load_config(Some(tmp.path()), None);
+        assert_eq!(cfg.src, vec!["lib".to_owned()]);
+    }
+
+    #[test]
+    fn src_falls_back_to_tool_ruff_when_konform_src_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pyproject = tmp.path().join("pyproject.toml");
+        std::fs::write(
+            &pyproject,
+            "[tool.konform]\nlevel = \"error\"\n\n[tool.ruff]\nsrc = [\"lib\", \"test\"]",
+        )
+        .unwrap();
+        let cfg = load_config(Some(tmp.path()), None);
+        assert_eq!(cfg.src, vec!["lib".to_owned(), "test".to_owned()]);
+    }
+
+    #[test]
+    fn src_prefers_tool_konform_over_tool_ruff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pyproject = tmp.path().join("pyproject.toml");
+        std::fs::write(
+            &pyproject,
+            "[tool.konform]\nsrc = [\"lib\"]\n\n[tool.ruff]\nsrc = [\"should-not-be-used\"]",
+        )
+        .unwrap();
+        let cfg = load_config(Some(tmp.path()), None);
+        assert_eq!(cfg.src, vec!["lib".to_owned()]);
     }
 }

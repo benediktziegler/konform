@@ -47,7 +47,7 @@ thiserror = "2"
 # ruff_text_size provides TextRange / TextSize for source locations.
 ruff_python_parser = "0.0.11"
 ruff_python_ast    = "0.0.11"
-ruff_text_size     = "0.0.11"
+ruff_text_size     = "0.0.12"
 
 # Lock-free concurrent HashMap for the in-process module-probe cache
 dashmap = "6"

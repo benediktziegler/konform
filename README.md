@@ -235,6 +235,11 @@ or any client that supports a custom LSP command:
 
 ### Zed
 
+Install the `zed-konform` extension (see
+`extensions/zed-extension/README.md`) and Zed will auto-install the
+`konform` binary for you — no manual setup required. To override the binary
+path or pass extra arguments, set:
+
 ```json
 {
   "lsp": {

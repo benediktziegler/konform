@@ -12,27 +12,33 @@ Python linter and language server.
 * **Code actions** — "Fix all konform violations" rewrites fixable imports in one shot
 * **Auto-fix on save** via `textDocument/formatting`
 
-## Prerequisites
+## Installation
 
-`konform` must be on your `$PATH`:
+No prerequisites — the extension auto-installs `konform` for you.
 
-```bash
-pip install konform
-# or
-pipx install konform
-```
+From the Zed Extensions panel, click **Install Dev Extension** and select this
+directory (or install the published extension from the Zed extension gallery).
+Once compiled, Zed activates the extension for every `.py` file in your
+workspace and resolves the `konform` binary in this order:
 
-Verify with:
+1. `lsp.konform.binary.path` in Zed settings, if set (see below).
+2. `konform` on your `$PATH`, if you've already installed it via
+   `uv tool install konform` / `pipx install konform`.
+3. Otherwise, the extension downloads the standalone `konform` binary that
+   matches your OS/architecture from the
+   [GitHub releases](https://github.com/benediktziegler/konform/releases)
+   and caches it alongside the extension — no Python or Rust toolchain
+   required.
+
+Prebuilt binaries are available for Linux (x86_64, aarch64, glibc), macOS
+(x86_64, aarch64) and Windows (x86_64). On other platforms, install `konform`
+via `uv`/`pipx` so it can be found on `$PATH`.
+
+Verify a manual install with:
 
 ```bash
 konform version
 ```
-
-## Installing the extension
-
-From the Zed Extensions panel, click **Install Dev Extension** and select this
-directory.  Once compiled, Zed will activate the extension for every `.py`
-file in your workspace.
 
 ## Configuration
 

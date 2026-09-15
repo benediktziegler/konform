@@ -47,6 +47,8 @@ changelog_file           = "CHANGELOG.md"
 allowed_prefixes         = ["Merge", "Revert", "fixup!", "squash!"]
 version_files = [
     "Cargo.toml:^version",
+    "extensions/zed-extension/Cargo.toml:^version",
+    "extensions/zed-extension/extension.toml:# cz-sync",
 ]
 
 [dependency-groups]

@@ -603,6 +603,9 @@ fn publish_empty_diagnostics(connection: &Connection, uri: &Uri) {
     connection.sender.send(Message::Notification(notif)).ok();
 }
 
+#[cfg(test)]
+mod tests;
+
 /// Dynamically register file watchers for `pyproject.toml` and `konform.toml`
 /// and opt-in to `workspace/didChangeConfiguration` notifications after the
 /// server is initialized.

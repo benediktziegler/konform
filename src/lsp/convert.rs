@@ -136,3 +136,176 @@ pub fn full_document_edit(old_source: &str, new_source: &str) -> TextEdit {
         new_text: new_source.to_owned(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Level;
+    use lsp_types::DiagnosticSeverity;
+
+    // ── lsp_pos_to_byte_offset / byte_offset_to_lsp_pos round-trips ────────
+
+    #[test]
+    fn ascii_round_trip() {
+        let src = "import os\nfrom os.path import join\n";
+        let pos = Position {
+            line: 1,
+            character: 5,
+        };
+        let offset = lsp_pos_to_byte_offset(src, pos);
+        assert_eq!(offset, "import os\nfrom ".len());
+        assert_eq!(byte_offset_to_lsp_pos(src, offset), pos);
+    }
+
+    #[test]
+    fn position_at_start_of_document() {
+        let src = "abc\ndef\n";
+        let start = Position {
+            line: 0,
+            character: 0,
+        };
+        assert_eq!(lsp_pos_to_byte_offset(src, start), 0);
+        assert_eq!(byte_offset_to_lsp_pos(src, 0), start);
+    }
+
+    #[test]
+    fn position_at_end_of_document() {
+        let src = "abc\ndef";
+        let end = byte_offset_to_lsp_pos(src, src.len());
+        assert_eq!(
+            end,
+            Position {
+                line: 1,
+                character: 3
+            }
+        );
+        assert_eq!(lsp_pos_to_byte_offset(src, end), src.len());
+    }
+
+    #[test]
+    fn out_of_range_position_clamps_to_end() {
+        let src = "abc\n";
+        let past_end = Position {
+            line: 50,
+            character: 0,
+        };
+        assert_eq!(lsp_pos_to_byte_offset(src, past_end), src.len());
+    }
+
+    #[test]
+    fn out_of_range_offset_clamps_to_end() {
+        let src = "abc\n";
+        let pos = byte_offset_to_lsp_pos(src, src.len() + 100);
+        assert_eq!(byte_offset_to_lsp_pos(src, src.len()), pos);
+    }
+
+    #[test]
+    fn multi_byte_utf16_surrogate_pairs_are_counted_correctly() {
+        // "a" (1 UTF-16 unit) + "\u{1F600}" 😀 (2 UTF-16 units, 4 UTF-8 bytes) + "b".
+        let src = "a\u{1F600}b\n";
+        // "b" starts after 1 + 2 = 3 UTF-16 units.
+        let pos = Position {
+            line: 0,
+            character: 3,
+        };
+        let offset = lsp_pos_to_byte_offset(src, pos);
+        assert_eq!(&src[offset..offset + 1], "b");
+        assert_eq!(byte_offset_to_lsp_pos(src, offset), pos);
+    }
+
+    #[test]
+    fn multi_line_offsets_account_for_newlines() {
+        let src = "one\ntwo\nthree\n";
+        let offset = src.find("three").unwrap();
+        assert_eq!(
+            byte_offset_to_lsp_pos(src, offset),
+            Position {
+                line: 2,
+                character: 0
+            }
+        );
+    }
+
+    // ── violation_to_diagnostic ─────────────────────────────────────────────
+
+    fn sample_violation(level: Level, fixable: bool, help: Option<&str>) -> Violation {
+        Violation {
+            rule: "KIS001".to_owned(),
+            line: 3,
+            col: 4,
+            end_line: 3,
+            end_col: 10,
+            message: "Import 'join' from 'os.path' is not a module.".to_owned(),
+            help: help.map(str::to_owned),
+            level,
+            fixable,
+        }
+    }
+
+    #[test]
+    fn violation_line_numbers_convert_from_1_based_to_0_based() {
+        let v = sample_violation(Level::Error, true, None);
+        let diag = violation_to_diagnostic(&v);
+        assert_eq!(diag.range.start.line, 2);
+        assert_eq!(diag.range.end.line, 2);
+        assert_eq!(diag.range.start.character, 4);
+        assert_eq!(diag.range.end.character, 10);
+    }
+
+    #[test]
+    fn violation_severity_maps_to_lsp_severity() {
+        let error = violation_to_diagnostic(&sample_violation(Level::Error, false, None));
+        let warning = violation_to_diagnostic(&sample_violation(Level::Warning, false, None));
+        assert_eq!(error.severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(warning.severity, Some(DiagnosticSeverity::WARNING));
+    }
+
+    #[test]
+    fn violation_message_appends_help_when_present() {
+        let v = sample_violation(Level::Error, true, Some("see the style guide"));
+        let diag = violation_to_diagnostic(&v);
+        assert!(diag.message.contains("is not a module"));
+        assert!(diag.message.contains("see the style guide"));
+    }
+
+    #[test]
+    fn violation_message_omits_help_when_absent() {
+        let v = sample_violation(Level::Error, true, None);
+        let diag = violation_to_diagnostic(&v);
+        assert_eq!(diag.message, v.message);
+    }
+
+    #[test]
+    fn fixable_violation_embeds_fix_data() {
+        let v = sample_violation(Level::Error, true, Some("help text"));
+        let diag = violation_to_diagnostic(&v);
+        let data = diag.data.expect("fixable violation should carry data");
+        assert_eq!(data["fixable"], serde_json::json!(true));
+        assert_eq!(data["code"], serde_json::json!("KIS001"));
+    }
+
+    #[test]
+    fn unfixable_violation_has_no_data() {
+        let v = sample_violation(Level::Warning, false, None);
+        let diag = violation_to_diagnostic(&v);
+        assert!(diag.data.is_none());
+    }
+
+    // ── full_document_edit ──────────────────────────────────────────────────
+
+    #[test]
+    fn full_document_edit_spans_the_whole_document() {
+        let old = "from os.path import join\n";
+        let new = "import os.path\n";
+        let edit = full_document_edit(old, new);
+        assert_eq!(
+            edit.range.start,
+            Position {
+                line: 0,
+                character: 0
+            }
+        );
+        assert_eq!(edit.range.end, byte_offset_to_lsp_pos(old, old.len()));
+        assert_eq!(edit.new_text, new);
+    }
+}

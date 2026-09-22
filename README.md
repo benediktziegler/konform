@@ -19,6 +19,13 @@ import os.path
 from os import path       # `path` is a module
 ```
 
+This rule is sometimes fixable: konform rewrites the import automatically
+when it's safe to do so. It leaves the violation for you to fix by hand when
+the new import's name is already bound elsewhere in the file -- either as a
+local variable, or by a different import that would then overlap with it
+(two `from X import Y` statements silently bound to the same name but
+pointing at different modules).
+
 ### KPT — User-defined pattern rules
 
 Load regex patterns from `konform_patterns.toml` (auto-discovered next to

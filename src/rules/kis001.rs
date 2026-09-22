@@ -88,7 +88,7 @@ impl Rule for Kis001Rule {
 
     fn explain(&self) -> String {
         "\
-KIS001 — Google-style imports [fixable]
+KIS001 — Google-style imports [sometimes fixable]
 
   Checks that every `from X import Y` imports a module (sub-package or .py
   file), not an object (class, function, or constant) from within one.
@@ -102,6 +102,11 @@ KIS001 — Google-style imports [fixable]
 
   Configure exceptions in [tool.konform.KIS]:
     exceptions = [\"__future__\", \"typing\", \"typing_extensions\", \"collections.abc\"]
+
+  Not every violation can be auto-fixed: if the new import's name is already
+  bound elsewhere in the file -- as a local variable, or by a different
+  import that would then overlap with it -- konform reports the violation
+  but leaves it for you to fix by hand.
 
   When a package isn't installed in this environment, KIS001 can't tell
   whether the imported name is a module or not. Control how that's reported
@@ -959,6 +964,58 @@ fn can_fix(module: &str, attr_name: &str, probe: &ModuleProbe) -> Option<FixInfo
     })
 }
 
+/// For every alias across all `from X import Y` statements in the file, the
+/// name it will ultimately bind into the namespace, mapped to the concrete
+/// module path(s) it resolves to (`"module.attr"`, or a fixable violation's
+/// own `FixInfo::import_key`/`new_bound_name` once konform's own rewrite is
+/// applied).
+///
+/// Two *different* module paths landing on the same bound name means
+/// applying a fix there would create overlapping imports: two `from X
+/// import Y` statements silently binding the same name to two different
+/// modules. Python has no scoping mechanism to disambiguate that -- unlike a
+/// shadowed local variable, there's no rename that fixes it -- so it must be
+/// treated as unsafe to auto-fix, the same way a shadowed name is.
+fn bound_import_targets(
+    imports: &[ParsedImport],
+    probe: &ModuleProbe,
+) -> HashMap<String, HashSet<String>> {
+    let mut targets: HashMap<String, HashSet<String>> = HashMap::new();
+    for imp in imports {
+        for alias in &imp.aliases {
+            let effective = alias.asname.as_deref().unwrap_or(alias.name.as_str());
+            let check = probe.check(&imp.module, &alias.name);
+            let (bound_name, target) = if check == ModuleCheck::NotModule {
+                match can_fix(&imp.module, &alias.name, probe) {
+                    Some(fix) => (fix.new_bound_name, fix.import_key),
+                    None => (
+                        effective.to_owned(),
+                        format!("{}.{}", imp.module, alias.name),
+                    ),
+                }
+            } else {
+                (
+                    effective.to_owned(),
+                    format!("{}.{}", imp.module, alias.name),
+                )
+            };
+            targets.entry(bound_name).or_default().insert(target);
+        }
+    }
+    targets
+}
+
+/// Would applying `fix` bind `fix.new_bound_name` to a module other than
+/// `fix.import_key` somewhere else in the file?
+fn overlaps_existing_import(
+    fix: &FixInfo,
+    bound_targets: &HashMap<String, HashSet<String>>,
+) -> bool {
+    bound_targets
+        .get(&fix.new_bound_name)
+        .is_some_and(|paths| paths.iter().any(|path| path != &fix.import_key))
+}
+
 // ---------------------------------------------------------------------------
 // Violation construction
 // ---------------------------------------------------------------------------
@@ -973,13 +1030,24 @@ struct ViolationSpan {
     col: usize,
 }
 
+/// Why a would-be fix must not be auto-applied even though a rewrite for it
+/// was found in principle.
+enum UnsafeReason<'a> {
+    /// The old alias name, or the fix's new bound name, is also
+    /// assigned/bound as a local variable at one of its use sites.
+    Shadowed(&'a str),
+    /// The fix's new bound name is already bound to a *different* module by
+    /// another import elsewhere in the file.
+    ImportOverlap(&'a str),
+}
+
 fn make_violation(
     span: ViolationSpan,
     module: &str,
     alias_name: &str,
     level: Level,
     fix: Option<&FixInfo>,
-    unsafe_to_fix: Option<&str>,
+    unsafe_to_fix: Option<UnsafeReason<'_>>,
 ) -> Violation {
     let fixable = fix.is_some();
     let base_help =
@@ -993,14 +1061,20 @@ fn make_violation(
         message: format!("KIS001: Import '{alias_name}' from '{module}' is not a module."),
         help: Some(if fixable {
             format!("{base_help} (fixable)")
-        } else if let Some(colliding_name) = unsafe_to_fix {
-            format!(
-                "{base_help} (not auto-fixed: '{colliding_name}' is also assigned/bound elsewhere \
-                 in this file -- a rename could not reliably tell that binding apart from the \
-                 import, so it must be fixed by hand)"
-            )
         } else {
-            base_help.to_owned()
+            match unsafe_to_fix {
+                Some(UnsafeReason::Shadowed(colliding_name)) => format!(
+                    "{base_help} (not auto-fixed: '{colliding_name}' is also assigned/bound \
+                     elsewhere in this file -- a rename could not reliably tell that binding \
+                     apart from the import, so it must be fixed by hand)"
+                ),
+                Some(UnsafeReason::ImportOverlap(colliding_name)) => format!(
+                    "{base_help} (not auto-fixed: '{colliding_name}' is already imported from a \
+                     different module elsewhere in this file -- introducing this fix would create \
+                     two overlapping imports bound to the same name, so it must be fixed by hand)"
+                ),
+                None => base_help.to_owned(),
+            }
         }),
         level,
         fixable,
@@ -1053,6 +1127,7 @@ fn check_imports(
     let mut violations = Vec::new();
 
     let exception_set: HashSet<&str> = exceptions.iter().map(String::as_str).collect();
+    let bound_targets = bound_import_targets(&imports, probe);
 
     for imp in &imports {
         if exception_set.contains(imp.module.as_str()) {
@@ -1128,15 +1203,29 @@ fn check_imports(
                     )
                 })
                 .map(|f| f.new_bound_name.clone());
-            let fix = if new_bound_shadow.is_some() {
+            // Even when the fix's new bound name isn't shadowed by a local
+            // variable, it may already be bound to a *different* module by
+            // another import elsewhere in the file -- applying the fix
+            // would then create two overlapping imports sharing one name.
+            // That's equally unsafe to auto-fix, and equally unfixable by
+            // konform: there is no rename that disambiguates two imports
+            // bound to the same name.
+            let import_overlap: Option<String> = candidate_fix
+                .as_ref()
+                .filter(|_| new_bound_shadow.is_none())
+                .filter(|f| overlaps_existing_import(f, &bound_targets))
+                .map(|f| f.new_bound_name.clone());
+            let fix = if new_bound_shadow.is_some() || import_overlap.is_some() {
                 None
             } else {
                 candidate_fix
             };
             let unsafe_to_fix = if name_shadowed {
-                Some(effective)
+                Some(UnsafeReason::Shadowed(effective))
+            } else if let Some(name) = new_bound_shadow.as_deref() {
+                Some(UnsafeReason::Shadowed(name))
             } else {
-                new_bound_shadow.as_deref()
+                import_overlap.as_deref().map(UnsafeReason::ImportOverlap)
             };
             violations.push(make_violation(
                 span,
@@ -1229,6 +1318,7 @@ fn apply_fixes(
     let scope_index = build_scope_index(&stmts);
     let load_names = collect_load_names(&stmts);
     let exception_set: HashSet<&str> = exceptions.iter().map(String::as_str).collect();
+    let bound_targets = bound_import_targets(&imports, probe);
 
     // ── Phase 1: collect fix instructions ────────────────────────────────
     // aliases_to_remove : 0-based line index → set of alias names to delete
@@ -1298,6 +1388,16 @@ fn apply_fixes(
                     // replacement wouldn't resolve to our new import there.
                     // Skip the fix; `check_imports` reports this same
                     // condition as a non-fixable violation.
+                    continue;
+                }
+                if overlaps_existing_import(&fix, &bound_targets) {
+                    // `fix.new_bound_name` is already bound to a *different*
+                    // module by another import elsewhere in this file --
+                    // applying this fix would create two overlapping
+                    // imports sharing one name, which konform cannot
+                    // resolve by renaming. Skip the fix; `check_imports`
+                    // reports this same condition as a non-fixable
+                    // violation.
                     continue;
                 }
                 let old_local = alias
@@ -2234,6 +2334,80 @@ mod tests {
         assert!(
             result.is_none(),
             "import with a colliding new-bound-name must not be auto-fixed, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn overlapping_import_name_is_reported_as_unsafe_to_fix() {
+        // `from wsgiref import util` already binds the name `util` in this
+        // file. The natural KIS001 fix for `from importlib.util import
+        // find_spec` would be `from importlib import util` -- but that
+        // would bind the *same* name `util` to a *different* module,
+        // creating two overlapping imports. There is no reliable rename
+        // that disambiguates the two, so this must be reported as
+        // non-fixable rather than silently emitting a colliding import.
+        let source = "from wsgiref import util\nfrom importlib.util import find_spec\n\n\ndef f():\n    return util, find_spec\n";
+        let violations = rule().check(&ctx(source), &empty_cfg());
+        assert_eq!(
+            violations.len(),
+            1,
+            "expected exactly one violation (the wsgiref import is already valid style)"
+        );
+        assert!(
+            !violations[0].fixable,
+            "overlapping import name must not be marked fixable"
+        );
+        assert!(
+            violations[0]
+                .help
+                .as_deref()
+                .unwrap_or("")
+                .contains("'util' is already imported from a different module"),
+            "help text should explain the overlapping-import name, got: {:?}",
+            violations[0].help
+        );
+
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        assert!(
+            result.is_none(),
+            "an import that would overlap with an existing import must not be auto-fixed, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn non_overlapping_sibling_import_is_still_fixed() {
+        // `from importlib.util import find_spec` overlaps with the existing
+        // `from wsgiref import util`, but an unrelated, non-colliding
+        // violation in the same file must still be fixed normally.
+        let source = "from wsgiref import util\nfrom importlib.util import find_spec\nfrom os.path import join\n\n\ndef f():\n    return util, find_spec, join('a', 'b')\n";
+        let violations = rule().check(&ctx(source), &empty_cfg());
+        assert_eq!(violations.len(), 2, "expected two violations");
+        let find_spec_violation = violations
+            .iter()
+            .find(|v| v.message.contains("find_spec"))
+            .expect("find_spec violation present");
+        let join_violation = violations
+            .iter()
+            .find(|v| v.message.contains("join"))
+            .expect("join violation present");
+        assert!(
+            !find_spec_violation.fixable,
+            "find_spec overlaps with the existing wsgiref.util import"
+        );
+        assert!(
+            join_violation.fixable,
+            "join has no overlap and must still be fixable"
+        );
+
+        let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
+        let fixed = result.expect("join fix should still be applied");
+        assert!(
+            fixed.contains("import os.path"),
+            "join's fix should still be applied, got:\n{fixed}"
+        );
+        assert!(
+            fixed.contains("from importlib.util import find_spec"),
+            "the overlapping import must be left untouched, got:\n{fixed}"
         );
     }
 

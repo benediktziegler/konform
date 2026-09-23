@@ -78,11 +78,18 @@ pub trait Rule: Send + Sync {
     /// Unique violation code, e.g. `"KIS001"`.
     fn code(&self) -> &str;
 
-    /// Category prefix, e.g. `"KIS"`.
-    ///
-    /// Used by [`crate::config::Config::rule_config`] to look up the
-    /// per-category configuration section (`[tool.konform.KIS]`).
+    /// Category prefix, e.g. `"KIS"`. Used for `select`/`ignore`/`# noqa`
+    /// prefix matching and for `--list-rules` display.
     fn category(&self) -> &str;
+
+    /// Stable config-table name, e.g. `"module-only-imports"`.
+    ///
+    /// Used by [`crate::config::Config::rule_config`] to look up this rule's
+    /// settings under `[tool.konform.lint.<config_name>]`. Kept independent
+    /// of [`Rule::code`] / [`Rule::category`] so a rule can be renamed (with
+    /// `noqa_aliases` covering old suppression comments) without also
+    /// forcing every project's config table to be renamed in lockstep.
+    fn config_name(&self) -> &str;
 
     /// Short human-readable rule name shown in `--list-rules` output.
     fn name(&self) -> &str;
@@ -97,9 +104,9 @@ pub trait Rule: Send + Sync {
 
     /// Check `ctx` for violations and return them.
     ///
-    /// `cfg` is the raw TOML value for this rule's category section,
-    /// e.g. the contents of `[tool.konform.KIS]`.  Rules that need no
-    /// configuration can ignore it.
+    /// `cfg` is the raw TOML value for this rule's config table, e.g. the
+    /// contents of `[tool.konform.lint.module-only-imports]`. Rules that
+    /// need no configuration can ignore it.
     fn check(&self, ctx: &FileContext, cfg: &toml::Value) -> Vec<Violation>;
 
     /// Rewrite the source in `ctx` to fix all violations, returning the

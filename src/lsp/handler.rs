@@ -299,8 +299,8 @@ fn violation_fix_edit(
 
     // Narrow the config to run only this rule’s fixer.
     let mut cfg = config.clone();
-    cfg.select = vec![violation.rule.clone()];
-    cfg.ignore.clear();
+    cfg.lint.select = vec![violation.rule.clone()];
+    cfg.lint.ignore.clear();
 
     let path = std::path::PathBuf::from("<lsp-fix>");
     let input = CheckInput::new(&path, source);

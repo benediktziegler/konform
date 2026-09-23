@@ -1,3 +1,14 @@
+## Unreleased
+
+### Feat
+
+- **config**: add automatic config-format migration framework
+- **config**: add `Rule::config_name` for stable per-rule config tables
+
+### Refactor
+
+- **config**: move rule selection and per-rule settings under `[tool.konform.lint]` (breaking; auto-migrated on first run)
+
 ## v0.2.0 (2026-09-09)
 
 ### Feat

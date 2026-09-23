@@ -20,6 +20,7 @@ use anyhow::Result;
 use ruff_python_ast::{Expr, Pattern, Stmt};
 use ruff_python_parser::parse_module;
 use ruff_text_size::Ranged;
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -50,8 +51,12 @@ impl Rule for Kis001Rule {
         "KIS"
     }
 
+    fn config_name(&self) -> &str {
+        "module-only-imports"
+    }
+
     fn name(&self) -> &str {
-        "Google-style imports"
+        "Module-only imports"
     }
 
     fn description(&self) -> &str {
@@ -88,7 +93,7 @@ impl Rule for Kis001Rule {
 
     fn explain(&self) -> String {
         "\
-KIS001 — Google-style imports [sometimes fixable]
+KIS001 — Module-only imports [sometimes fixable]
 
   Checks that every `from X import Y` imports a module (sub-package or .py
   file), not an object (class, function, or constant) from within one.
@@ -100,7 +105,7 @@ KIS001 — Google-style imports [sometimes fixable]
     from os import path           # path is the os.path module
     import os.path                # also fine
 
-  Configure exceptions in [tool.konform.KIS]:
+  Configure exceptions in [tool.konform.lint.module-only-imports]:
     exceptions = [\"__future__\", \"typing\", \"typing_extensions\", \"collections.abc\"]
 
   Not every violation can be auto-fixed: if the new import's name is already
@@ -110,8 +115,8 @@ KIS001 — Google-style imports [sometimes fixable]
 
   When a package isn't installed in this environment, KIS001 can't tell
   whether the imported name is a module or not. Control how that's reported
-  in [tool.konform.KIS]:
-    unresolved_level = \"warning\"   # default: \"warning\" | \"error\" | \"off\"
+  in [tool.konform.lint.module-only-imports]:
+    unresolved-level = \"warning\"   # default: \"warning\" | \"error\" | \"off\"
 
   Suppress per-line:
     from os.path import join   # noqa: KIS001
@@ -125,38 +130,48 @@ KIS001 — Google-style imports [sometimes fixable]
 // Config helper
 // ---------------------------------------------------------------------------
 
-fn parse_kis_config(cfg: &toml::Value) -> (Vec<String>, Level, Option<Level>) {
-    let exceptions = cfg
-        .get("exceptions")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|e| e.as_str())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_else(|| {
-            vec![
+/// `[tool.konform.lint.module-only-imports]` settings for KIS001.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct Kis001Settings {
+    exceptions: Vec<String>,
+    level: Level,
+    /// Controls how KIS001 reports imports it can't validate because the
+    /// package isn't installed in this environment: `"warning"` (default),
+    /// `"error"`, or `"off"` (don't report at all).
+    unresolved_level: String,
+}
+
+impl Default for Kis001Settings {
+    fn default() -> Self {
+        Self {
+            exceptions: vec![
                 "__future__".into(),
                 "typing".into(),
                 "typing_extensions".into(),
                 "collections.abc".into(),
-            ]
-        });
-    let level = cfg
-        .get("level")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(Level::Error);
-    // `unresolved_level` controls how KIS001 reports imports it can't
-    // validate because the package isn't installed in this environment:
-    // "warning" (default), "error", or "off" (don't report at all).
-    let unresolved_level = match cfg.get("unresolved_level").and_then(|v| v.as_str()) {
-        Some(s) if s.eq_ignore_ascii_case("off") => None,
-        Some(s) => Some(s.parse().unwrap_or(Level::Warning)),
-        None => Some(Level::Warning),
-    };
-    (exceptions, level, unresolved_level)
+            ],
+            level: Level::Error,
+            unresolved_level: "warning".into(),
+        }
+    }
+}
+
+impl Kis001Settings {
+    /// Parse `unresolved_level` into `Some(Level)`, or `None` for `"off"`.
+    fn unresolved_level_enum(&self) -> Option<Level> {
+        if self.unresolved_level.eq_ignore_ascii_case("off") {
+            None
+        } else {
+            Some(self.unresolved_level.parse().unwrap_or(Level::Warning))
+        }
+    }
+}
+
+fn parse_kis_config(cfg: &toml::Value) -> (Vec<String>, Level, Option<Level>) {
+    let settings = Kis001Settings::deserialize(cfg.clone()).unwrap_or_default();
+    let unresolved_level = settings.unresolved_level_enum();
+    (settings.exceptions, settings.level, unresolved_level)
 }
 
 // ---------------------------------------------------------------------------
@@ -1098,7 +1113,7 @@ fn make_unknown_violation(
             "KIS001: Cannot verify whether '{alias_name}' from '{module}' is a module -- '{root}' was not found in this Python environment."
         ),
         help: Some(
-            "Install the package in this environment so KIS001 can validate this import, or set `unresolved_level` in [tool.konform.KIS] to \"off\" to silence this warning."
+            "Install the package in this environment so KIS001 can validate this import, or set `unresolved-level` in [tool.konform.lint.module-only-imports] to \"off\" to silence this warning."
                 .to_owned(),
         ),
         level,
@@ -1937,7 +1952,7 @@ mod tests {
     fn unresolved_level_can_be_escalated_to_error() {
         let mut cfg = toml::map::Map::new();
         cfg.insert(
-            "unresolved_level".to_owned(),
+            "unresolved-level".to_owned(),
             toml::Value::String("error".to_owned()),
         );
         let violations = rule().check(
@@ -1953,7 +1968,7 @@ mod tests {
     fn unresolved_level_off_suppresses_violation() {
         let mut cfg = toml::map::Map::new();
         cfg.insert(
-            "unresolved_level".to_owned(),
+            "unresolved-level".to_owned(),
             toml::Value::String("off".to_owned()),
         );
         let violations = rule().check(

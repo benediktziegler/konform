@@ -26,6 +26,33 @@ local variable, or by a different import that would then overlap with it
 (two `from X import Y` statements silently bound to the same name but
 pointing at different modules).
 
+### KIS002 — Unnecessary import alias
+
+Flags `from X import Y as Z` when the alias `Z` buys nothing -- `Y` isn't
+bound to anything else in the module, so the alias only adds a layer of
+indirection.
+
+```python
+# Bad — KIS002: `bar_baz` isn't needed, nothing else is named `baz`
+from foo.bar import baz as bar_baz
+
+# Good
+from foo.bar import baz
+```
+
+The alias is left alone when it's actually doing something: renaming away a
+collision with a local name or another import, a leading-underscore "don't
+re-export this" marker, a self-alias (`import x as x`, which is Ruff's
+`PLC0414` territory), or a relative import (`from . import x as y`, which has
+no stable module identity to key a collision check on). Plain
+`import X as Z` statements are out of scope too -- dropping the alias there
+changes what gets bound, unlike `from X import Y as Z`.
+
+This rule is sometimes fixable: konform drops the alias and renames every use
+of it back to the original name. It leaves the violation for you to fix by
+hand when the alias is shadowed somewhere, or bound to more than one import
+in the file.
+
 ### KPT — User-defined pattern rules
 
 Load regex patterns from `konform_patterns.toml` (auto-discovered next to
@@ -109,6 +136,10 @@ unresolved-level = "warning"   # "warning" (default) | "error" | "off"
                                 # Used when a package isn't installed in this
                                 # environment, so KIS001 can't tell whether the
                                 # imported name is a module or not.
+
+# ── KIS002 — unnecessary import alias ──────────────────────────────────────
+[tool.konform.lint.unnecessary-import-alias]
+level = "warning"
 
 # ── KPT001 — user-defined patterns ─────────────────────────────────────────
 [tool.konform.lint.user-defined-patterns]

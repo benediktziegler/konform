@@ -17,7 +17,9 @@ use std::sync::Arc;
 // Sub-modules
 // ---------------------------------------------------------------------------
 pub mod kis001;
+pub mod kis002;
 pub mod kpt;
+mod scope;
 
 // ---------------------------------------------------------------------------
 // FileContext
@@ -165,6 +167,7 @@ pub fn all_rules(
 ) -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(kis001::Kis001Rule::new(probe)),
+        Box::new(kis002::Kis002Rule::new()),
         Box::new(kpt::KptRule::new(config_dir)),
     ]
 }

@@ -2,6 +2,7 @@
 
 ### Feat
 
+- **rules**: add KIS002 (unnecessary import alias)
 - **config**: add automatic config-format migration framework
 - **config**: add `Rule::config_name` for stable per-rule config tables
 

@@ -7,6 +7,7 @@ Python linter and language server.
 
 * **Inline diagnostics** for every open `.py` file (push + pull, LSP 3.17)
 * **KIS001** — flags `from X import obj` imports that should be `import X`
+* **KIS002** — flags unnecessary import aliases (`from X import Y as Z` when the alias buys nothing)
 * **KPT** — user-defined regex pattern rules from `konform_patterns.toml`
 * **Hover** — hover over a violation to read the full rule documentation
 * **Code actions** — "Fix all konform violations" rewrites fixable imports in one shot

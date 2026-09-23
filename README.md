@@ -4,7 +4,7 @@ Multi-rule Python linter and language server — fast, configurable, and CI-read
 
 ## Rules
 
-### KIS001 — Google-style imports
+### KIS001 — Module-only imports
 
 Checks that every `from X import Y` only imports a sub-module, not an object
 (function, class, or constant), following the
@@ -88,33 +88,35 @@ Add a `[tool.konform]` section to `pyproject.toml` (or a standalone `konform.tom
 
 ```toml
 [tool.konform]
-select    = []        # [] = all rules; prefix match: "KIS" = all KIS* rules
-ignore    = []
-level     = "error"   # "warning" | "error"
-cache_dir = ".konform_cache"
+cache-dir = ".konform_cache"
 workers   = 0         # 0 = os.cpu_count()
 src       = [".", "src"]   # search roots for KIS001's module-existence probe;
                             # see "Module search roots" below.
 
-# ── KIS — import style ────────────────────────────────────────────────────
-[tool.konform.KIS]
+[tool.konform.lint]
+select = []        # [] = all rules; prefix match: "KIS" = all KIS* rules
+ignore = []
+level  = "error"   # "warning" | "error"
+
+# ── KIS001 — import style ──────────────────────────────────────────────────
+[tool.konform.lint.module-only-imports]
 exceptions = [
     "__future__", "typing", "typing_extensions", "collections.abc",
     "mycompany.compat",
 ]
 level = "error"
-unresolved_level = "warning"   # "warning" (default) | "error" | "off"
+unresolved-level = "warning"   # "warning" (default) | "error" | "off"
                                 # Used when a package isn't installed in this
                                 # environment, so KIS001 can't tell whether the
                                 # imported name is a module or not.
 
-# ── KPT — user-defined patterns ───────────────────────────────────────────
-[tool.konform.KPT]
+# ── KPT001 — user-defined patterns ─────────────────────────────────────────
+[tool.konform.lint.user-defined-patterns]
 level = "warning"
 # Optional: load patterns from an external file instead of inline rules.
 # rules_file = "konform_patterns.toml"
 
-[[tool.konform.KPT.rules]]
+[[tool.konform.lint.user-defined-patterns.rules]]
 id      = "KPT001"
 message = "Use the project logger instead of bare print()."
 pattern = '^\s*print\s*\('
@@ -132,8 +134,14 @@ sub_rules = [
 ]
 ```
 
-When using `[[tool.konform.KPT.rules.sub_rules]]`, TOML binds each sub-rule to
-_the most recently declared_ `[[tool.konform.KPT.rules]]` entry.
+Each rule's settings live in its own table, keyed by a stable config name
+(shown by `konform rule --list`) rather than by rule code — so renaming a
+rule code (with `noqa-aliases` covering old suppression comments) never
+forces you to also rewrite your config.
+
+When using `[[tool.konform.lint.user-defined-patterns.rules.sub_rules]]`, TOML
+binds each sub-rule to _the most recently declared_
+`[[tool.konform.lint.user-defined-patterns.rules]]` entry.
 
 ### Pattern files
 
@@ -191,7 +199,7 @@ renamed/canonical rule:
 
 ```toml
 # pyproject.toml
-[tool.konform.noqa_aliases]
+[tool.konform.lint.noqa-aliases]
 IS001 = "KIS001"
 IS    = "KIS"
 ```
@@ -199,6 +207,15 @@ IS    = "KIS"
 ```python
 from os.path import join   # noqa: IS001   ← suppresses KIS001 via alias
 ```
+
+### Upgrading from an older config format
+
+When konform's config shape changes (as it did in 0.3.0, moving rule
+selection/settings under `[tool.konform.lint]`), it auto-migrates an
+outdated `pyproject.toml` / `konform.toml` the first time you run any
+konform command: the file is rewritten in place (comments and other
+`[tool.*]` sections are preserved) and a summary of what changed is printed
+to stderr. No action is needed beyond re-running konform once.
 
 ## Language Server (LSP)
 

@@ -5,26 +5,74 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
-// Config
+// LintConfig
 // ---------------------------------------------------------------------------
 
+/// `[tool.konform.lint]` — rule selection, suppression, and per-rule settings.
+///
+/// Mirrors Ruff's `[tool.ruff.lint]` split: project-wide settings
+/// (interpreter, cache, search roots) live directly under `[tool.konform]`,
+/// while everything about *which rules run and how* lives here.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct Config {
+#[serde(default, rename_all = "kebab-case")]
+pub struct LintConfig {
     // ── Rule selection (prefix-matched, empty = all rules enabled) ────────
     pub select: Vec<String>,
     pub ignore: Vec<String>,
 
-    // ── Global defaults ───────────────────────────────────────────────────
+    // ── Global default level ───────────────────────────────────────────────
     pub level: Level,
+
+    /// Per-file rule overrides: each key is a glob pattern, the value is a
+    /// list of rule codes / category prefixes to suppress for matching files.
+    ///
+    /// Populated from `[tool.konform.lint] per-file-ignores = {"tests/**" = ["KIS001"]}`
+    /// or from `--per-file-ignores` CLI flags.
+    pub per_file_ignores: HashMap<String, Vec<String>>,
+
+    /// Alias `# noqa` codes to canonical rule codes, to support migrating
+    /// away from an old rule/category name without breaking existing
+    /// suppression comments.
+    ///
+    /// Populated from `[tool.konform.lint] noqa-aliases = {"IS001" = "KIS001"}`.
+    /// A `# noqa: IS001` comment then suppresses `KIS001` violations.
+    /// Aliases may also target a category prefix (e.g. `"IS" = "KIS"`) to
+    /// alias an entire category at once.
+    pub noqa_aliases: HashMap<String, String>,
+
+    /// Every other table-valued key under `[tool.konform.lint]`, keyed by
+    /// [`crate::rules::Rule::config_name`] (e.g. `"module-only-imports"`,
+    /// `"user-defined-patterns"`). Passed verbatim to `Rule::check` / `Rule::fix`.
+    #[serde(flatten)]
+    pub rules: HashMap<String, toml::Value>,
+}
+
+impl Default for LintConfig {
+    fn default() -> Self {
+        Self {
+            select: vec![],
+            ignore: vec![],
+            level: Level::Error,
+            per_file_ignores: HashMap::new(),
+            noqa_aliases: HashMap::new(),
+            rules: HashMap::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Config {
+    // ── Global defaults ───────────────────────────────────────────────────
     pub cache_dir: String,
     pub workers: usize,
 
-    // ── Per-category raw TOML blobs ───────────────────────────────────────
-    /// `rules["KIS"]` contains the parsed `[tool.konform.KIS]` section.
-    /// Passed verbatim to `Rule::check` / `Rule::fix` as `cfg`.
-    #[serde(skip)]
-    pub rules: HashMap<String, toml::Value>,
+    // ── Rule selection / configuration ──────────────────────────────────────
+    pub lint: LintConfig,
 
     // ── Python interpreter for module probing ─────────────────────────────
     /// Explicit path to the Python interpreter.
@@ -44,25 +92,6 @@ pub struct Config {
     #[serde(skip)]
     pub ignore_noqa: bool,
 
-    /// Per-file rule overrides: each key is a glob pattern, the value is a
-    /// list of rule codes / category prefixes to suppress for matching files.
-    ///
-    /// Populated from `[tool.konform] per_file_ignores = {"tests/**" = ["KIS001"]}`
-    /// or from `--per-file-ignores` CLI flags.
-    #[serde(skip)]
-    pub per_file_ignores: HashMap<String, Vec<String>>,
-
-    /// Alias `# noqa` codes to canonical rule codes, to support migrating
-    /// away from an old rule/category name without breaking existing
-    /// suppression comments.
-    ///
-    /// Populated from `[tool.konform] noqa_aliases = {"IS001" = "KIS001"}`.
-    /// A `# noqa: IS001` comment then suppresses `KIS001` violations.
-    /// Aliases may also target a category prefix (e.g. `"IS" = "KIS"`) to
-    /// alias an entire category at once.
-    #[serde(skip)]
-    pub noqa_aliases: HashMap<String, String>,
-
     // ── Module-probe search roots ──────────────────────────────────────────
     /// Directories (relative to `config_dir`) to search when resolving
     /// whether an imported name is a first-party module/package (used by
@@ -80,17 +109,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            select: vec![],
-            ignore: vec![],
-            level: Level::Error,
             cache_dir: ".konform_cache".into(),
             workers: 0,
-            rules: HashMap::new(),
+            lint: LintConfig::default(),
             python: None,
             config_dir: None,
             ignore_noqa: false,
-            per_file_ignores: HashMap::new(),
-            noqa_aliases: HashMap::new(),
             src: vec![".".to_owned(), "src".to_owned()],
         }
     }
@@ -107,26 +131,37 @@ impl Config {
     /// categories can be toggled with a short token:
     ///
     /// ```toml
-    /// [tool.konform]
+    /// [tool.konform.lint]
     /// select = ["KIS"]   # run all KIS* rules
     /// ignore = ["KIS001"] # except KIS001 specifically
     /// ```
     pub fn is_enabled(&self, code: &str) -> bool {
-        let selected =
-            self.select.is_empty() || self.select.iter().any(|s| code.starts_with(s.as_str()));
-        let ignored = self.ignore.iter().any(|i| code.starts_with(i.as_str()));
+        let selected = self.lint.select.is_empty()
+            || self
+                .lint
+                .select
+                .iter()
+                .any(|s| code.starts_with(s.as_str()));
+        let ignored = self
+            .lint
+            .ignore
+            .iter()
+            .any(|i| code.starts_with(i.as_str()));
         selected && !ignored
     }
 
-    /// Return the raw TOML configuration blob for a rule category.
+    /// Return the raw TOML configuration blob for a rule, looked up by its
+    /// [`crate::rules::Rule::config_name`].
     ///
-    /// For example, calling `rule_config("KIS")` returns the parsed
-    /// `[tool.konform.KIS]` section so the rule can read its own settings.
-    /// Returns an empty table when the section is absent.
-    pub fn rule_config(&self, category: &str) -> &toml::Value {
+    /// For example, calling `rule_config("module-only-imports")` returns the
+    /// parsed `[tool.konform.lint.module-only-imports]` section so the rule
+    /// can read its own settings. Returns an empty table when the section is
+    /// absent.
+    pub fn rule_config(&self, config_name: &str) -> &toml::Value {
         static EMPTY: OnceLock<toml::Value> = OnceLock::new();
-        self.rules
-            .get(category)
+        self.lint
+            .rules
+            .get(config_name)
             .unwrap_or_else(|| EMPTY.get_or_init(|| toml::Value::Table(Default::default())))
     }
 }
@@ -178,6 +213,29 @@ pub fn load_config(start: Option<&Path>, explicit_path: Option<&Path>) -> Config
         }
     };
 
+    // ── Config migration ────────────────────────────────────────────────────
+    // Auto-upgrade an outdated config shape (e.g. the pre-0.3 flat/category
+    // format) before parsing. Rewritten with `toml_edit` so comments and
+    // formatting elsewhere in the file (other `[tool.*]` sections) survive.
+    let content = match crate::migrations::migrate_content(&path, &content) {
+        Some((migrated, reports)) => {
+            if std::fs::write(&path, &migrated).is_ok() {
+                eprintln!(
+                    "konform: migrated {} to the current config format:",
+                    path.display()
+                );
+                for report in &reports {
+                    eprintln!("  [{}] {}", report.id, report.description);
+                    for note in &report.notes {
+                        eprintln!("    - {note}");
+                    }
+                }
+            }
+            migrated
+        }
+        None => content,
+    };
+
     let raw: toml::Value = match toml::from_str(&content) {
         Ok(v) => v,
         Err(_) => {
@@ -205,69 +263,13 @@ pub fn load_config(start: Option<&Path>, explicit_path: Option<&Path>) -> Config
         }
     };
 
-    let mut cfg = Config {
-        config_dir,
-        ..Config::default()
-    };
-
-    // ── Rule selection ─────────────────────────────────────────────────────
-    if let Some(v) = section.get("select").and_then(|v| v.as_array()) {
-        cfg.select = v
-            .iter()
-            .filter_map(|e| e.as_str())
-            .map(str::to_owned)
-            .collect();
-    }
-    if let Some(v) = section.get("ignore").and_then(|v| v.as_array()) {
-        cfg.ignore = v
-            .iter()
-            .filter_map(|e| e.as_str())
-            .map(str::to_owned)
-            .collect();
-    }
-
-    // ── Per-file-ignores ────────────────────────────────────────────
-    if let Some(table) = section.get("per_file_ignores").and_then(|v| v.as_table()) {
-        for (glob, codes_val) in table {
-            if let Some(arr) = codes_val.as_array() {
-                let codes: Vec<String> = arr
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .map(str::to_owned)
-                    .collect();
-                cfg.per_file_ignores.insert(glob.clone(), codes);
-            }
-        }
-    }
-
-    // ── noqa aliases ──────────────────────────────────────────────────────
-    if let Some(table) = section.get("noqa_aliases").and_then(|v| v.as_table()) {
-        for (alias, target) in table {
-            if let Some(target) = target.as_str() {
-                cfg.noqa_aliases.insert(alias.clone(), target.to_owned());
-            }
-        }
-    }
-
-    // ── Global defaults ────────────────────────────────────────────────────
-    if let Some(v) = section.get("level").and_then(|v| v.as_str()) {
-        if let Ok(l) = v.parse::<Level>() {
-            cfg.level = l;
-        }
-    }
-    if let Some(v) = section.get("cache_dir").and_then(|v| v.as_str()) {
-        cfg.cache_dir = v.to_owned();
-    }
-    if let Some(v) = section.get("workers").and_then(|v| v.as_integer()) {
-        cfg.workers = v.max(0) as usize;
-    }
-
-    // ── Python interpreter ───────────────────────────────────────────────
-    if let Some(v) = section.get("python").and_then(|v| v.as_str()) {
-        cfg.python = Some(v.to_owned());
-    }
+    let mut cfg = Config::deserialize(section.clone()).unwrap_or_default();
+    cfg.config_dir = config_dir;
 
     // ── Module-probe search roots (mirrors Ruff's `src` resolution order) ───
+    // `src` is intentionally not part of the typed `Config` struct above: it
+    // must fall back to `[tool.ruff] src` only when *absent*, which a plain
+    // `#[serde(default)]` field can't distinguish from "present but empty".
     let str_array = |v: &toml::Value| -> Option<Vec<String>> {
         v.as_array().map(|arr| {
             arr.iter()
@@ -285,20 +287,8 @@ pub fn load_config(start: Option<&Path>, explicit_path: Option<&Path>) -> Config
         .and_then(str_array)
     {
         cfg.src = v;
-    }
-
-    // ── Per-category subtables → rules map ────────────────────────────────────
-    // Every table-valued key in [tool.konform] is treated as a rule-category
-    // config blob (KIS, KPT, …).  Scalar keys are the global settings above.
-    if let toml::Value::Table(table) = &section {
-        for (key, val) in table {
-            if key == "per_file_ignores" || key == "noqa_aliases" {
-                continue; // Already parsed above.
-            }
-            if matches!(val, toml::Value::Table(_)) {
-                cfg.rules.insert(key.clone(), val.clone());
-            }
-        }
+    } else {
+        cfg.src = Config::default().src;
     }
 
     cfg
@@ -373,7 +363,10 @@ mod tests {
     #[test]
     fn select_prefix_enables_only_matching() {
         let cfg = Config {
-            select: vec!["KIS".into()],
+            lint: LintConfig {
+                select: vec!["KIS".into()],
+                ..LintConfig::default()
+            },
             ..Config::default()
         };
         assert!(cfg.is_enabled("KIS001"));
@@ -383,7 +376,10 @@ mod tests {
     #[test]
     fn ignore_prefix_disables_matching() {
         let cfg = Config {
-            ignore: vec!["KIS".into()],
+            lint: LintConfig {
+                ignore: vec!["KIS".into()],
+                ..LintConfig::default()
+            },
             ..Config::default()
         };
         assert!(!cfg.is_enabled("KIS001"));
@@ -393,8 +389,11 @@ mod tests {
     #[test]
     fn exact_ignore_beats_category_select() {
         let cfg = Config {
-            select: vec!["KIS".into()],
-            ignore: vec!["KIS001".into()],
+            lint: LintConfig {
+                select: vec!["KIS".into()],
+                ignore: vec!["KIS001".into()],
+                ..LintConfig::default()
+            },
             ..Config::default()
         };
         assert!(!cfg.is_enabled("KIS001"));
@@ -402,9 +401,9 @@ mod tests {
     }
 
     #[test]
-    fn rule_config_returns_empty_for_unknown_category() {
+    fn rule_config_returns_empty_for_unknown_rule() {
         let cfg = Config::default();
-        let val = cfg.rule_config("UNKNOWN");
+        let val = cfg.rule_config("unknown-rule");
         assert!(val.as_table().is_some_and(|t| t.is_empty()));
     }
 
@@ -413,9 +412,11 @@ mod tests {
         let mut cfg = Config::default();
         let mut table = toml::map::Map::new();
         table.insert("level".into(), toml::Value::String("warning".into()));
-        cfg.rules.insert("KIS".into(), toml::Value::Table(table));
+        cfg.lint
+            .rules
+            .insert("module-only-imports".into(), toml::Value::Table(table));
 
-        let val = cfg.rule_config("KIS");
+        let val = cfg.rule_config("module-only-imports");
         assert_eq!(val.get("level").and_then(|v| v.as_str()), Some("warning"));
     }
 
@@ -457,11 +458,15 @@ mod tests {
         let pyproject = tmp.path().join("pyproject.toml");
         std::fs::write(
             &pyproject,
-            "[tool.konform]\nper_file_ignores = {\"tests/**\" = [\"KIS001\", \"KPT\"]}",
+            "[tool.konform.lint]\nper-file-ignores = {\"tests/**\" = [\"KIS001\", \"KPT\"]}",
         )
         .unwrap();
         let cfg = load_config(Some(tmp.path()), None);
-        let codes = cfg.per_file_ignores.get("tests/**").expect("glob missing");
+        let codes = cfg
+            .lint
+            .per_file_ignores
+            .get("tests/**")
+            .expect("glob missing");
         assert!(codes.contains(&"KIS001".to_owned()));
         assert!(codes.contains(&"KPT".to_owned()));
     }
@@ -472,13 +477,13 @@ mod tests {
         let pyproject = tmp.path().join("pyproject.toml");
         std::fs::write(
             &pyproject,
-            "[tool.konform]\nper_file_ignores = {\"tests/**\" = [\"KIS001\"]}",
+            "[tool.konform.lint]\nper-file-ignores = {\"tests/**\" = [\"KIS001\"]}",
         )
         .unwrap();
         let cfg = load_config(Some(tmp.path()), None);
         assert!(
-            !cfg.rules.contains_key("per_file_ignores"),
-            "per_file_ignores must not be in the rules map"
+            !cfg.lint.rules.contains_key("per-file-ignores"),
+            "per-file-ignores must not be in the rules map"
         );
     }
 
@@ -488,15 +493,18 @@ mod tests {
         let pyproject = tmp.path().join("pyproject.toml");
         std::fs::write(
             &pyproject,
-            "[tool.konform]\nnoqa_aliases = {\"IS001\" = \"KIS001\", \"IS\" = \"KIS\"}",
+            "[tool.konform.lint]\nnoqa-aliases = {\"IS001\" = \"KIS001\", \"IS\" = \"KIS\"}",
         )
         .unwrap();
         let cfg = load_config(Some(tmp.path()), None);
         assert_eq!(
-            cfg.noqa_aliases.get("IS001").map(String::as_str),
+            cfg.lint.noqa_aliases.get("IS001").map(String::as_str),
             Some("KIS001")
         );
-        assert_eq!(cfg.noqa_aliases.get("IS").map(String::as_str), Some("KIS"));
+        assert_eq!(
+            cfg.lint.noqa_aliases.get("IS").map(String::as_str),
+            Some("KIS")
+        );
     }
 
     #[test]
@@ -505,21 +513,35 @@ mod tests {
         let pyproject = tmp.path().join("pyproject.toml");
         std::fs::write(
             &pyproject,
-            "[tool.konform]\nnoqa_aliases = {\"IS001\" = \"KIS001\"}",
+            "[tool.konform.lint]\nnoqa-aliases = {\"IS001\" = \"KIS001\"}",
         )
         .unwrap();
         let cfg = load_config(Some(tmp.path()), None);
         assert!(
-            !cfg.rules.contains_key("noqa_aliases"),
-            "noqa_aliases must not be in the rules map"
+            !cfg.lint.rules.contains_key("noqa-aliases"),
+            "noqa-aliases must not be in the rules map"
         );
+    }
+
+    #[test]
+    fn rule_config_table_parsed_from_pyproject() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pyproject = tmp.path().join("pyproject.toml");
+        std::fs::write(
+            &pyproject,
+            "[tool.konform.lint.module-only-imports]\nlevel = \"warning\"\n",
+        )
+        .unwrap();
+        let cfg = load_config(Some(tmp.path()), None);
+        let val = cfg.rule_config("module-only-imports");
+        assert_eq!(val.get("level").and_then(|v| v.as_str()), Some("warning"));
     }
 
     #[test]
     fn src_defaults_to_dot_and_src_when_unset() {
         let tmp = tempfile::tempdir().unwrap();
         let pyproject = tmp.path().join("pyproject.toml");
-        std::fs::write(&pyproject, "[tool.konform]\nlevel = \"error\"").unwrap();
+        std::fs::write(&pyproject, "[tool.konform.lint]\nlevel = \"error\"").unwrap();
         let cfg = load_config(Some(tmp.path()), None);
         assert_eq!(cfg.src, vec![".".to_owned(), "src".to_owned()]);
     }
@@ -539,7 +561,7 @@ mod tests {
         let pyproject = tmp.path().join("pyproject.toml");
         std::fs::write(
             &pyproject,
-            "[tool.konform]\nlevel = \"error\"\n\n[tool.ruff]\nsrc = [\"lib\", \"test\"]",
+            "[tool.konform.lint]\nlevel = \"error\"\n\n[tool.ruff]\nsrc = [\"lib\", \"test\"]",
         )
         .unwrap();
         let cfg = load_config(Some(tmp.path()), None);
@@ -557,5 +579,29 @@ mod tests {
         .unwrap();
         let cfg = load_config(Some(tmp.path()), None);
         assert_eq!(cfg.src, vec!["lib".to_owned()]);
+    }
+
+    #[test]
+    fn old_format_pyproject_is_migrated_on_load_and_rewritten_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pyproject = tmp.path().join("pyproject.toml");
+        std::fs::write(
+            &pyproject,
+            "[tool.konform]\nselect = [\"KIS\"]\n\n[tool.konform.KIS]\nunresolved_level = \"error\"\n",
+        )
+        .unwrap();
+
+        let cfg = load_config(Some(tmp.path()), None);
+        assert_eq!(cfg.lint.select, vec!["KIS".to_owned()]);
+        let kis = cfg.rule_config("module-only-imports");
+        assert_eq!(
+            kis.get("unresolved-level").and_then(|v| v.as_str()),
+            Some("error")
+        );
+
+        // The file on disk should now be in the new shape.
+        let rewritten = std::fs::read_to_string(&pyproject).unwrap();
+        assert!(rewritten.contains("[tool.konform.lint]"));
+        assert!(rewritten.contains("[tool.konform.lint.module-only-imports]"));
     }
 }

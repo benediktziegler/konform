@@ -4,6 +4,7 @@ mod config;
 mod engine;
 mod git;
 mod lsp;
+mod migrations;
 mod module_probe;
 mod output;
 mod rules;
@@ -276,19 +277,20 @@ fn apply_cli_overrides(
 ) {
     // --select fully replaces the config list (explicit override intent).
     if !select.is_empty() {
-        config.select = select.to_vec();
+        config.lint.select = select.to_vec();
     }
     // --extend-select appends to whatever is in the config (or the --select override).
-    config.select.extend(extend_select.iter().cloned());
+    config.lint.select.extend(extend_select.iter().cloned());
     // Both --ignore and --extend-ignore are additive.
-    config.ignore.extend(ignore.iter().cloned());
-    config.ignore.extend(extend_ignore.iter().cloned());
+    config.lint.ignore.extend(ignore.iter().cloned());
+    config.lint.ignore.extend(extend_ignore.iter().cloned());
     // --per-file-ignores replaces; --extend-per-file-ignores merges.
     if !per_file_ignores.is_empty() {
-        config.per_file_ignores = parse_per_file_ignores(per_file_ignores);
+        config.lint.per_file_ignores = parse_per_file_ignores(per_file_ignores);
     }
     for (glob, codes) in parse_per_file_ignores(extend_per_file_ignores) {
         config
+            .lint
             .per_file_ignores
             .entry(glob)
             .or_default()
@@ -410,8 +412,8 @@ fn run_check(args: CheckArgs, isolated: bool) {
         &cache_root,
         args.no_cache || args.ignore_noqa,
         &level_str,
-        &config.select,
-        &config.ignore,
+        &config.lint.select,
+        &config.lint.ignore,
         probe.env_fingerprint(),
     );
 
@@ -866,9 +868,10 @@ fn run_rule(args: RuleArgs) {
     if args.list {
         for rule in &all {
             println!(
-                "{:8}  {:<10}  {}  — {}",
+                "{:8}  {:<10}  {:<24}  {}  — {}",
                 rule.code(),
                 rule.category(),
+                rule.config_name(),
                 rule.name(),
                 rule.description(),
             );
@@ -913,12 +916,12 @@ const KONFORM_TOML: &str = r#"# konform.toml — project linting configuration
 
 [konform]
 
-[konform.KIS]
+[konform.lint.module-only-imports]
 # Extend the built-in exceptions (__future__, typing, typing_extensions,
 # collections.abc) if your project has additional exempted modules:
 # exceptions = ["mycompany.compat"]
 
-[konform.KPT]
+[konform.lint.user-defined-patterns]
 # rules_file = "konform_patterns.toml"
 "#;
 
@@ -926,12 +929,12 @@ const KONFORM_TOML: &str = r#"# konform.toml — project linting configuration
 const PYPROJECT_APPEND: &str = r#"
 [tool.konform]
 
-[tool.konform.KIS]
+[tool.konform.lint.module-only-imports]
 # Extend the built-in exceptions (__future__, typing, typing_extensions,
 # collections.abc) if your project has additional exempted modules:
 # exceptions = ["mycompany.compat"]
 
-[tool.konform.KPT]
+[tool.konform.lint.user-defined-patterns]
 # rules_file = "konform_patterns.toml"
 "#;
 

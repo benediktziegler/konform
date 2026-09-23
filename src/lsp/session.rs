@@ -139,14 +139,14 @@ impl Session {
     /// - `"level"`  — `"error"` or `"warning"`
     pub fn apply_editor_settings(&mut self, settings: &serde_json::Value) {
         if let Some(arr) = settings.get("select").and_then(|v| v.as_array()) {
-            self.config.select = arr
+            self.config.lint.select = arr
                 .iter()
                 .filter_map(|v| v.as_str())
                 .map(str::to_owned)
                 .collect();
         }
         if let Some(arr) = settings.get("ignore").and_then(|v| v.as_array()) {
-            self.config.ignore = arr
+            self.config.lint.ignore = arr
                 .iter()
                 .filter_map(|v| v.as_str())
                 .map(str::to_owned)
@@ -154,7 +154,7 @@ impl Session {
         }
         if let Some(level_str) = settings.get("level").and_then(|v| v.as_str()) {
             if let Ok(level) = level_str.parse::<crate::types::Level>() {
-                self.config.level = level;
+                self.config.lint.level = level;
             }
         }
         eprintln!("konform server: applied editor workspace settings");

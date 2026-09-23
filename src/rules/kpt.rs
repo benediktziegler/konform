@@ -4,10 +4,10 @@
 //! regular-expression patterns.  Patterns can be supplied from three sources,
 //! tried in priority order:
 //!
-//! 1. **Inline** `[[tool.konform.KPT.rules]]` inside `pyproject.toml` /
-//!    `konform.toml`.
+//! 1. **Inline** `[[tool.konform.lint.user-defined-patterns.rules]]` inside
+//!    `pyproject.toml` / `konform.toml`.
 //! 2. **Explicit file** referenced by `rules_file = "path"` in
-//!    `[tool.konform.KPT]`  (`.toml` or `.yaml`).
+//!    `[tool.konform.lint.user-defined-patterns]`  (`.toml` or `.yaml`).
 //! 3. **Auto-discovered** `konform_patterns.toml` next to the config file.
 //! 4. **Auto-discovered** `konform_patterns.yaml` (legacy / migration compat).
 //! 5. **No patterns** — the rule runs but emits zero violations.
@@ -19,7 +19,7 @@
 //! * `files`     — optional list of glob patterns; when absent the pattern
 //!   applies to every file
 //! * `level`     — `"error"` or `"warning"`; falls back to
-//!   `[tool.konform.KPT].level` (default: `"warning"`)
+//!   `[tool.konform.lint.user-defined-patterns].level` (default: `"warning"`)
 //! * `help`      — optional guidance text surfaced alongside the violation
 //! * `sub_rules` — ordered list of refinements; the first sub-rule whose
 //!   pattern(s) match the already-flagged line overrides `message` and `help`
@@ -219,6 +219,10 @@ impl Rule for KptRule {
         "KPT"
     }
 
+    fn config_name(&self) -> &str {
+        "user-defined-patterns"
+    }
+
     fn name(&self) -> &str {
         "Pattern rules"
     }
@@ -390,8 +394,8 @@ impl Rule for KptRule {
   defined in your project configuration.
 
   Patterns are loaded from the first available source:
-    1. Inline [[tool.konform.KPT.rules]] in pyproject.toml / konform.toml
-    2. rules_file = "path" in [tool.konform.KPT]
+    1. Inline [[tool.konform.lint.user-defined-patterns.rules]] in pyproject.toml / konform.toml
+    2. rules_file = "path" in [tool.konform.lint.user-defined-patterns]
     3. konform_patterns.toml  (auto-discovered next to the config file)
     4. konform_patterns.yaml  (legacy fallback)
 
@@ -450,7 +454,7 @@ fn load_patterns(
     config_dir: Option<&Path>,
     default_level: Level,
 ) -> Vec<CompiledPattern> {
-    // ── Source 1: inline [[tool.konform.KPT.rules]] ───────────────────────
+    // ── Source 1: inline [[tool.konform.lint.user-defined-patterns.rules]] ───
     if let Some(arr) = cfg.get("rules").and_then(|v| v.as_array()) {
         if !arr.is_empty() {
             let raws: Vec<RawPattern> = arr

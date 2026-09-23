@@ -1,7 +1,7 @@
 //! Zed extension for the Konform Python linter and language server.
 //!
 //! Konform provides:
-//! * **KIS001** — Google-style import checker (rewrite `from X import obj` → `import X`)
+//! * **KIS001** — Module-only import checker (rewrite `from X import obj` → `import X`)
 //! * **KPT**    — User-defined regex pattern rules loaded from `konform_patterns.toml`
 //!
 //! Binary resolution order:

@@ -69,7 +69,7 @@ impl From<&CheckInput<'_>> for FileContext {
 ///
 /// Rules are filtered by [`Config::is_enabled`] so `--select` / `--ignore`
 /// can narrow the active set without changing callers.
-/// Per-file ignores from `config.per_file_ignores` are applied after the
+/// Per-file ignores from `config.lint.per_file_ignores` are applied after the
 /// rule pass and suppress matching violations.
 pub fn run_check(
     input: &CheckInput<'_>,
@@ -81,16 +81,17 @@ pub fn run_check(
     if config.ignore_noqa {
         ctx.ignore_noqa = true;
     }
-    ctx.noqa_aliases = config.noqa_aliases.clone();
+    ctx.noqa_aliases = config.lint.noqa_aliases.clone();
     let mut violations: Vec<Violation> = rules
         .iter()
         .filter(|r| config.is_enabled(r.code()))
-        .flat_map(|r| r.check(&ctx, config.rule_config(r.category())))
+        .flat_map(|r| r.check(&ctx, config.rule_config(r.config_name())))
         .collect();
 
     // Apply per-file-ignores: build GlobMatchers once, then filter.
-    if !config.per_file_ignores.is_empty() && !violations.is_empty() {
+    if !config.lint.per_file_ignores.is_empty() && !violations.is_empty() {
         let matchers: Vec<(GlobMatcher, Vec<String>)> = config
+            .lint
             .per_file_ignores
             .iter()
             .filter_map(|(pat, codes)| {
@@ -164,8 +165,8 @@ pub fn run_fix(
         {
             let mut ctx = FileContext::from_source(input.path.to_path_buf(), src.clone());
             ctx.ignore_noqa = input.ignore_noqa || config.ignore_noqa;
-            ctx.noqa_aliases = config.noqa_aliases.clone();
-            if let Some(fixed) = rule.fix(&ctx, config.rule_config(rule.category()))? {
+            ctx.noqa_aliases = config.lint.noqa_aliases.clone();
+            if let Some(fixed) = rule.fix(&ctx, config.rule_config(rule.config_name()))? {
                 if fixed == src {
                     continue; // no-op fix; nothing to apply or loop on
                 }
@@ -318,6 +319,7 @@ mod tests {
         let input = CheckInput::new(&p, "\"\"\"Test module.\"\"\"\nfrom os.path import join\n");
         let mut config = Config::default();
         config
+            .lint
             .per_file_ignores
             .insert("tests/**".into(), vec!["KIS001".into()]);
         let violations = run_check(&input, &rules, &config);
@@ -334,6 +336,7 @@ mod tests {
         let input = CheckInput::new(&p, "from os.path import join\n");
         let mut config = Config::default();
         config
+            .lint
             .per_file_ignores
             .insert("tests/**".into(), vec!["KIS001".into()]);
         let violations = run_check(&input, &rules, &config);
@@ -349,6 +352,7 @@ mod tests {
         let mut config = Config::default();
         // Category prefix "KIS" should suppress KIS001.
         config
+            .lint
             .per_file_ignores
             .insert("tests/**".into(), vec!["KIS".into()]);
         let violations = run_check(&input, &rules, &config);
@@ -364,7 +368,10 @@ mod tests {
         let p = path();
         let input = CheckInput::new(&p, "from os.path import join  # noqa: IS001\n");
         let mut config = Config::default();
-        config.noqa_aliases.insert("IS001".into(), "KIS001".into());
+        config
+            .lint
+            .noqa_aliases
+            .insert("IS001".into(), "KIS001".into());
         let violations = run_check(&input, &rules, &config);
         assert!(
             violations.is_empty(),
@@ -378,7 +385,7 @@ mod tests {
         let p = path();
         let input = CheckInput::new(&p, "from os.path import join  # noqa: IS\n");
         let mut config = Config::default();
-        config.noqa_aliases.insert("IS".into(), "KIS".into());
+        config.lint.noqa_aliases.insert("IS".into(), "KIS".into());
         let violations = run_check(&input, &rules, &config);
         assert!(
             violations.is_empty(),
@@ -392,7 +399,10 @@ mod tests {
         let p = path();
         let input = CheckInput::new(&p, "from os.path import join  # noqa: IS002\n");
         let mut config = Config::default();
-        config.noqa_aliases.insert("IS001".into(), "KIS001".into());
+        config
+            .lint
+            .noqa_aliases
+            .insert("IS001".into(), "KIS001".into());
         let violations = run_check(&input, &rules, &config);
         assert!(
             !violations.is_empty(),
@@ -413,6 +423,9 @@ mod tests {
         }
         fn category(&self) -> &str {
             "ZZ"
+        }
+        fn config_name(&self) -> &str {
+            "broken-fix"
         }
         fn name(&self) -> &str {
             "broken-fix"
@@ -445,6 +458,9 @@ mod tests {
         }
         fn category(&self) -> &str {
             "ZZ"
+        }
+        fn config_name(&self) -> &str {
+            "good-fix"
         }
         fn name(&self) -> &str {
             "good-fix"
@@ -513,6 +529,9 @@ mod tests {
         fn category(&self) -> &str {
             "ZZ"
         }
+        fn config_name(&self) -> &str {
+            "needs-a"
+        }
         fn name(&self) -> &str {
             "needs-a"
         }
@@ -548,6 +567,9 @@ mod tests {
         }
         fn category(&self) -> &str {
             "ZZ"
+        }
+        fn config_name(&self) -> &str {
+            "needs-b"
         }
         fn name(&self) -> &str {
             "needs-b"
@@ -607,6 +629,9 @@ mod tests {
         }
         fn category(&self) -> &str {
             "ZZ"
+        }
+        fn config_name(&self) -> &str {
+            "oscillating"
         }
         fn name(&self) -> &str {
             "oscillating"

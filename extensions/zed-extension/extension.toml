@@ -1,6 +1,6 @@
 id = "konform-lsp"
 name = "Konform"
-version = "0.2.0" # cz-sync: package version
+version = "0.3.0" # cz-sync: package version
 schema_version = 1
 authors = ["Benedikt Ziegler <benediktziegler@gmail.com>"]
 description = "Konform Python linter and language server"

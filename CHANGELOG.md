@@ -1,22 +1,15 @@
-## Unreleased
+## v0.3.0 (2026-09-23)
 
 ### Feat
 
-- **rules**: add KIS002 (unnecessary import alias)
-- **config**: add automatic config-format migration framework
-- **config**: add `Rule::config_name` for stable per-rule config tables
-- **lsp**: per-violation quick-fixes now fix only their own violation, are listed first and marked preferred; `context.only` is honoured
+- **rules**: add KIS002 unnecessary import alias rule
+- **config**: add lint config migration framework
+- **zed**: auto-install konform binary from releases
 
 ### Fix
 
-- **kis002**: don't fix two aliases that would collapse to the same name; only the first is rewritten
-- **lsp**: quick-fixes were missing for KPT patterns whose id isn't `KPT001` or that use `files` globs
-- **lsp**: quick-fixes that insert lines no longer overwrite the following line
-- **fix**: inline `pyproject.toml` KPT patterns with a `replacement` are now applied by `--fix`
-
-### Refactor
-
-- **config**: move rule selection and per-rule settings under `[tool.konform.lint]` (breaking; auto-migrated on first run)
+- **lsp**: add targeted quickfixes and honor context.only
+- **kis001**: skip autofix for overlapping imports
 
 ## v0.2.0 (2026-09-09)
 

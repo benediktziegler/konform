@@ -50,6 +50,11 @@ version_files = [
     "extensions/zed-extension/Cargo.toml:^version",
     "extensions/zed-extension/extension.toml:# cz-sync",
 ]
+# Sync Cargo.lock files with the bumped versions (commit uses `git commit -a`)
+pre_bump_hooks = [
+    "cargo update --workspace --offline",
+    "cargo update --workspace --offline --manifest-path extensions/zed-extension/Cargo.toml",
+]
 
 [dependency-groups]
 dev = [

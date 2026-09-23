@@ -16,7 +16,7 @@
 use super::convert::{full_document_edit, violation_to_diagnostic};
 use super::session::Session;
 use crate::engine::{run_check, run_fix, CheckInput};
-use crate::rules::{all_rules, Rule};
+use crate::rules::{all_rules, FixTarget, Rule};
 use crate::types::Violation;
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::*;
@@ -189,12 +189,12 @@ fn handle_diagnostic(
 
 /// `textDocument/codeAction` — return fix actions for violations in range.
 ///
-/// Offers two tiers of code action:
-/// 1. **"Fix All"** (`source.fixAll.konform`) — runs the fixer on the whole
+/// Offers two tiers of code action, filtered by `context.only`:
+/// 1. **Per-violation quick-fix** (`quickfix`, preferred) — for each fixable
+///    [`Violation`] whose source line intersects the requested range, a
+///    minimal edit fixing *only that violation* via [`violation_fix_edit`].
+/// 2. **"Fix All"** (`source.fixAll.konform`) — runs the fixer on the whole
 ///    document and replaces it with a single full-document [`TextEdit`].
-/// 2. **Per-violation quick-fix** (`quickfix`) — for each fixable [`Violation`]
-///    whose source line intersects the requested range, computes a minimal
-///    [`TextEdit`] via [`violation_fix_edit`] and attaches it directly.
 fn handle_code_action(
     session: &Arc<RwLock<Session>>,
     params: serde_json::Value,
@@ -223,31 +223,29 @@ fn handle_code_action(
     let rules = all_rules(Arc::clone(&probe), config.config_dir.clone());
     let mut actions: Vec<CodeActionOrCommand> = Vec::new();
 
-    // ── Tier 1: "Fix All" ─────────────────────────────────────────────────
-    let fix_input = CheckInput::new(&path, &source);
-    if let Ok(Some(fixed)) = run_fix(&fix_input, &rules, &config) {
-        let edit = full_document_edit(&source, &fixed);
-        // lsp_types::Uri uses fluent-uri internally; clippy flags it as a
-        // "mutable key type" but it is structurally immutable once created.
-        #[allow(clippy::mutable_key_type)]
-        let mut changes = HashMap::new();
-        changes.insert(uri.clone(), vec![edit]);
-        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-            title: "Fix all konform violations".to_owned(),
-            kind: Some(CodeActionKind::new("source.fixAll.konform")),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                document_changes: None,
-                change_annotations: None,
-            }),
-            is_preferred: Some(true),
-            ..Default::default()
-        }));
-    }
+    // Honour `context.only` (e.g. `["source.fixAll"]` on save, or
+    // `["quickfix"]` from the lightbulb): kinds are hierarchical, so a
+    // requested `source.fixAll` also admits `source.fixAll.konform`.
+    let only = params.context.only.clone();
+    let wants = |kind: &CodeActionKind| {
+        only.as_ref().is_none_or(|kinds| {
+            kinds.iter().any(|k| {
+                let (k, kind) = (k.as_str(), kind.as_str());
+                kind == k || kind.starts_with(&format!("{k}."))
+            })
+        })
+    };
 
-    // ── Tier 2: per-violation quick-fix ───────────────────────────────────
+    // ── Tier 1: per-violation quick-fix ───────────────────────────────────
+    // Listed first and marked preferred so editors surface the fix for the
+    // violation under the cursor ahead of the document-wide fix-all.
     let req_range = params.range;
-    for violation in &cached_violations {
+    let quickfix_candidates: &[Violation] = if wants(&CodeActionKind::QUICKFIX) {
+        &cached_violations
+    } else {
+        &[]
+    };
+    for violation in quickfix_candidates {
         if !violation.fixable {
             continue;
         }
@@ -256,8 +254,12 @@ fn handle_code_action(
             continue;
         }
         let diag = violation_to_diagnostic(violation);
-        let title = format!("[{}] {}", violation.rule, violation.message);
-        if let Some(fix_edits) = violation_fix_edit(&source, violation, &rules, &config) {
+        let title = format!(
+            "Konform: Fix {} [{}]",
+            rule_name(&rules, &violation.rule),
+            violation.rule
+        );
+        if let Some(fix_edits) = violation_fix_edit(&path, &source, violation, &rules, &config) {
             #[allow(clippy::mutable_key_type)]
             let mut changes = HashMap::new();
             changes.insert(uri.clone(), fix_edits);
@@ -270,110 +272,123 @@ fn handle_code_action(
                     document_changes: None,
                     change_annotations: None,
                 }),
-                is_preferred: Some(false),
+                is_preferred: Some(true),
                 ..Default::default()
             }));
         }
     }
 
+    // ── Tier 2: "Fix All" ─────────────────────────────────────────────────
+    let fix_all_kind = CodeActionKind::new("source.fixAll.konform");
+    let fixed = if wants(&fix_all_kind) {
+        run_fix(&CheckInput::new(&path, &source), &rules, &config)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    if let Some(fixed) = fixed {
+        let edit = full_document_edit(&source, &fixed);
+        // lsp_types::Uri uses fluent-uri internally; clippy flags it as a
+        // "mutable key type" but it is structurally immutable once created.
+        #[allow(clippy::mutable_key_type)]
+        let mut changes = HashMap::new();
+        changes.insert(uri.clone(), vec![edit]);
+        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+            title: "Konform: Fix all auto-fixable problems".to_owned(),
+            kind: Some(fix_all_kind),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            }),
+            is_preferred: Some(false),
+            ..Default::default()
+        }));
+    }
+
     Ok(serde_json::to_value(actions)?)
 }
 
-/// Build the complete set of [`TextEdit`]s that fix the given `violation`.
+/// Human-readable name of the rule that reports `code`. KPT violations carry
+/// user-defined pattern ids (e.g. `KPT901`), so fall back to a category match.
+fn rule_name<'a>(rules: &'a [Box<dyn Rule>], code: &'a str) -> &'a str {
+    rules
+        .iter()
+        .find(|r| r.code() == code)
+        .or_else(|| rules.iter().find(|r| code.starts_with(r.category())))
+        .map_or(code, |r| r.name())
+}
+
+/// Build the [`TextEdit`]s that fix exactly `violation` and nothing else.
 ///
-/// A KIS001 fix touches **multiple** locations in one pass: it removes (or
-/// replaces) the import declaration, inserts a new import statement, and
-/// renames every usage of the old local name throughout the file.  Returning
-/// only the single hunk at the violation’s line would leave the file broken
-/// (missing new import + un-renamed usages), so this function collects **all**
-/// hunks produced by running the fixer with only this rule enabled.
+/// Runs the fixer with a [`FixTarget`] naming this violation, then diffs the
+/// result line-by-line. *Every* hunk is returned: a KIS001 fix touches
+/// several places at once (import removal, new import insertion, usage
+/// renames), and dropping any of them would leave the file broken.
 ///
-/// Returns `None` when the fixer produces no change at all.
+/// `path` must be the real document path so path-scoped KPT patterns apply.
+/// Returns `None` when the fixer produces no change.
 fn violation_fix_edit(
+    path: &std::path::Path,
     source: &str,
     violation: &Violation,
     rules: &[Box<dyn Rule>],
     config: &crate::config::Config,
 ) -> Option<Vec<TextEdit>> {
-    use similar::{ChangeTag, TextDiff};
+    let mut input = CheckInput::new(path, source);
+    input.fix_target = Some(FixTarget {
+        rule: violation.rule.clone(),
+        line: violation.line,
+        col: violation.col,
+    });
+    let fixed = run_fix(&input, rules, config).ok()??;
+    let edits = line_diff_edits(source, &fixed);
+    (!edits.is_empty()).then_some(edits)
+}
 
-    // Narrow the config to run only this rule’s fixer.
-    let mut cfg = config.clone();
-    cfg.lint.select = vec![violation.rule.clone()];
-    cfg.lint.ignore.clear();
+/// Minimal line-granular [`TextEdit`]s turning `source` into `fixed`.
+fn line_diff_edits(source: &str, fixed: &str) -> Vec<TextEdit> {
+    use similar::{DiffTag, TextDiff};
 
-    let path = std::path::PathBuf::from("<lsp-fix>");
-    let input = CheckInput::new(&path, source);
-    let fixed = run_fix(&input, rules, &cfg).ok()??;
-
-    // Diff line-by-line and collect ALL (old_start, old_end_exclusive, new_text)
-    // hunks — not just the one at the violation’s line.  A KIS001 fix spans at
-    // least three distinct locations (import removal, new import insertion, usage
-    // renames), so every hunk must be included to keep the file consistent.
-    let diff = TextDiff::from_lines(source, &fixed);
-
-    let mut edits: Vec<TextEdit> = Vec::new();
-    let mut old_line = 0usize;
-    let mut hunk_start: Option<usize> = None;
-    let mut hunk_old_end = 0usize;
-    let mut hunk_new = String::new();
-
-    for change in diff.iter_all_changes() {
-        match change.tag() {
-            ChangeTag::Delete => {
-                hunk_start.get_or_insert(old_line);
-                hunk_old_end = old_line + 1;
-                old_line += 1;
-            }
-            ChangeTag::Insert => {
-                hunk_start.get_or_insert(old_line);
-                hunk_new.push_str(change.value());
-            }
-            ChangeTag::Equal => {
-                if let Some(start) = hunk_start.take() {
-                    let end = hunk_old_end.max(start + 1);
-                    edits.push(TextEdit {
-                        range: Range {
-                            start: Position {
-                                line: start as u32,
-                                character: 0,
-                            },
-                            end: Position {
-                                line: end as u32,
-                                character: 0,
-                            },
-                        },
-                        new_text: std::mem::take(&mut hunk_new),
-                    });
-                    hunk_old_end = 0;
-                }
-                old_line += 1;
-            }
+    // Merge each run of adjacent non-equal ops into one hunk of
+    // (old line range, new line range) so no two edits touch. A pure insert
+    // has an empty old range and so becomes a zero-width edit instead of
+    // overwriting the following line.
+    let diff = TextDiff::from_lines(source, fixed);
+    let mut hunks: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> = Vec::new();
+    let mut prev_equal = true;
+    for op in diff.ops() {
+        if op.tag() == DiffTag::Equal {
+            prev_equal = true;
+            continue;
         }
-    }
-    // Flush a trailing hunk (file doesn’t end with Equal).
-    if let Some(start) = hunk_start {
-        let end = hunk_old_end.max(start + 1);
-        edits.push(TextEdit {
-            range: Range {
-                start: Position {
-                    line: start as u32,
-                    character: 0,
-                },
-                end: Position {
-                    line: end as u32,
-                    character: 0,
-                },
-            },
-            new_text: hunk_new,
-        });
+        match hunks.last_mut() {
+            Some((old, new)) if !prev_equal => {
+                old.end = op.old_range().end;
+                new.end = op.new_range().end;
+            }
+            _ => hunks.push((op.old_range(), op.new_range())),
+        }
+        prev_equal = false;
     }
 
-    if edits.is_empty() {
-        None
-    } else {
-        Some(edits)
-    }
+    // `from_lines` tokenizes exactly like `split_inclusive('\n')`.
+    let new_lines: Vec<&str> = fixed.split_inclusive('\n').collect();
+    let line_start = |line: usize| Position {
+        line: line as u32,
+        character: 0,
+    };
+    hunks
+        .into_iter()
+        .map(|(old, new)| TextEdit {
+            range: Range {
+                start: line_start(old.start),
+                end: line_start(old.end),
+            },
+            new_text: new_lines[new].concat(),
+        })
+        .collect()
 }
 
 /// `textDocument/formatting` — apply all fixable violations to the whole document.

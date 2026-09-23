@@ -87,13 +87,7 @@ impl Rule for Kis001Rule {
 
     fn fix(&self, ctx: &FileContext, cfg: &toml::Value) -> Result<Option<String>> {
         let (exceptions, _level, _unresolved_level) = parse_kis_config(cfg);
-        Ok(apply_fixes(
-            &ctx.source,
-            &self.probe,
-            &exceptions,
-            ctx.ignore_noqa,
-            &ctx.noqa_aliases,
-        ))
+        Ok(apply_fixes(ctx, &self.probe, &exceptions))
     }
 
     fn explain(&self) -> String {
@@ -810,13 +804,10 @@ fn queue_nested_imports(
     }
 }
 
-fn apply_fixes(
-    source: &str,
-    probe: &ModuleProbe,
-    exceptions: &[String],
-    ignore_noqa: bool,
-    noqa_aliases: &HashMap<String, String>,
-) -> Option<String> {
+fn apply_fixes(ctx: &FileContext, probe: &ModuleProbe, exceptions: &[String]) -> Option<String> {
+    let source = ctx.source.as_str();
+    let ignore_noqa = ctx.ignore_noqa;
+    let noqa_aliases = &ctx.noqa_aliases;
     let lines: Vec<&str> = source.lines().collect();
     let (imports, all_exports) = parse_ast(source);
     let stmts = parse_module_stmts(source);
@@ -851,7 +842,14 @@ fn apply_fixes(
             continue;
         }
 
+        // A KIS001 violation spans the whole statement, so a targeted fix
+        // rewrites every alias in it. Untargeted imports still fall through
+        // to the span/anchor bookkeeping below.
+        let targeted = ctx.wants_fix("KIS001", imp.start_line, imp.col);
         for alias in &imp.aliases {
+            if !targeted {
+                continue;
+            }
             let check = probe.check(&imp.module, &alias.name);
             if check != ModuleCheck::NotModule {
                 continue;
@@ -1414,6 +1412,29 @@ mod tests {
         assert!(
             !fixed.contains("from os.path import join"),
             "fix should remove violation"
+        );
+    }
+
+    #[test]
+    fn targeted_fix_rewrites_only_the_target_import() {
+        let source = "from os.path import join\nfrom json.decoder import JSONDecoder\n\njoin('a')\nJSONDecoder()\n";
+        let mut c = ctx(source);
+        c.fix_target = Some(crate::rules::FixTarget {
+            rule: "KIS001".to_owned(),
+            line: 2,
+            col: 0,
+        });
+        let fixed = rule()
+            .fix(&c, &empty_cfg())
+            .unwrap()
+            .expect("target import fixed");
+        assert!(
+            fixed.contains("decoder.JSONDecoder()"),
+            "target not fixed:\n{fixed}"
+        );
+        assert!(
+            fixed.contains("from os.path import join\n") && fixed.contains("\njoin('a')"),
+            "untargeted import must be left alone:\n{fixed}"
         );
     }
 

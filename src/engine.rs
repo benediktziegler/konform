@@ -18,7 +18,7 @@
 #![allow(dead_code)]
 
 use crate::config::Config;
-use crate::rules::{FileContext, Rule};
+use crate::rules::{FileContext, FixTarget, Rule};
 use crate::types::Violation;
 use anyhow::Result;
 use globset::{Glob, GlobMatcher};
@@ -41,6 +41,8 @@ pub struct CheckInput<'a> {
     pub source: &'a str,
     /// When `true`, `# noqa` suppression comments are ignored.
     pub ignore_noqa: bool,
+    /// Restrict [`run_fix`] to a single violation (LSP quick-fix).
+    pub fix_target: Option<FixTarget>,
 }
 
 impl<'a> CheckInput<'a> {
@@ -49,6 +51,7 @@ impl<'a> CheckInput<'a> {
             path,
             source,
             ignore_noqa: false,
+            fix_target: None,
         }
     }
 }
@@ -137,6 +140,10 @@ const MAX_FIX_PASSES: u32 = 100;
 /// output of the previous one. Returns the final source text if any rule
 /// made a change, or `None` if the source is already clean.
 ///
+/// With `input.fix_target` set, only that one violation is fixed and only a
+/// single pass runs: a later pass could otherwise match a *different*
+/// violation that happens to have moved to the target's position.
+///
 /// # Safety net
 /// After each rule's fix, the resulting source is re-parsed with
 /// `ruff_python_parser::parse_module`. A fix is a contract: it must turn
@@ -156,16 +163,22 @@ pub fn run_fix(
     let mut src = input.source.to_owned();
     let mut changed = false;
 
-    for _pass in 0..MAX_FIX_PASSES {
+    let max_passes = if input.fix_target.is_some() {
+        1
+    } else {
+        MAX_FIX_PASSES
+    };
+
+    for _pass in 0..max_passes {
         let mut pass_changed = false;
 
-        for rule in rules
-            .iter()
-            .filter(|r| r.fixable() && config.is_enabled(r.code()))
-        {
+        // No `fixable()` pre-filter: the default `fix` is a no-op, and KPT's
+        // `fixable()` can't see inline `pyproject.toml` patterns.
+        for rule in rules.iter().filter(|r| config.is_enabled(r.code())) {
             let mut ctx = FileContext::from_source(input.path.to_path_buf(), src.clone());
             ctx.ignore_noqa = input.ignore_noqa || config.ignore_noqa;
             ctx.noqa_aliases = config.lint.noqa_aliases.clone();
+            ctx.fix_target = input.fix_target.clone();
             if let Some(fixed) = rule.fix(&ctx, config.rule_config(rule.config_name()))? {
                 if fixed == src {
                     continue; // no-op fix; nothing to apply or loop on

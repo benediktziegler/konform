@@ -88,7 +88,7 @@ impl Rule for Kis002Rule {
     }
 
     fn fix(&self, ctx: &FileContext, _cfg: &toml::Value) -> Result<Option<String>> {
-        Ok(apply_fixes(&ctx.source, ctx.ignore_noqa, &ctx.noqa_aliases))
+        Ok(apply_fixes(ctx))
     }
 
     fn explain(&self) -> String {
@@ -448,11 +448,8 @@ fn check_aliases(
 // Fix
 // ---------------------------------------------------------------------------
 
-fn apply_fixes(
-    source: &str,
-    ignore_noqa: bool,
-    noqa_aliases: &HashMap<String, String>,
-) -> Option<String> {
+fn apply_fixes(ctx: &FileContext) -> Option<String> {
+    let source = ctx.source.as_str();
     let stmts = parse_module_stmts(source);
     if stmts.is_empty() {
         return None;
@@ -479,10 +476,13 @@ fn apply_fixes(
             continue;
         }
 
-        let (line, _) = offset_to_line_col(&line_starts, cand.alias_start);
-        if !ignore_noqa {
+        let (line, col) = offset_to_line_col(&line_starts, cand.alias_start);
+        if !ctx.wants_fix("KIS002", line, col) {
+            continue;
+        }
+        if !ctx.ignore_noqa {
             if let Some(line_text) = lines.get(line - 1) {
-                if has_noqa(line_text, "KIS002", noqa_aliases) {
+                if has_noqa(line_text, "KIS002", &ctx.noqa_aliases) {
                     continue;
                 }
             }
@@ -531,6 +531,28 @@ mod tests {
 
     fn empty_cfg() -> toml::Value {
         toml::Value::Table(toml::map::Map::new())
+    }
+
+    #[test]
+    fn targeted_fix_drops_only_the_target_alias() {
+        let src = "from a import x as ax\nfrom b import y as by\n\nax()\nby()\n";
+        let viols = rule().check(&ctx(src), &empty_cfg());
+        let second = viols
+            .iter()
+            .find(|v| v.line == 2)
+            .expect("second alias flagged");
+
+        let mut c = ctx(src);
+        c.fix_target = Some(crate::rules::FixTarget {
+            rule: second.rule.clone(),
+            line: second.line,
+            col: second.col,
+        });
+        let fixed = rule().fix(&c, &empty_cfg()).unwrap().expect("target fixed");
+        assert_eq!(
+            fixed,
+            "from a import x as ax\nfrom b import y\n\nax()\ny()\n"
+        );
     }
 
     #[test]

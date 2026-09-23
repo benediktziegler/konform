@@ -441,6 +441,99 @@ fn code_action_offers_quickfix_and_fix_all() {
 }
 
 #[test]
+fn code_action_offers_quickfix_only_for_the_fixable_alias_in_a_collision() {
+    // Two KIS002 violations that would collide if both were fixed at once
+    // (see `collect_rename_collisions`): the first declared alias is safely
+    // fixable, the second is not (fixing it would bind `plugin` twice).
+    // Requesting a code action scoped to *just* the second violation's line
+    // must not offer a quickfix for it -- only the document-wide fix-all.
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    server.initialize();
+
+    let source = "from a.plugin import plugin as a_plugin\n\
+                  from b.plugin import plugin as b_plugin\n\n\
+                  a_plugin()\nb_plugin()\n";
+    server.open(&uri, source);
+    let diags = server.next_diagnostics(&uri);
+    let kis002_diags: Vec<_> = diags
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == Some(NumberOrString::String("KIS002".into())))
+        .collect();
+    assert_eq!(
+        kis002_diags.len(),
+        2,
+        "expected both aliases flagged: {:?}",
+        diags.diagnostics
+    );
+
+    // Request a code action scoped only to line 1 (0-indexed), the second
+    // import -- the one that collides and can't be fixed in isolation.
+    let result = server.request(
+        "textDocument/codeAction",
+        serde_json::json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 1, "character": 0 },
+                "end": { "line": 1, "character": 0 },
+            },
+            "context": { "diagnostics": [] },
+        }),
+    );
+    let actions: Vec<CodeActionOrCommand> = serde_json::from_value(result).unwrap();
+    let kinds: Vec<Option<CodeActionKind>> = actions
+        .iter()
+        .map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => ca.kind.clone(),
+            CodeActionOrCommand::Command(_) => None,
+        })
+        .collect();
+    assert!(
+        kinds
+            .iter()
+            .any(|k| k.as_ref() == Some(&CodeActionKind::new("source.fixAll.konform"))),
+        "fix-all should still be offered: {kinds:?}"
+    );
+    assert!(
+        !kinds
+            .iter()
+            .any(|k| k.as_ref() == Some(&CodeActionKind::QUICKFIX)),
+        "the colliding alias must not offer its own quickfix: {kinds:?}"
+    );
+
+    // Now request at line 0, the first import -- this one IS independently
+    // fixable and must offer its own quickfix.
+    let result = server.request(
+        "textDocument/codeAction",
+        serde_json::json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 0 },
+            },
+            "context": { "diagnostics": [] },
+        }),
+    );
+    let actions: Vec<CodeActionOrCommand> = serde_json::from_value(result).unwrap();
+    let quickfix_edit = actions.iter().find_map(|a| match a {
+        CodeActionOrCommand::CodeAction(ca)
+            if ca.kind.as_ref() == Some(&CodeActionKind::QUICKFIX) =>
+        {
+            ca.edit.as_ref()
+        }
+        _ => None,
+    });
+    assert!(
+        quickfix_edit.is_some(),
+        "the safely-fixable alias should offer its own quickfix"
+    );
+
+    server.shutdown();
+}
+
+#[test]
 fn formatting_applies_fixer_to_whole_document() {
     let dir = tempfile::tempdir().unwrap();
     let uri = file_uri(&dir.path().join("mod.py"));
@@ -518,6 +611,215 @@ fn code_action_fixes_kis002_unnecessary_alias() {
                 && !e.new_text.contains("as xml_etree")),
         "expected the alias to be dropped: {edits:?}"
     );
+
+    server.shutdown();
+}
+
+/// Request code actions for the single `line` (optionally restricted by
+/// `context.only`) and return the plain [`CodeAction`]s.
+fn code_actions_at(
+    server: &mut TestServer,
+    uri: &Uri,
+    line: u32,
+    only: Option<&[&str]>,
+) -> Vec<CodeAction> {
+    let mut context = serde_json::json!({ "diagnostics": [] });
+    if let Some(only) = only {
+        context["only"] = serde_json::json!(only);
+    }
+    let result = server.request(
+        "textDocument/codeAction",
+        serde_json::json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": line, "character": 0 },
+                "end": { "line": line, "character": 0 },
+            },
+            "context": context,
+        }),
+    );
+    let actions: Vec<CodeActionOrCommand> = serde_json::from_value(result).unwrap();
+    actions
+        .into_iter()
+        .filter_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => Some(ca),
+            CodeActionOrCommand::Command(_) => None,
+        })
+        .collect()
+}
+
+/// Apply `action`'s edits for `uri` to `source` the way an editor would
+/// (ASCII-only sources, so LSP UTF-16 columns equal byte columns).
+fn apply_action(source: &str, action: &CodeAction, uri: &Uri) -> String {
+    let offset = |p: Position| {
+        let line_start: usize = source
+            .split_inclusive('\n')
+            .take(p.line as usize)
+            .map(str::len)
+            .sum();
+        (line_start + p.character as usize).min(source.len())
+    };
+    #[allow(clippy::mutable_key_type)]
+    let changes = action.edit.as_ref().unwrap().changes.as_ref().unwrap();
+    let mut edits = changes.get(uri).unwrap().clone();
+    edits.sort_by_key(|e| std::cmp::Reverse((e.range.start.line, e.range.start.character)));
+    let mut out = source.to_owned();
+    for e in edits {
+        out.replace_range(offset(e.range.start)..offset(e.range.end), &e.new_text);
+    }
+    out
+}
+
+fn find_action<'a>(actions: &'a [CodeAction], title: &str) -> &'a CodeAction {
+    actions
+        .iter()
+        .find(|a| a.title == title)
+        .unwrap_or_else(|| panic!("no action titled {title:?}: {actions:?}"))
+}
+
+const FIX_ALL_TITLE: &str = "Konform: Fix all auto-fixable problems";
+
+#[test]
+fn line_diff_edits_inserts_without_overwriting() {
+    let edits = line_diff_edits("a\nb\n", "a\nX\nb\n");
+    assert_eq!(edits.len(), 1);
+    let e = &edits[0];
+    assert_eq!(e.range.start, e.range.end, "pure insert must be zero-width");
+    assert_eq!(e.range.start.line, 1);
+    assert_eq!(e.new_text, "X\n");
+}
+
+#[test]
+fn line_diff_edits_merges_adjacent_delete_and_insert() {
+    let edits = line_diff_edits("a\nb\nc\n", "a\nY\nc\n");
+    assert_eq!(edits.len(), 1);
+    assert_eq!((edits[0].range.start.line, edits[0].range.end.line), (1, 2));
+    assert_eq!(edits[0].new_text, "Y\n");
+}
+
+#[test]
+fn kis001_quickfix_matches_fix_all_for_a_single_violation() {
+    // A KIS001 fix inserts a new import elsewhere in the file; the quickfix's
+    // line hunks must reproduce exactly what fix-all produces.
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    server.initialize();
+
+    let source = "import sys\nfrom os.path import join\n\nprint(sys, join('a'))\n";
+    server.open(&uri, source);
+    server.next_diagnostics(&uri);
+
+    let actions = code_actions_at(&mut server, &uri, 1, None);
+    let quick = apply_action(
+        source,
+        find_action(&actions, "Konform: Fix Module-only imports [KIS001]"),
+        &uri,
+    );
+    let all = apply_action(source, find_action(&actions, FIX_ALL_TITLE), &uri);
+    assert_eq!(quick, all);
+
+    server.shutdown();
+}
+
+#[test]
+fn kis002_quickfix_fixes_only_its_own_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    server.initialize();
+
+    let source = "from a import x as ax\nfrom b import y as by\n\nax()\nby()\n";
+    server.open(&uri, source);
+    server.next_diagnostics(&uri);
+
+    let actions = code_actions_at(&mut server, &uri, 1, None);
+    let quick = find_action(&actions, "Konform: Fix Unnecessary import alias [KIS002]");
+    assert_eq!(quick.is_preferred, Some(true));
+    assert_eq!(
+        apply_action(source, quick, &uri),
+        "from a import x as ax\nfrom b import y\n\nax()\ny()\n"
+    );
+
+    server.shutdown();
+}
+
+#[test]
+fn kpt_quickfix_works_for_inline_path_scoped_pattern_with_custom_id() {
+    // Guards three regressions at once: the pattern id isn't `KPT001`
+    // (rule selection), it's scoped by `files` (real document path), and
+    // it's defined inline rather than in an auto-discovered file.
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut config = Config::default();
+    config.lint.rules.insert(
+        "user-defined-patterns".to_owned(),
+        toml::from_str(
+            r#"
+[[rules]]
+id          = "KPT901"
+message     = "Use logger."
+pattern     = 'print\((.*?)\)'
+replacement = "logger.info($1)"
+files       = ["*.py"]
+"#,
+        )
+        .unwrap(),
+    );
+    let mut server = TestServer::new(dir.path().to_path_buf(), config);
+    server.initialize();
+
+    let source = "print(1)\nprint(2)\n";
+    server.open(&uri, source);
+    server.next_diagnostics(&uri);
+
+    let actions = code_actions_at(&mut server, &uri, 0, None);
+    assert_eq!(
+        apply_action(
+            source,
+            find_action(&actions, "Konform: Fix Pattern rules [KPT901]"),
+            &uri
+        ),
+        "logger.info(1)\nprint(2)\n"
+    );
+    assert_eq!(
+        apply_action(source, find_action(&actions, FIX_ALL_TITLE), &uri),
+        "logger.info(1)\nlogger.info(2)\n"
+    );
+
+    server.shutdown();
+}
+
+#[test]
+fn code_action_honours_context_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    server.initialize();
+
+    server.open(&uri, KIS002_SOURCE);
+    server.next_diagnostics(&uri);
+
+    let kinds = |actions: Vec<CodeAction>| -> Vec<String> {
+        actions
+            .into_iter()
+            .map(|a| a.kind.unwrap().as_str().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        kinds(code_actions_at(
+            &mut server,
+            &uri,
+            0,
+            Some(&["source.fixAll"])
+        )),
+        ["source.fixAll.konform"]
+    );
+    assert_eq!(
+        kinds(code_actions_at(&mut server, &uri, 0, Some(&["quickfix"]))),
+        ["quickfix"]
+    );
+    assert!(code_actions_at(&mut server, &uri, 0, Some(&["refactor"])).is_empty());
 
     server.shutdown();
 }

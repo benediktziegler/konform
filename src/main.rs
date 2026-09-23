@@ -921,6 +921,10 @@ const KONFORM_TOML: &str = r#"# konform.toml — project linting configuration
 # collections.abc) if your project has additional exempted modules:
 # exceptions = ["mycompany.compat"]
 
+[konform.lint.unnecessary-import-alias]
+# Defaults to level = "warning"; uncomment to make it a hard error:
+# level = "error"
+
 [konform.lint.user-defined-patterns]
 # rules_file = "konform_patterns.toml"
 "#;
@@ -933,6 +937,10 @@ const PYPROJECT_APPEND: &str = r#"
 # Extend the built-in exceptions (__future__, typing, typing_extensions,
 # collections.abc) if your project has additional exempted modules:
 # exceptions = ["mycompany.compat"]
+
+[tool.konform.lint.unnecessary-import-alias]
+# Defaults to level = "warning"; uncomment to make it a hard error:
+# level = "error"
 
 [tool.konform.lint.user-defined-patterns]
 # rules_file = "konform_patterns.toml"

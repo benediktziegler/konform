@@ -267,6 +267,11 @@ fn file_uri(path: &std::path::Path) -> Uri {
 /// Source with a single fixable KIS001 violation.
 const KIS001_SOURCE: &str = "from os.path import join\n";
 
+/// Source with a single fixable KIS002 violation (`etree` is a real module
+/// under `xml`, so KIS001 has nothing to say about it -- only the
+/// unnecessary alias is flagged).
+const KIS002_SOURCE: &str = "from xml import etree as xml_etree\n\nprint(xml_etree)\n";
+
 // ---------------------------------------------------------------------------
 // Scenarios
 // ---------------------------------------------------------------------------
@@ -457,6 +462,95 @@ fn formatting_applies_fixer_to_whole_document() {
     assert!(
         !edits[0].new_text.contains("from os.path import join"),
         "formatting should remove the violation"
+    );
+
+    server.shutdown();
+}
+
+#[test]
+fn code_action_fixes_kis002_unnecessary_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    server.initialize();
+
+    server.open(&uri, KIS002_SOURCE);
+    let diags = server.next_diagnostics(&uri);
+    assert_eq!(
+        diags.diagnostics.len(),
+        1,
+        "expected a single KIS002 violation"
+    );
+    assert_eq!(
+        diags.diagnostics[0].code,
+        Some(NumberOrString::String("KIS002".into()))
+    );
+
+    let result = server.request(
+        "textDocument/codeAction",
+        serde_json::json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 0 },
+            },
+            "context": { "diagnostics": [] },
+        }),
+    );
+    let actions: Vec<CodeActionOrCommand> = serde_json::from_value(result).unwrap();
+
+    let quickfix_edit = actions.iter().find_map(|a| match a {
+        CodeActionOrCommand::CodeAction(ca)
+            if ca.kind.as_ref() == Some(&CodeActionKind::QUICKFIX) =>
+        {
+            ca.edit.as_ref()
+        }
+        _ => None,
+    });
+    let edit = quickfix_edit.expect("expected a quickfix code action for KIS002");
+    #[allow(clippy::mutable_key_type)]
+    let changes = edit.changes.as_ref().expect("edit should have changes");
+    let edits = changes.get(&uri).expect("edit should target the open file");
+    assert!(
+        edits
+            .iter()
+            .any(|e| e.new_text.contains("from xml import etree")
+                && !e.new_text.contains("as xml_etree")),
+        "expected the alias to be dropped: {edits:?}"
+    );
+
+    server.shutdown();
+}
+
+#[test]
+fn formatting_fixes_kis002_unnecessary_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    server.initialize();
+
+    server.open(&uri, KIS002_SOURCE);
+    server.next_diagnostics(&uri); // drain the push
+
+    let result = server.request(
+        "textDocument/formatting",
+        serde_json::json!({
+            "textDocument": { "uri": uri },
+            "options": { "tabSize": 4, "insertSpaces": true },
+        }),
+    );
+    let edits: Vec<TextEdit> = serde_json::from_value(result).unwrap();
+    assert_eq!(edits.len(), 1, "expected a single full-document edit");
+    assert!(
+        edits[0].new_text.contains("from xml import etree")
+            && !edits[0].new_text.contains("as xml_etree"),
+        "formatting should drop the unnecessary alias: {:?}",
+        edits[0].new_text
+    );
+    assert!(
+        edits[0].new_text.contains("print(etree)"),
+        "formatting should rename usages back to the original name: {:?}",
+        edits[0].new_text
     );
 
     server.shutdown();

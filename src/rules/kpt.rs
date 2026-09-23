@@ -24,7 +24,7 @@
 //! * `sub_rules` — ordered list of refinements; the first sub-rule whose
 //!   pattern(s) match the already-flagged line overrides `message` and `help`
 
-use super::{has_noqa, FileContext, Rule};
+use super::{has_noqa, FileContext, FixTarget, Rule};
 use crate::types::{Level, Violation};
 use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -350,16 +350,24 @@ impl Rule for KptRule {
         };
 
         let mut current = ctx.source.clone();
+        let target = ctx.fix_target.as_ref();
 
         for pattern in &patterns {
             let Some(replacement) = &pattern.replacement else {
                 continue;
             };
+            if target.is_some_and(|t| t.rule != pattern.id) {
+                continue;
+            }
             if !pattern.matches_file(&ctx.path, self.config_dir.as_deref(), cwd.as_deref()) {
                 continue;
             }
 
             if pattern.multiline {
+                if let Some(t) = target {
+                    current = replace_multiline_match_at(&current, pattern, replacement, t);
+                    continue;
+                }
                 // Apply replace_all to the full source for each regex.
                 for re in &pattern.regexes {
                     current = re.replace_all(&current, replacement.as_str()).into_owned();
@@ -369,10 +377,13 @@ impl Rule for KptRule {
                 let lines: Vec<&str> = current.lines().collect();
                 current = lines
                     .iter()
-                    .map(|line| {
+                    .enumerate()
+                    .map(|(i, line)| {
                         let mut out = (*line).to_owned();
-                        for re in &pattern.regexes {
-                            out = re.replace_all(&out, replacement.as_str()).into_owned();
+                        if target.is_none_or(|t| t.line == i + 1) {
+                            for re in &pattern.regexes {
+                                out = re.replace_all(&out, replacement.as_str()).into_owned();
+                            }
                         }
                         format!("{out}{eol}")
                     })
@@ -435,6 +446,36 @@ impl Rule for KptRule {
 "#
         .to_owned()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Targeted fix helper
+// ---------------------------------------------------------------------------
+
+/// Replace only the multiline match that starts at `target`'s line/column
+/// (as reported by `check`), leaving every other match untouched.
+fn replace_multiline_match_at(
+    source: &str,
+    pattern: &CompiledPattern,
+    replacement: &str,
+    target: &FixTarget,
+) -> String {
+    for re in &pattern.regexes {
+        for caps in re.captures_iter(source) {
+            let m = caps.get(0).expect("group 0 always matches");
+            let prefix = &source[..m.start()];
+            let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
+            let col = m.start() - prefix.rfind('\n').map_or(0, |p| p + 1);
+            if line == target.line && col == target.col {
+                let mut expanded = String::new();
+                caps.expand(replacement, &mut expanded);
+                let mut out = source.to_owned();
+                out.replace_range(m.range(), &expanded);
+                return out;
+            }
+        }
+    }
+    source.to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -1567,5 +1608,54 @@ replacement = "logger.info()"
         // Source has no match — fix should be a no-op.
         let result = rule().fix(&ctx("x = 1\n"), &cfg).unwrap();
         assert!(result.is_none());
+    }
+
+    fn target(rule: &str, line: usize, col: usize) -> FixTarget {
+        FixTarget {
+            rule: rule.to_owned(),
+            line,
+            col,
+        }
+    }
+
+    #[test]
+    fn targeted_fix_rewrites_only_the_target_line_and_pattern_id() {
+        let cfg = cfg_with_rules(
+            r#"
+[[rules]]
+id          = "KPT901"
+message     = "Use logger."
+pattern     = 'print\((.*?)\)'
+replacement = "logger.info($1)"
+
+[[rules]]
+id          = "KPT902"
+message     = "No foo."
+pattern     = 'foo'
+replacement = "bar"
+"#,
+        );
+        let mut c = ctx("print(1)\nprint(foo)\n");
+        c.fix_target = Some(target("KPT901", 2, 0));
+        let fixed = rule().fix(&c, &cfg).unwrap().expect("target line fixed");
+        assert_eq!(fixed, "print(1)\nlogger.info(foo)\n");
+    }
+
+    #[test]
+    fn targeted_multiline_fix_rewrites_only_the_matching_occurrence() {
+        let cfg = cfg_with_rules(
+            r#"
+[[rules]]
+id          = "KPT001"
+message     = "Replace sequence."
+pattern     = 'foo\n(ba.)'
+replacement = "foo_$1"
+multiline   = true
+"#,
+        );
+        let mut c = ctx("foo\nbar\nfoo\nbaz\n");
+        c.fix_target = Some(target("KPT001", 3, 0));
+        let fixed = rule().fix(&c, &cfg).unwrap().expect("second match fixed");
+        assert_eq!(fixed, "foo\nbar\nfoo_baz\n");
     }
 }

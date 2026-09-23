@@ -43,6 +43,18 @@ pub struct FileContext {
     /// Alias `# noqa` codes to canonical rule codes / category prefixes.
     /// Propagated from `Config::noqa_aliases`. See [`has_noqa`].
     pub noqa_aliases: HashMap<String, String>,
+    /// When set, [`Rule::fix`] must only rewrite the single violation this
+    /// identifies (used for per-violation LSP quick-fixes). `None` = fix all.
+    pub fix_target: Option<FixTarget>,
+}
+
+/// Identifies one violation by its rule code and 1-based line / 0-based
+/// column start, exactly as reported in the [`Violation`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixTarget {
+    pub rule: String,
+    pub line: usize,
+    pub col: usize,
 }
 
 impl FileContext {
@@ -64,7 +76,16 @@ impl FileContext {
             lines,
             ignore_noqa: false,
             noqa_aliases: HashMap::new(),
+            fix_target: None,
         }
+    }
+
+    /// Should the fixer rewrite the violation of `rule` starting at
+    /// (`line`, `col`)? Always `true` unless a [`FixTarget`] narrows it.
+    pub fn wants_fix(&self, rule: &str, line: usize, col: usize) -> bool {
+        self.fix_target
+            .as_ref()
+            .is_none_or(|t| t.rule == rule && t.line == line && t.col == col)
     }
 }
 
@@ -111,8 +132,9 @@ pub trait Rule: Send + Sync {
     /// need no configuration can ignore it.
     fn check(&self, ctx: &FileContext, cfg: &toml::Value) -> Vec<Violation>;
 
-    /// Rewrite the source in `ctx` to fix all violations, returning the
-    /// new source text, or `None` if there is nothing to change.
+    /// Rewrite the source in `ctx` to fix all violations (or only the one
+    /// named by `ctx.fix_target`, see [`FileContext::wants_fix`]), returning
+    /// the new source text, or `None` if there is nothing to change.
     ///
     /// The default implementation is a no-op for rules that are not fixable.
     fn fix(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Result<Option<String>> {

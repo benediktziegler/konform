@@ -10,7 +10,7 @@ Python linter and language server.
 * **KIS002** — flags unnecessary import aliases (`from X import Y as Z` when the alias buys nothing)
 * **KPT** — user-defined regex pattern rules from `konform_patterns.toml`
 * **Hover** — hover over a violation to read the full rule documentation
-* **Code actions** — "Fix all konform violations" rewrites fixable imports in one shot
+* **Code actions** — "Konform: Fix <rule-name> [<rule-code>]" per violation, and "Konform: Fix all auto-fixable problems" for the whole file
 * **Auto-fix on save** via `textDocument/formatting`
 
 ## Installation

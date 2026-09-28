@@ -27,10 +27,14 @@
 //! - Skips relative imports (`from . import x as y`): there's no single
 //!   stable module identity to key the "is this name already imported
 //!   elsewhere" collision check on.
+//! - Skips aliases whose name is listed in the module's `__all__`: that's a
+//!   deliberate re-export under that name, and dropping the alias would
+//!   silently remove it from the namespace.
 
 use super::scope::{
-    bucket_for_offset, build_line_starts, build_scope_index, collect_load_names, is_name_shadowed,
-    offset_to_line_col, parse_module_stmts, shadowed_at_occurrences_of, NamedSpan, ScopeIndex,
+    bucket_for_offset, build_line_starts, build_scope_index, collect_all_exports,
+    collect_load_names, is_name_shadowed, offset_to_line_col, parse_module_stmts,
+    shadowed_at_occurrences_of, NamedSpan, ScopeIndex,
 };
 use super::{has_noqa, FileContext, Rule};
 use crate::types::{Level, Violation};
@@ -113,6 +117,10 @@ KIS002 — Unnecessary import alias [sometimes fixable]
     import x.y as z                       # plain `import ... as` is out of
                                            # scope: dropping the alias would
                                            # change what name gets bound
+
+    __all__ = [\"bar_baz\"]
+    from foo.bar import baz as bar_baz    # `bar_baz` is part of this
+                                           # module's public API
 
   Configure the severity in [tool.konform.lint.unnecessary-import-alias]:
     level = \"warning\"   # default: \"warning\" | \"error\"
@@ -283,17 +291,25 @@ fn collect_import_bindings_rec(stmts: &[Stmt], out: &mut HashMap<String, HashSet
 // Necessity / fixability checks
 // ---------------------------------------------------------------------------
 
-/// Is the rename in `cand` actually needed to avoid a collision? If so,
-/// KIS002 must not flag it at all. Checks both the import's own declaration
-/// site (an unused alias whose original name collides with something is
-/// still a real collision) and every place the alias is actually read.
+/// Is the rename in `cand` actually needed to avoid a collision -- or is it
+/// otherwise not a genuine "unnecessary alias"? If so, KIS002 must not flag
+/// it at all. Checks both the import's own declaration site (an unused
+/// alias whose original name collides with something is still a real
+/// collision) and every place the alias is actually read.
+///
+/// Also treats the alias as necessary when `asname` is listed in the
+/// module's `__all__`: that's a deliberate re-export under that name, not
+/// an accidental rename, and rewriting it would remove the exported name
+/// from the namespace entirely.
 fn is_necessary(
     cand: &AliasCandidate,
     load_names: &[NamedSpan],
     scope_index: &ScopeIndex,
     bound_targets: &HashMap<String, HashSet<String>>,
+    all_exports: &HashSet<String>,
 ) -> bool {
-    bound_targets.contains_key(&cand.name)
+    all_exports.contains(&cand.asname)
+        || bound_targets.contains_key(&cand.name)
         || is_name_shadowed(
             &cand.name,
             bucket_for_offset(scope_index, cand.alias_start),
@@ -345,11 +361,12 @@ fn collect_rename_collisions(
     load_names: &[NamedSpan],
     scope_index: &ScopeIndex,
     bound_targets: &HashMap<String, HashSet<String>>,
+    all_exports: &HashSet<String>,
 ) -> HashSet<u32> {
     let mut eligible: Vec<&AliasCandidate> = cands
         .iter()
         .filter(|cand| {
-            !is_necessary(cand, load_names, scope_index, bound_targets)
+            !is_necessary(cand, load_names, scope_index, bound_targets, all_exports)
                 && is_fixable(cand, load_names, scope_index, bound_targets)
         })
         .collect();
@@ -388,12 +405,25 @@ fn check_aliases(
     let scope_index = build_scope_index(&stmts);
     let load_names = collect_load_names(&stmts);
     let bound_targets = collect_import_bindings(&stmts);
+    let all_exports = collect_all_exports(&stmts);
     let cands = collect_alias_candidates(&stmts);
-    let collisions = collect_rename_collisions(&cands, &load_names, &scope_index, &bound_targets);
+    let collisions = collect_rename_collisions(
+        &cands,
+        &load_names,
+        &scope_index,
+        &bound_targets,
+        &all_exports,
+    );
 
     let mut violations = Vec::new();
     for cand in cands {
-        if is_necessary(&cand, &load_names, &scope_index, &bound_targets) {
+        if is_necessary(
+            &cand,
+            &load_names,
+            &scope_index,
+            &bound_targets,
+            &all_exports,
+        ) {
             continue;
         }
 
@@ -459,14 +489,27 @@ fn apply_fixes(ctx: &FileContext) -> Option<String> {
     let scope_index = build_scope_index(&stmts);
     let load_names = collect_load_names(&stmts);
     let bound_targets = collect_import_bindings(&stmts);
+    let all_exports = collect_all_exports(&stmts);
     let cands = collect_alias_candidates(&stmts);
-    let collisions = collect_rename_collisions(&cands, &load_names, &scope_index, &bound_targets);
+    let collisions = collect_rename_collisions(
+        &cands,
+        &load_names,
+        &scope_index,
+        &bound_targets,
+        &all_exports,
+    );
 
     let mut renames: HashMap<String, String> = HashMap::new();
     let mut splices: Vec<(u32, u32, String)> = Vec::new();
 
     for cand in cands {
-        if is_necessary(&cand, &load_names, &scope_index, &bound_targets) {
+        if is_necessary(
+            &cand,
+            &load_names,
+            &scope_index,
+            &bound_targets,
+            &all_exports,
+        ) {
             continue;
         }
         if !is_fixable(&cand, &load_names, &scope_index, &bound_targets) {
@@ -607,6 +650,48 @@ mod tests {
     }
 
     #[test]
+    fn alias_necessary_due_to_colliding_name_inside_type_checking_block_not_flagged() {
+        // `bar` is bound at module scope by the real (runtime) import; the
+        // TYPE_CHECKING-only import of a different `bar` needs the rename
+        // to avoid colliding with it, even though the two imports live in
+        // different branches of the source.
+        let src = "from foo import bar\n\nif TYPE_CHECKING:\n    from hoo import bar as hoo_bar\n";
+        let viols = rule().check(&ctx(src), &empty_cfg());
+        assert!(
+            viols.is_empty(),
+            "alias needed to avoid colliding with the real `bar` import: {viols:?}"
+        );
+    }
+
+    #[test]
+    fn alias_necessary_due_to_type_checking_import_colliding_with_later_runtime_import_not_flagged()
+    {
+        // Same collision, opposite order: the real import comes after the
+        // TYPE_CHECKING-guarded one. Import order shouldn't matter -- both
+        // still land in the same (module) scope.
+        let src = "if TYPE_CHECKING:\n    from hoo import bar as hoo_bar\n\nfrom foo import bar\n";
+        let viols = rule().check(&ctx(src), &empty_cfg());
+        assert!(
+            viols.is_empty(),
+            "alias needed to avoid colliding with the real `bar` import: {viols:?}"
+        );
+    }
+
+    #[test]
+    fn alias_inside_type_checking_block_flagged_and_fixed_when_genuinely_unnecessary() {
+        // No collision this time -- `bar` isn't bound anywhere else, so the
+        // alias inside the TYPE_CHECKING block is just as unnecessary as it
+        // would be at module level, and should be flagged/fixed the same
+        // way.
+        let src = "if TYPE_CHECKING:\n    from hoo import bar as hoo_bar\n";
+        let viols = rule().check(&ctx(src), &empty_cfg());
+        assert_eq!(viols.len(), 1);
+        assert!(viols[0].fixable);
+        let fixed = rule().fix(&ctx(src), &empty_cfg()).unwrap().unwrap();
+        assert!(fixed.contains("    from hoo import bar\n"));
+    }
+
+    #[test]
     fn unused_alias_still_flagged() {
         let src = "from foo.bar import baz as bar_baz\n";
         let viols = rule().check(&ctx(src), &empty_cfg());
@@ -714,6 +799,33 @@ mod tests {
         // fixable since `bar_baz` is bound to two different imports.
         assert!(viols.iter().all(|v| !v.fixable));
         assert!(rule().fix(&ctx(src), &empty_cfg()).unwrap().is_none());
+    }
+
+    #[test]
+    fn alias_exported_via_dunder_all_not_flagged() {
+        // `bar_baz` is part of this module's public API via `__all__`.
+        // Dropping the alias would rename the binding to `baz`, silently
+        // removing `bar_baz` from the namespace even though `__all__`
+        // still advertises it -- so this isn't flagged as unnecessary at
+        // all, same treatment as the `as baz` self-alias re-export idiom.
+        let src = "from foo.bar import baz as bar_baz\n\n__all__ = ['bar_baz']\n\nbar_baz()\n";
+        let viols = rule().check(&ctx(src), &empty_cfg());
+        assert!(viols.is_empty(), "got: {viols:?}");
+        assert!(rule().fix(&ctx(src), &empty_cfg()).unwrap().is_none());
+    }
+
+    #[test]
+    fn fix_applied_when_alias_not_in_dunder_all() {
+        // Sanity check: an unrelated `__all__` entry doesn't block fixing
+        // an alias that isn't itself exported.
+        let src =
+            "from foo.bar import baz as bar_baz\n\n__all__ = ['something_else']\n\nbar_baz()\n";
+        let viols = rule().check(&ctx(src), &empty_cfg());
+        assert_eq!(viols.len(), 1);
+        assert!(viols[0].fixable);
+        let fixed = rule().fix(&ctx(src), &empty_cfg()).unwrap().unwrap();
+        assert!(fixed.contains("from foo.bar import baz\n"));
+        assert!(fixed.contains("baz()"));
     }
 
     #[test]

@@ -47,6 +47,13 @@ pub struct ModuleProbe {
     cache: DashMap<(String, String), bool>,
     /// Caches whether a root package name exists anywhere in `sys_path`.
     root_cache: DashMap<String, bool>,
+    /// `true` if the interpreter at `python` could not be invoked at all
+    /// (missing binary, not executable, crashed, etc.), as opposed to
+    /// running fine but simply not having a given package installed. When
+    /// this is `true`, every KIS001 import in the project will be reported
+    /// as "unknown"/unfixable, which looks identical to "package genuinely
+    /// not installed" unless callers surface this flag explicitly.
+    probe_unusable: bool,
 }
 
 impl ModuleProbe {
@@ -67,14 +74,32 @@ impl ModuleProbe {
     /// to additionally search, mirroring Ruff's `src` setting (defaults to
     /// `[".", "src"]`).
     pub fn new(python: &Path, project_root: &Path, src_roots: &[String]) -> Self {
-        let sys_path = Self::get_sys_path(python, project_root, src_roots).unwrap_or_default();
-        let builtin_modules = Self::get_builtin_modules(python).unwrap_or_default();
+        let sys_path_result = Self::get_sys_path(python, project_root, src_roots);
+        let builtin_modules_result = Self::get_builtin_modules(python);
+        // Both probes invoke the same interpreter; if either failed outright
+        // (binary missing, not executable, crashed, etc.) treat the whole
+        // probe as unusable rather than silently proceeding with empty
+        // data, which would make every import in the project look like an
+        // unresolvable package instead of surfacing the real problem: a
+        // broken/misconfigured `python`.
+        let probe_unusable = sys_path_result.is_none() || builtin_modules_result.is_none();
         Self {
-            sys_path,
-            builtin_modules,
+            sys_path: sys_path_result.unwrap_or_default(),
+            builtin_modules: builtin_modules_result.unwrap_or_default(),
             cache: DashMap::new(),
             root_cache: DashMap::new(),
+            probe_unusable,
         }
+    }
+
+    /// `true` if the Python interpreter passed to [`ModuleProbe::new`]
+    /// couldn't be invoked at all, meaning every KIS001 "unknown module"
+    /// result in this run reflects a broken environment rather than a
+    /// genuinely uninstalled package. Callers should surface this
+    /// distinctly (e.g. a top-level warning) since the per-import message
+    /// alone can't tell the two apart.
+    pub fn probe_unusable(&self) -> bool {
+        self.probe_unusable
     }
 
     /// Fingerprint of the Python environment this probe searches.
@@ -465,6 +490,7 @@ mod tests {
             builtin_modules: HashSet::new(),
             cache: DashMap::new(),
             root_cache: DashMap::new(),
+            probe_unusable: false,
         }
     }
 
@@ -477,6 +503,7 @@ mod tests {
             builtin_modules: builtin_modules.iter().map(|s| s.to_string()).collect(),
             cache: DashMap::new(),
             root_cache: DashMap::new(),
+            probe_unusable: false,
         }
     }
 
@@ -741,6 +768,7 @@ mod tests {
             builtin_modules: HashSet::new(),
             cache: DashMap::new(),
             root_cache: DashMap::new(),
+            probe_unusable: false,
         };
         assert!(probe.is_module("tests.mocks", "mock_adb_server"));
     }
@@ -809,6 +837,7 @@ mod tests {
             builtin_modules: HashSet::new(),
             cache: DashMap::new(),
             root_cache: DashMap::new(),
+            probe_unusable: false,
         };
 
         assert!(probe.is_module("acme.framework.pytest.plugins.xcp", "plugin"));
@@ -838,6 +867,7 @@ mod tests {
             builtin_modules: HashSet::new(),
             cache: DashMap::new(),
             root_cache: DashMap::new(),
+            probe_unusable: false,
         };
 
         assert!(probe.is_module("mypkg", "utils"));

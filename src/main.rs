@@ -402,6 +402,15 @@ fn run_check(args: CheckArgs, isolated: bool) {
         .clone()
         .unwrap_or_else(|| repo_root.clone());
     let probe = Arc::new(ModuleProbe::new(&python, &module_probe_root, &config.src));
+    if probe.probe_unusable() && !theme::is_quiet() {
+        eprintln!(
+            "{} could not run Python interpreter {:?} to resolve imports for KIS001 -- \
+every import will be reported as unresolvable and left un-fixed. \
+Check `[tool.konform] python` (or your virtualenv) and try again.",
+            "warning:".yellow().bold(),
+            python
+        );
+    }
     let active_rules = all_rules(Arc::clone(&probe), config.config_dir.clone());
 
     let level_str = args.level.to_string();

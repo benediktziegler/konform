@@ -48,6 +48,63 @@ pub(crate) fn parse_module_stmts(source: &str) -> Vec<Stmt> {
 }
 
 // ---------------------------------------------------------------------------
+// AST-based __all__ collection
+// ---------------------------------------------------------------------------
+
+/// Collect all names from a top-level `__all__` definition.
+///
+/// Handles:
+/// - `__all__ = ['a', 'b']` / `__all__ = ('a', 'b')`  (direct assignment)
+/// - `__all__ += ['c', 'd']`                            (augmented assignment)
+pub(crate) fn collect_all_exports(stmts: &[Stmt]) -> HashSet<String> {
+    let mut exports = HashSet::new();
+
+    /// Push all string-literal elements of a list/tuple expression into `out`.
+    fn push_str_elts(elts: &[Expr], out: &mut HashSet<String>) {
+        for elt in elts {
+            if let Expr::StringLiteral(s) = elt {
+                out.insert(s.value.to_str().to_owned());
+            }
+        }
+    }
+
+    for stmt in stmts {
+        match stmt {
+            // __all__ = ['a', 'b']  or  __all__ = ('a', 'b')
+            Stmt::Assign(node) => {
+                let targets_all = node
+                    .targets
+                    .iter()
+                    .any(|t| matches!(t, Expr::Name(n) if n.id.as_str() == "__all__"));
+                if !targets_all {
+                    continue;
+                }
+                match &*node.value {
+                    Expr::List(l) => push_str_elts(&l.elts, &mut exports),
+                    Expr::Tuple(t) => push_str_elts(&t.elts, &mut exports),
+                    _ => {}
+                }
+            }
+            // __all__ += ['c', 'd']
+            Stmt::AugAssign(node) => {
+                let target_is_all =
+                    matches!(node.target.as_ref(), Expr::Name(n) if n.id.as_str() == "__all__");
+                if !target_is_all {
+                    continue;
+                }
+                match &*node.value {
+                    Expr::List(l) => push_str_elts(&l.elts, &mut exports),
+                    Expr::Tuple(t) => push_str_elts(&t.elts, &mut exports),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    exports
+}
+
+// ---------------------------------------------------------------------------
 // AST-based Load-context name collection
 // ---------------------------------------------------------------------------
 

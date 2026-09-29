@@ -1,3 +1,15 @@
+## v0.4.0 (2026-09-29)
+
+### Feat
+
+- add --unsafe-fixes flag and split fix safety
+
+### Fix
+
+- place --unsafe-fixes before paths in fix hint
+- **kis002**: skip error for aliases exported in __all__
+- warn when python module probe is unusable
+
 ## v0.3.0 (2026-09-23)
 
 ### Feat

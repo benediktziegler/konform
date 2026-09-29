@@ -2,6 +2,10 @@
 
 Multi-rule Python linter and language server — fast, configurable, and CI-ready.
 
+> **Work in progress.** konform is under active development. Rules,
+> configuration keys, CLI flags, and the LSP surface may change at any time,
+> including in backwards-incompatible ways, until a 1.0 release.
+
 ## Rules
 
 ### KIS001 — Module-only imports
@@ -358,3 +362,19 @@ Global options (available on all subcommands):
   -q / --quiet                       Violations only (no summary/hints)
   -s / --silent                      No output; exit code only
 ```
+
+## Acknowledgements
+
+konform exists because [Ruff](https://github.com/astral-sh/ruff) doesn't (yet)
+cover rules like KIS001/KIS002 — konform was built to fill that gap, and
+Ruff's design was a direct inspiration for how konform is configured, how it
+reports violations, and how it resolves `src` search roots.
+
+konform is also built on top of several excellent open-source projects, especially:
+
+- [`ruff_python_parser`](https://crates.io/crates/ruff_python_parser),
+  [`ruff_python_ast`](https://crates.io/crates/ruff_python_ast), and
+  [`ruff_text_size`](https://crates.io/crates/ruff_text_size) — Ruff's own
+  Python parser and AST, published standalone on crates.io.
+
+Thanks to all the maintainers of all used open-source projects.

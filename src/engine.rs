@@ -144,6 +144,10 @@ const MAX_FIX_PASSES: u32 = 100;
 /// single pass runs: a later pass could otherwise match a *different*
 /// violation that happens to have moved to the target's position.
 ///
+/// `unsafe_fixes` gates rules whose [`Rule::is_unsafe_fix`] returns `true`
+/// (see that method's docs): their `fix` is skipped entirely unless this is
+/// `true`, mirroring Ruff's `--fix` / `--unsafe-fixes` separation.
+///
 /// # Safety net
 /// After each rule's fix, the resulting source is re-parsed with
 /// `ruff_python_parser::parse_module`. A fix is a contract: it must turn
@@ -159,6 +163,7 @@ pub fn run_fix(
     input: &CheckInput<'_>,
     rules: &[Box<dyn Rule>],
     config: &Config,
+    unsafe_fixes: bool,
 ) -> Result<Option<String>> {
     let mut src = input.source.to_owned();
     let mut changed = false;
@@ -173,8 +178,13 @@ pub fn run_fix(
         let mut pass_changed = false;
 
         // No `fixable()` pre-filter: the default `fix` is a no-op, and KPT's
-        // `fixable()` can't see inline `pyproject.toml` patterns.
-        for rule in rules.iter().filter(|r| config.is_enabled(r.code())) {
+        // `fixable()` can't see inline `pyproject.toml` patterns. Rules whose
+        // fix is unsafe (`Rule::is_unsafe_fix`) are skipped unless the caller
+        // opted in via `unsafe_fixes` -- Ruff's `--unsafe-fixes` separation.
+        for rule in rules
+            .iter()
+            .filter(|r| config.is_enabled(r.code()) && (unsafe_fixes || !r.is_unsafe_fix()))
+        {
             let mut ctx = FileContext::from_source(input.path.to_path_buf(), src.clone());
             ctx.ignore_noqa = input.ignore_noqa || config.ignore_noqa;
             ctx.noqa_aliases = config.lint.noqa_aliases.clone();
@@ -268,7 +278,7 @@ mod tests {
     fn empty_rules_fix_returns_none() {
         let p = path();
         let input = CheckInput::new(&p, "from os.path import join\n");
-        let result = run_fix(&input, &[], &Config::default()).unwrap();
+        let result = run_fix(&input, &[], &Config::default(), false).unwrap();
         assert!(result.is_none());
     }
 
@@ -298,7 +308,7 @@ mod tests {
         let p = path();
         let source = "from os.path import join\n";
         let input = CheckInput::new(&p, source);
-        let fixed = run_fix(&input, &rules, &Config::default()).unwrap();
+        let fixed = run_fix(&input, &rules, &Config::default(), false).unwrap();
         assert!(fixed.is_some());
         assert!(!fixed.unwrap().contains("from os.path import join"));
     }
@@ -309,7 +319,7 @@ mod tests {
         let p = path();
         let source = "import os.path\n";
         let input = CheckInput::new(&p, source);
-        let result = run_fix(&input, &rules, &Config::default()).unwrap();
+        let result = run_fix(&input, &rules, &Config::default(), false).unwrap();
         assert!(result.is_none());
     }
 
@@ -507,7 +517,7 @@ mod tests {
         let rules: Vec<Box<dyn Rule>> = vec![Box::new(BrokenFixRule)];
         let p = path();
         let input = CheckInput::new(&p, "x = 1\n");
-        let result = run_fix(&input, &rules, &Config::default()).unwrap();
+        let result = run_fix(&input, &rules, &Config::default(), false).unwrap();
         assert!(
             result.is_none(),
             "a fix that produces invalid Python must be rejected, not written out"
@@ -521,7 +531,7 @@ mod tests {
         let rules: Vec<Box<dyn Rule>> = vec![Box::new(BrokenFixRule), Box::new(GoodFixRule)];
         let p = path();
         let input = CheckInput::new(&p, "x = 1\n");
-        let result = run_fix(&input, &rules, &Config::default()).unwrap();
+        let result = run_fix(&input, &rules, &Config::default(), false).unwrap();
         let fixed = result.expect("GoodFixRule's valid fix should still be applied");
         assert!(fixed.contains("# fixed by GoodFixRule"), "got: {fixed:?}");
         assert!(
@@ -618,7 +628,7 @@ mod tests {
         let rules: Vec<Box<dyn Rule>> = vec![Box::new(RuleNeedsB), Box::new(RuleNeedsA)];
         let p = path();
         let input = CheckInput::new(&p, "# NEEDS_A\nx = 1\n");
-        let result = run_fix(&input, &rules, &Config::default()).unwrap();
+        let result = run_fix(&input, &rules, &Config::default(), false).unwrap();
         let fixed = result.expect("cascading fix should be applied");
         assert!(
             fixed.contains("FIXED_A") && fixed.contains("FIXED_B"),
@@ -677,10 +687,76 @@ mod tests {
         let input = CheckInput::new(&p, "# STATE_A\nx = 1\n");
         // Must return rather than loop forever; the iteration cap in
         // run_fix bounds the pathological case.
-        let result = run_fix(&input, &rules, &Config::default()).unwrap();
+        let result = run_fix(&input, &rules, &Config::default(), false).unwrap();
         assert!(
             result.is_some(),
             "an oscillating rule still reports a change"
         );
+    }
+
+    // ── --unsafe-fixes gating ────────────────────────────────────────────
+
+    /// A fake rule whose fix is marked unsafe, standing in for KIS002.
+    struct UnsafeFixRule;
+
+    impl Rule for UnsafeFixRule {
+        fn code(&self) -> &str {
+            "ZZ994"
+        }
+        fn category(&self) -> &str {
+            "ZZ"
+        }
+        fn config_name(&self) -> &str {
+            "unsafe-fix"
+        }
+        fn name(&self) -> &str {
+            "unsafe-fix"
+        }
+        fn description(&self) -> &str {
+            "test-only rule whose fix is marked unsafe"
+        }
+        fn fixable(&self) -> bool {
+            true
+        }
+        fn is_unsafe_fix(&self) -> bool {
+            true
+        }
+        fn check(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Vec<Violation> {
+            Vec::new()
+        }
+        fn fix(&self, ctx: &FileContext, _cfg: &toml::Value) -> Result<Option<String>> {
+            if ctx.source.contains("# fixed by UnsafeFixRule") {
+                return Ok(None);
+            }
+            Ok(Some(format!(
+                "{}\n# fixed by UnsafeFixRule\n",
+                ctx.source.trim_end()
+            )))
+        }
+        fn explain(&self) -> String {
+            String::new()
+        }
+    }
+
+    #[test]
+    fn run_fix_skips_unsafe_fix_rule_by_default() {
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(UnsafeFixRule)];
+        let p = path();
+        let input = CheckInput::new(&p, "x = 1\n");
+        let result = run_fix(&input, &rules, &Config::default(), false).unwrap();
+        assert!(
+            result.is_none(),
+            "an unsafe fix must not be applied without --unsafe-fixes"
+        );
+    }
+
+    #[test]
+    fn run_fix_applies_unsafe_fix_rule_when_enabled() {
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(UnsafeFixRule)];
+        let p = path();
+        let input = CheckInput::new(&p, "x = 1\n");
+        let result = run_fix(&input, &rules, &Config::default(), true).unwrap();
+        let fixed = result.expect("unsafe fix should be applied when opted in");
+        assert!(fixed.contains("# fixed by UnsafeFixRule"), "got: {fixed:?}");
     }
 }

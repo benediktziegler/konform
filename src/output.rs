@@ -7,6 +7,7 @@
 //! Colour choices are centralised in [`crate::theme`]; change
 //! [`crate::theme::ACTIVE_THEME`] to restyle all output at once.
 
+use crate::rules::Rule;
 use crate::theme;
 use crate::types::{ChangedFiles, Level};
 use std::collections::HashMap;
@@ -76,6 +77,31 @@ pub fn rule_category(code: &str) -> &str {
     &code[..end]
 }
 
+/// Whether the rule that reports `code` marks its fix as unsafe. Falls back
+/// to a category-prefix match for rules with dynamic per-pattern codes
+/// (e.g. KPT's user-defined ids), mirroring `rule_name` in the LSP handler.
+fn rule_is_unsafe_fix(rules: &[Box<dyn Rule>], code: &str) -> bool {
+    rules
+        .iter()
+        .find(|r| r.code() == code)
+        .or_else(|| rules.iter().find(|r| code.starts_with(r.category())))
+        .is_some_and(|r| r.is_unsafe_fix())
+}
+
+/// Whether `reported` contains any violation that's fixable only via
+/// `--unsafe-fixes` (`fixable: true` but the owning rule's fix is unsafe).
+/// Used to decide whether the `--fix` hint should also suggest
+/// `--unsafe-fixes`.
+pub fn has_unsafe_fixable(
+    reported: &HashMap<String, Vec<serde_json::Value>>,
+    rules: &[Box<dyn Rule>],
+) -> bool {
+    reported.values().flatten().any(|v| {
+        v["fixable"].as_bool().unwrap_or(false)
+            && rule_is_unsafe_fix(rules, v["rule"].as_str().unwrap_or(""))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // print_violations
 // ---------------------------------------------------------------------------
@@ -95,6 +121,14 @@ pub fn rule_category(code: &str) -> &str {
 /// [*] 2 fixable with the `--fix` option.
 /// ```
 ///
+/// When some of the fixable violations are only fixable via `--unsafe-fixes`
+/// (see `Rule::is_unsafe_fix`), that count is broken out separately so the
+/// hint doesn't imply a plain `--fix` run would fix them:
+/// ```text
+/// Found 3 errors.
+/// [*] 1 fixable with the `--fix` option (2 hidden fixes can be enabled with the `--unsafe-fixes` option).
+/// ```
+///
 /// Returns `0` when no violation reaches the configured severity threshold,
 /// `1` otherwise.
 pub fn print_violations(
@@ -103,6 +137,7 @@ pub fn print_violations(
     level: Level,
     changed_files_level: Level,
     output_format: OutputFormat,
+    rules: &[Box<dyn Rule>],
 ) -> i32 {
     let pal = theme::palette(colors_enabled());
 
@@ -151,7 +186,8 @@ pub fn print_violations(
 
     let mut error_count = 0usize;
     let mut warning_count = 0usize;
-    let mut fixable_count = 0usize;
+    let mut safe_fixable_count = 0usize;
+    let mut unsafe_fixable_count = 0usize;
 
     for file_path in &paths {
         let violations = &reported[*file_path];
@@ -177,7 +213,11 @@ pub fn print_violations(
                 warning_count += 1;
             }
             if fixable {
-                fixable_count += 1;
+                if rule_is_unsafe_fix(rules, rule_code) {
+                    unsafe_fixable_count += 1;
+                } else {
+                    safe_fixable_count += 1;
+                }
             }
 
             // Strip the leading "RULE_CODE: " prefix from the message — the
@@ -233,12 +273,25 @@ pub fn print_violations(
             };
             eprintln!("{found}");
 
-            if fixable_count > 0 {
-                eprintln!(
+            match (safe_fixable_count > 0, unsafe_fixable_count > 0) {
+                (true, false) => eprintln!(
                     "[{}] {} fixable with the `--fix` option.",
                     pal.summary_star(),
-                    fixable_count,
-                );
+                    safe_fixable_count,
+                ),
+                (true, true) => eprintln!(
+                    "[{}] {} fixable with the `--fix` option ({} hidden fix{} can be enabled with the `--unsafe-fixes` option).",
+                    pal.summary_star(),
+                    safe_fixable_count,
+                    unsafe_fixable_count,
+                    if unsafe_fixable_count == 1 { "" } else { "es" },
+                ),
+                (false, true) => eprintln!(
+                    "[{}] {} fixable only with the `--unsafe-fixes` option.",
+                    pal.summary_star(),
+                    unsafe_fixable_count,
+                ),
+                (false, false) => {}
             }
         } else {
             eprintln!("All checks passed.");
@@ -337,8 +390,11 @@ pub fn write_zuul_return(
 ///
 /// Translates the current `check` invocation into an equivalent `fix`
 /// invocation by replacing the `check` subcommand with `fix` and stripping
-/// flags that only exist on `check`.
-pub fn format_fix_hint(args: &[String]) -> String {
+/// flags that only exist on `check`. When `include_unsafe_fixes` is `true`
+/// (i.e. some remaining violations are only fixable via `--unsafe-fixes`),
+/// that flag is appended too, so the suggested command actually fixes
+/// everything it can rather than silently leaving unsafe fixes behind.
+pub fn format_fix_hint(args: &[String], include_unsafe_fixes: bool) -> String {
     // Flags that only exist on the `check` subcommand and have no meaning
     // on `fix`.  Value-taking flags (all except the two booleans) require
     // their following argument to be dropped as well.
@@ -348,7 +404,7 @@ pub fn format_fix_hint(args: &[String]) -> String {
         "--output-path",
         "--since-ref",
     ];
-    const BOOL_FLAGS: &[&str] = &["--no-cache", "--fix", "--fix-only"];
+    const BOOL_FLAGS: &[&str] = &["--no-cache", "--fix", "--fix-only", "--unsafe-fixes"];
 
     let mut fix_argv: Vec<String> =
         vec!["konform".to_owned(), "check".to_owned(), "--fix".to_owned()];
@@ -377,6 +433,10 @@ pub fn format_fix_hint(args: &[String]) -> String {
             continue;
         }
         fix_argv.push(arg.clone());
+    }
+
+    if include_unsafe_fixes {
+        fix_argv.push("--unsafe-fixes".to_owned());
     }
 
     let pal = theme::palette(colors_enabled());
@@ -808,7 +868,10 @@ mod tests {
 
     #[test]
     fn fix_hint_replaces_check_subcommand() {
-        let hint = format_fix_hint(&["check".into(), "--all-files".into(), "src/".into()]);
+        let hint = format_fix_hint(
+            &["check".into(), "--all-files".into(), "src/".into()],
+            false,
+        );
         assert!(
             hint.contains("konform check --fix --all-files src/"),
             "got: {hint}"
@@ -817,31 +880,40 @@ mod tests {
 
     #[test]
     fn fix_hint_drops_level_flag_and_value() {
-        let hint = format_fix_hint(&[
-            "check".into(),
-            "--level".into(),
-            "error".into(),
-            "src/".into(),
-        ]);
+        let hint = format_fix_hint(
+            &[
+                "check".into(),
+                "--level".into(),
+                "error".into(),
+                "src/".into(),
+            ],
+            false,
+        );
         assert!(!hint.contains("--level"), "got: {hint}");
         assert!(hint.contains("konform check --fix src/"), "got: {hint}");
     }
 
     #[test]
     fn fix_hint_drops_level_equals_form() {
-        let hint = format_fix_hint(&["check".into(), "--level=error".into(), "src/".into()]);
+        let hint = format_fix_hint(
+            &["check".into(), "--level=error".into(), "src/".into()],
+            false,
+        );
         assert!(!hint.contains("--level"), "got: {hint}");
         assert!(hint.contains("konform check --fix src/"), "got: {hint}");
     }
 
     #[test]
     fn fix_hint_drops_bool_flags() {
-        let hint = format_fix_hint(&[
-            "check".into(),
-            "--no-cache".into(),
-            "--fix".into(),
-            "src/".into(),
-        ]);
+        let hint = format_fix_hint(
+            &[
+                "check".into(),
+                "--no-cache".into(),
+                "--fix".into(),
+                "src/".into(),
+            ],
+            false,
+        );
         assert!(!hint.contains("--no-cache"), "got: {hint}");
         // --fix is already baked into the prefix; the original --fix arg
         // must be stripped so it is not duplicated.
@@ -851,13 +923,16 @@ mod tests {
 
     #[test]
     fn fix_hint_preserves_common_flags() {
-        let hint = format_fix_hint(&[
-            "check".into(),
-            "--select".into(),
-            "KIS".into(),
-            "--all-files".into(),
-            "src/".into(),
-        ]);
+        let hint = format_fix_hint(
+            &[
+                "check".into(),
+                "--select".into(),
+                "KIS".into(),
+                "--all-files".into(),
+                "src/".into(),
+            ],
+            false,
+        );
         assert!(hint.contains("--select KIS"), "got: {hint}");
         assert!(hint.contains("--all-files"), "got: {hint}");
         assert!(hint.contains("src/"), "got: {hint}");
@@ -865,7 +940,25 @@ mod tests {
 
     #[test]
     fn fix_hint_no_subcommand_in_raw_args() {
-        let hint = format_fix_hint(&["src/".into()]);
+        let hint = format_fix_hint(&["src/".into()], false);
         assert!(hint.contains("konform check --fix src/"), "got: {hint}");
+    }
+
+    #[test]
+    fn fix_hint_appends_unsafe_fixes_when_requested() {
+        let hint = format_fix_hint(&["check".into(), "src/".into()], true);
+        assert!(
+            hint.contains("konform check --fix src/ --unsafe-fixes"),
+            "got: {hint}"
+        );
+    }
+
+    #[test]
+    fn fix_hint_does_not_duplicate_unsafe_fixes_flag() {
+        let hint = format_fix_hint(
+            &["check".into(), "--unsafe-fixes".into(), "src/".into()],
+            true,
+        );
+        assert_eq!(hint.matches("--unsafe-fixes").count(), 1, "got: {hint}");
     }
 }

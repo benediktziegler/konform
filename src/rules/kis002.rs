@@ -30,6 +30,10 @@
 //! - Skips aliases whose name is listed in the module's `__all__`: that's a
 //!   deliberate re-export under that name, and dropping the alias would
 //!   silently remove it from the namespace.
+//!
+//! The fix is marked **unsafe** (see [`super::Rule::is_unsafe_fix`]): it can
+//! only see uses of the alias within the file being fixed, so it's applied
+//! only when `--unsafe-fixes` is passed alongside `--fix`.
 
 use super::scope::{
     bucket_for_offset, build_line_starts, build_scope_index, collect_all_exports,
@@ -86,6 +90,15 @@ impl Rule for Kis002Rule {
         true
     }
 
+    // KIS002's fix renames every use of the alias it drops, but it can only
+    // ever see uses within the file being fixed -- it can't rule out, say,
+    // reflection-based access to the alias by name (`getattr(mod, "bar_baz")`)
+    // elsewhere. Treat it as unsafe so it's only applied with
+    // `--unsafe-fixes`, matching Ruff's fix-safety separation.
+    fn is_unsafe_fix(&self) -> bool {
+        true
+    }
+
     fn check(&self, ctx: &FileContext, cfg: &toml::Value) -> Vec<Violation> {
         let level = parse_kis002_config(cfg);
         check_aliases(&ctx.source, level, ctx.ignore_noqa, &ctx.noqa_aliases)
@@ -97,7 +110,7 @@ impl Rule for Kis002Rule {
 
     fn explain(&self) -> String {
         "\
-KIS002 — Unnecessary import alias [sometimes fixable]
+KIS002 — Unnecessary import alias [sometimes fixable, unsafe]
 
   Checks that `from X import Y as Z` only renames the import when the
   rename is actually needed to avoid a naming collision. If `Y` isn't bound
@@ -129,6 +142,12 @@ KIS002 — Unnecessary import alias [sometimes fixable]
   elsewhere (shadowed by a local variable, or ambiguous with a different
   import binding the same name), konform reports the violation but leaves
   it for you to fix by hand.
+
+  This fix is marked unsafe: konform can only see uses of the alias within
+  the file being fixed, so it can't rule out other, dynamic references to
+  it by name (e.g. via `getattr`/`globals()`). Run `konform check --fix
+  --unsafe-fixes` (or `--fix-only --unsafe-fixes`) to apply it; plain
+  `--fix` reports the violation but leaves it unfixed.
 
   Suppress per-line:
     from foo.bar import baz as bar_baz   # noqa: KIS002

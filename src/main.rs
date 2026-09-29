@@ -21,8 +21,8 @@ use git::{find_repo_root, get_changed_files};
 use ignore::WalkBuilder;
 use module_probe::ModuleProbe;
 use output::{
-    format_fix_hint, print_statistics, print_violations, render_for_file, write_zuul_return,
-    OutputFormat,
+    format_fix_hint, has_unsafe_fixable, print_statistics, print_violations, render_for_file,
+    write_zuul_return, OutputFormat,
 };
 use owo_colors::OwoColorize;
 use rayon::prelude::*;
@@ -447,7 +447,9 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
         // stdin diff: fix in memory and compare.
         if let Some(ref src) = stdin_source {
             let input = CheckInput::new(&stdin_display, src);
-            if let Ok(Some(ref fixed)) = engine::run_fix(&input, &active_rules, &config) {
+            if let Ok(Some(ref fixed)) =
+                engine::run_fix(&input, &active_rules, &config, args.unsafe_fixes)
+            {
                 if *fixed != *src {
                     has_diff = true;
                     print_unified_diff(&stdin_display, src, fixed);
@@ -463,7 +465,9 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
                 }
             };
             let input = CheckInput::new(file_path, &source);
-            if let Ok(Some(fixed)) = engine::run_fix(&input, &active_rules, &config) {
+            if let Ok(Some(fixed)) =
+                engine::run_fix(&input, &active_rules, &config, args.unsafe_fixes)
+            {
                 if fixed != source {
                     has_diff = true;
                     print_unified_diff(file_path, &source, &fixed);
@@ -482,7 +486,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
         // stdin fix: write result to stdout; update buffer for the check pass.
         if let Some(src) = stdin_source.take() {
             let input = CheckInput::new(&stdin_display, &src);
-            match engine::run_fix(&input, &active_rules, &config) {
+            match engine::run_fix(&input, &active_rules, &config, args.unsafe_fixes) {
                 Ok(Some(new_source)) => {
                     print!("{new_source}");
                     fixed_any = true;
@@ -519,7 +523,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
                 }
             };
             let input = CheckInput::new(file_path, &source);
-            match engine::run_fix(&input, &active_rules, &config) {
+            match engine::run_fix(&input, &active_rules, &config, args.unsafe_fixes) {
                 Ok(Some(new_source)) => {
                     if let Err(e) = std::fs::write(file_path, &new_source) {
                         eprintln!(
@@ -660,6 +664,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
         args.level,
         changed_files_level,
         args.output_format,
+        &active_rules,
     );
 
     // --output-file: write the formatted output to disk using the selected format.
@@ -676,7 +681,8 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
     // Show hint after violations (suppressed in quiet/silent mode).
     if !reported.is_empty() && !effective_fix && !theme::is_quiet() {
         let argv: Vec<String> = std::env::args().skip(1).collect();
-        eprintln!("{}", format_fix_hint(&argv));
+        let include_unsafe = has_unsafe_fixable(&reported, &active_rules);
+        eprintln!("{}", format_fix_hint(&argv, include_unsafe));
     }
 
     let mut file_comments: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
@@ -864,6 +870,7 @@ fn recheck_batch(files: &[PathBuf], ctx: &RecheckContext<'_>, cache: &mut Cache)
         ctx.level,
         ctx.changed_files_level,
         ctx.output_format,
+        ctx.active_rules,
     );
     if violations.is_empty() {
         eprintln!("All checked files are clean \u{2713}");

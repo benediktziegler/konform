@@ -408,6 +408,9 @@ pub fn format_fix_hint(args: &[String], include_unsafe_fixes: bool) -> String {
 
     let mut fix_argv: Vec<String> =
         vec!["konform".to_owned(), "check".to_owned(), "--fix".to_owned()];
+    if include_unsafe_fixes {
+        fix_argv.push("--unsafe-fixes".to_owned());
+    }
     let mut skip_next = false;
 
     for arg in args {
@@ -433,10 +436,6 @@ pub fn format_fix_hint(args: &[String], include_unsafe_fixes: bool) -> String {
             continue;
         }
         fix_argv.push(arg.clone());
-    }
-
-    if include_unsafe_fixes {
-        fix_argv.push("--unsafe-fixes".to_owned());
     }
 
     let pal = theme::palette(colors_enabled());
@@ -948,7 +947,7 @@ mod tests {
     fn fix_hint_appends_unsafe_fixes_when_requested() {
         let hint = format_fix_hint(&["check".into(), "src/".into()], true);
         assert!(
-            hint.contains("konform check --fix src/ --unsafe-fixes"),
+            hint.contains("konform check --fix --unsafe-fixes src/"),
             "got: {hint}"
         );
     }

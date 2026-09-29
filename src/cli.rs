@@ -197,6 +197,14 @@ pub struct CheckArgs {
     #[arg(long, default_value_t = false)]
     pub fix: bool,
 
+    /// Also apply fixes marked unsafe (may not preserve exact behavior).
+    ///
+    /// Ruff-style separation: some rules' fixes can't fully rule out
+    /// changing program behavior in edge cases (e.g. KIS002), so they're
+    /// excluded from plain `--fix` unless this flag is also passed.
+    #[arg(long, default_value_t = false)]
+    pub unsafe_fixes: bool,
+
     /// Print a unified diff of what `check --fix` would change to stdout.
     ///
     /// Exits 1 if any file would be modified, 0 if all files are already clean.

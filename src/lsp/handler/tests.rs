@@ -490,10 +490,13 @@ fn code_action_offers_quickfix_only_for_the_fixable_alias_in_a_collision() {
             CodeActionOrCommand::Command(_) => None,
         })
         .collect();
+    // KIS002's fix is unsafe, so the safe-only tier is a no-op here and only
+    // the safe+unsafe tier is offered -- either way, some fix-all must be.
     assert!(
-        kinds
-            .iter()
-            .any(|k| k.as_ref() == Some(&CodeActionKind::new("source.fixAll.konform"))),
+        kinds.iter().any(|k| matches!(
+            k.as_ref().map(|k| k.as_str()),
+            Some("source.fixAll.konform") | Some("source.fixAll.konform.unsafe")
+        )),
         "fix-all should still be offered: {kinds:?}"
     );
     assert!(
@@ -610,6 +613,44 @@ fn code_action_fixes_kis002_unnecessary_alias() {
             .any(|e| e.new_text.contains("from xml import etree")
                 && !e.new_text.contains("as xml_etree")),
         "expected the alias to be dropped: {edits:?}"
+    );
+
+    server.shutdown();
+}
+
+#[test]
+fn code_action_fix_all_splits_safe_and_unsafe() {
+    // KIS002_SOURCE is only fixable via KIS002, whose fix is unsafe: the
+    // safe-only "fix all" tier must be a no-op and therefore absent, while
+    // the safe+unsafe tier must be offered and actually drop the alias.
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    server.initialize();
+
+    server.open(&uri, KIS002_SOURCE);
+    server.next_diagnostics(&uri);
+
+    let actions = code_actions_at(&mut server, &uri, 0, None);
+    assert!(
+        !actions
+            .iter()
+            .any(|a| a.kind.as_ref() == Some(&CodeActionKind::new("source.fixAll.konform"))),
+        "safe-only fix-all should be absent when nothing is safely fixable: {actions:?}"
+    );
+
+    let unsafe_action = actions
+        .iter()
+        .find(|a| a.kind.as_ref() == Some(&CodeActionKind::new("source.fixAll.konform.unsafe")))
+        .expect("safe+unsafe fix-all should be offered");
+    assert_eq!(
+        unsafe_action.title,
+        "Konform: Fix all problems (including unsafe fixes)"
+    );
+    let fixed = apply_action(KIS002_SOURCE, unsafe_action, &uri);
+    assert!(
+        fixed.contains("from xml import etree") && !fixed.contains("as xml_etree"),
+        "unsafe fix-all should drop the alias: {fixed:?}"
     );
 
     server.shutdown();
@@ -806,6 +847,8 @@ fn code_action_honours_context_only() {
             .map(|a| a.kind.unwrap().as_str().to_owned())
             .collect()
     };
+    // KIS002's fix is unsafe, so the safe-only tier is a no-op and only the
+    // safe+unsafe tier action is produced here.
     assert_eq!(
         kinds(code_actions_at(
             &mut server,
@@ -813,7 +856,7 @@ fn code_action_honours_context_only() {
             0,
             Some(&["source.fixAll"])
         )),
-        ["source.fixAll.konform"]
+        ["source.fixAll.konform.unsafe"]
     );
     assert_eq!(
         kinds(code_actions_at(&mut server, &uri, 0, Some(&["quickfix"]))),

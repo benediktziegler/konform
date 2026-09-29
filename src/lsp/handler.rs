@@ -62,11 +62,13 @@ pub fn server_capabilities() -> ServerCapabilities {
             work_done_progress_options: Default::default(),
         })),
 
-        // Code actions: quick-fix per violation + source.fixAll.
+        // Code actions: quick-fix per violation + two fix-all tiers (safe,
+        // and safe+unsafe -- mirroring Ruff's fix-safety split).
         code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
             code_action_kinds: Some(vec![
                 CodeActionKind::QUICKFIX,
                 CodeActionKind::new("source.fixAll.konform"),
+                CodeActionKind::new("source.fixAll.konform.unsafe"),
             ]),
             resolve_provider: Some(false),
             work_done_progress_options: Default::default(),
@@ -189,12 +191,17 @@ fn handle_diagnostic(
 
 /// `textDocument/codeAction` — return fix actions for violations in range.
 ///
-/// Offers two tiers of code action, filtered by `context.only`:
+/// Offers three tiers of code action, filtered by `context.only`:
 /// 1. **Per-violation quick-fix** (`quickfix`, preferred) — for each fixable
 ///    [`Violation`] whose source line intersects the requested range, a
 ///    minimal edit fixing *only that violation* via [`violation_fix_edit`].
-/// 2. **"Fix All"** (`source.fixAll.konform`) — runs the fixer on the whole
+/// 2. **"Fix All" (safe)** (`source.fixAll.konform`) — runs the fixer over
+///    only *safe* fixes ([`Rule::is_unsafe_fix`] == `false`) on the whole
 ///    document and replaces it with a single full-document [`TextEdit`].
+/// 3. **"Fix All (safe + unsafe)"** (`source.fixAll.konform.unsafe`) — same
+///    as above but also applies unsafe fixes (e.g. KIS002). Only offered
+///    when it would actually change something beyond the safe-only fix, so
+///    editors don't show a redundant duplicate action.
 fn handle_code_action(
     session: &Arc<RwLock<Session>>,
     params: serde_json::Value,
@@ -278,36 +285,88 @@ fn handle_code_action(
         }
     }
 
-    // ── Tier 2: "Fix All" ─────────────────────────────────────────────────
+    // ── Tier 2: "Fix All" (safe) ──────────────────────────────────────────
     let fix_all_kind = CodeActionKind::new("source.fixAll.konform");
-    let fixed = if wants(&fix_all_kind) {
-        run_fix(&CheckInput::new(&path, &source), &rules, &config)
+    let safe_fixed = if wants(&fix_all_kind) {
+        run_fix(&CheckInput::new(&path, &source), &rules, &config, false)
             .ok()
             .flatten()
     } else {
         None
     };
-    if let Some(fixed) = fixed {
-        let edit = full_document_edit(&source, &fixed);
-        // lsp_types::Uri uses fluent-uri internally; clippy flags it as a
-        // "mutable key type" but it is structurally immutable once created.
-        #[allow(clippy::mutable_key_type)]
-        let mut changes = HashMap::new();
-        changes.insert(uri.clone(), vec![edit]);
-        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-            title: "Konform: Fix all auto-fixable problems".to_owned(),
-            kind: Some(fix_all_kind),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                document_changes: None,
-                change_annotations: None,
-            }),
-            is_preferred: Some(false),
-            ..Default::default()
-        }));
+    if let Some(fixed) = &safe_fixed {
+        push_fix_all_action(
+            &mut actions,
+            uri,
+            &source,
+            fixed,
+            "Konform: Fix all auto-fixable problems",
+            fix_all_kind.clone(),
+        );
+    }
+
+    // ── Tier 3: "Fix All" (safe + unsafe) ─────────────────────────────────
+    // Editor-driven fixes are explicit, reviewable actions on an open
+    // document -- unlike a bulk CLI `--fix` run over a whole repo -- so this
+    // tier is offered regardless of `--unsafe-fixes`, mirroring how the
+    // per-violation quickfix below always allows unsafe fixes too. It's a
+    // separate, clearly-labelled action rather than folded into Tier 2 so
+    // users can opt into unsafe fixes explicitly, as Ruff does.
+    let fix_all_unsafe_kind = CodeActionKind::new("source.fixAll.konform.unsafe");
+    let unsafe_fixed = if wants(&fix_all_unsafe_kind) {
+        run_fix(&CheckInput::new(&path, &source), &rules, &config, true)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    // Only offer this tier when it differs from the safe-only result (or
+    // when the safe-only tier wasn't offered/found anything), so editors
+    // don't show a redundant duplicate "fix all" action when no rule with
+    // an unsafe fix actually applies here.
+    if let Some(fixed) = &unsafe_fixed {
+        if safe_fixed.as_deref() != Some(fixed.as_str()) {
+            push_fix_all_action(
+                &mut actions,
+                uri,
+                &source,
+                fixed,
+                "Konform: Fix all problems (including unsafe fixes)",
+                fix_all_unsafe_kind,
+            );
+        }
     }
 
     Ok(serde_json::to_value(actions)?)
+}
+
+/// Push a document-wide "fix all" [`CodeAction`] that replaces `source` with
+/// `fixed` in its entirety.
+fn push_fix_all_action(
+    actions: &mut Vec<CodeActionOrCommand>,
+    uri: &Uri,
+    source: &str,
+    fixed: &str,
+    title: &str,
+    kind: CodeActionKind,
+) {
+    let edit = full_document_edit(source, fixed);
+    // lsp_types::Uri uses fluent-uri internally; clippy flags it as a
+    // "mutable key type" but it is structurally immutable once created.
+    #[allow(clippy::mutable_key_type)]
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), vec![edit]);
+    actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+        title: title.to_owned(),
+        kind: Some(kind),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        }),
+        is_preferred: Some(false),
+        ..Default::default()
+    }));
 }
 
 /// Human-readable name of the rule that reports `code`. KPT violations carry
@@ -342,7 +401,9 @@ fn violation_fix_edit(
         line: violation.line,
         col: violation.col,
     });
-    let fixed = run_fix(&input, rules, config).ok()??;
+    // See the "Fix All" comment above: LSP fixes are explicit per-violation
+    // (or per-document) user actions, so unsafe fixes are always allowed.
+    let fixed = run_fix(&input, rules, config, true).ok()??;
     let edits = line_diff_edits(source, &fixed);
     (!edits.is_empty()).then_some(edits)
 }
@@ -411,7 +472,8 @@ fn handle_formatting(
     let path: std::path::PathBuf = uri.path().as_str().into();
     let rules = all_rules(probe, config.config_dir.clone());
     let fix_input = CheckInput::new(&path, &source);
-    let edits: Vec<TextEdit> = match run_fix(&fix_input, &rules, &config) {
+    // Formatting-on-save is also an explicit, reviewable editor action.
+    let edits: Vec<TextEdit> = match run_fix(&fix_input, &rules, &config, true) {
         Ok(Some(fixed)) => vec![full_document_edit(&source, &fixed)],
         _ => vec![],
     };

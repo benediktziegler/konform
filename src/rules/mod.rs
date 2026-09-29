@@ -125,6 +125,17 @@ pub trait Rule: Send + Sync {
         false
     }
 
+    /// Whether this rule's fix is unsafe, following Ruff's fix-safety model.
+    ///
+    /// A safe fix (the default) is guaranteed to preserve the exact meaning
+    /// of the code and is applied by plain `--fix`. An unsafe fix might, in
+    /// some edge cases, change program behavior (e.g. it can't always tell
+    /// a renamed binding apart from an unrelated one) and is only applied
+    /// when `--unsafe-fixes` is also passed -- see [`crate::engine::run_fix`].
+    fn is_unsafe_fix(&self) -> bool {
+        false
+    }
+
     /// Check `ctx` for violations and return them.
     ///
     /// `cfg` is the raw TOML value for this rule's config table, e.g. the

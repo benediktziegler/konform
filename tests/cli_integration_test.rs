@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use predicates::str::contains;
 
 #[test]
 fn test_help_exits_zero() {
@@ -16,4 +17,96 @@ fn test_version_flag() {
 fn test_version_subcommand() {
     let mut cmd = Command::cargo_bin("konform").unwrap();
     cmd.arg("version").assert().success();
+}
+
+/// KIS002's fix is unsafe: a plain `check` run must call that out
+/// separately from any safe fixes, both in the summary line and in the
+/// suggested fix command, mirroring Ruff's `--fix` / `--unsafe-fixes` split.
+#[test]
+fn check_reports_unsafe_only_fixable_violations_distinctly() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    std::fs::write(
+        &file,
+        "from xml import etree as xml_etree\n\nprint(xml_etree)\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("konform").unwrap();
+    cmd.args(["check", "--isolated"])
+        .arg(&file)
+        .assert()
+        .stderr(contains("fixable only with the `--unsafe-fixes` option"))
+        .stderr(contains("--unsafe-fixes"));
+}
+
+/// When a file has both a safe-fixable violation (KIS001) and an
+/// unsafe-fixable one (KIS002), the summary must break the two counts out
+/// separately rather than lumping them into a single `--fix` count.
+#[test]
+fn check_reports_combined_safe_and_unsafe_fixable_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    std::fs::write(
+        &file,
+        "from os.path import join\nfrom xml import etree as xml_etree\n\nprint(join(str(xml_etree)))\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("konform").unwrap();
+    cmd.args(["check", "--isolated"])
+        .arg(&file)
+        .assert()
+        .stderr(contains(
+            "1 fixable with the `--fix` option (1 hidden fix can be enabled with the `--unsafe-fixes` option).",
+        ));
+}
+
+/// `--fix` alone must not touch KIS002's unsafe fix, and the remaining
+/// violation must still be reported after the fix pass, with a hint
+/// pointing at `--unsafe-fixes`.
+#[test]
+fn fix_without_unsafe_fixes_leaves_unsafe_violation_unfixed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    let original = "from xml import etree as xml_etree\n\nprint(xml_etree)\n";
+    std::fs::write(&file, original).unwrap();
+
+    let mut cmd = Command::cargo_bin("konform").unwrap();
+    cmd.args(["check", "--isolated", "--fix"])
+        .arg(&file)
+        .assert()
+        .stderr(contains("fixable only with the `--unsafe-fixes` option"));
+
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        after, original,
+        "plain --fix must not apply KIS002's unsafe fix"
+    );
+}
+
+/// `--fix --unsafe-fixes` together must apply KIS002's fix and leave the
+/// file clean.
+#[test]
+fn fix_with_unsafe_fixes_fixes_kis002() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    std::fs::write(
+        &file,
+        "from xml import etree as xml_etree\n\nprint(xml_etree)\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("konform").unwrap();
+    cmd.args(["check", "--isolated", "--fix", "--unsafe-fixes"])
+        .arg(&file)
+        .assert()
+        .success();
+
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        after.contains("from xml import etree") && !after.contains("as xml_etree"),
+        "expected the alias to be dropped: {after:?}"
+    );
+    assert!(after.contains("print(etree)"), "got: {after:?}");
 }

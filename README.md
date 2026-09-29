@@ -53,6 +53,10 @@ of it back to the original name. It leaves the violation for you to fix by
 hand when the alias is shadowed somewhere, or bound to more than one import
 in the file.
 
+The fix is marked **unsafe** -- konform can't rule out other, dynamic
+references to the alias by name, so it's only applied with `--unsafe-fixes`
+(see [Usage](#usage) below).
+
 ### KPT — User-defined pattern rules
 
 Load regex patterns from `konform_patterns.toml` (auto-discovered next to
@@ -84,6 +88,9 @@ konform check src/
 # Lint and apply auto-fixes in one pass
 konform check --fix src/
 
+# Also apply fixes marked unsafe (e.g. KIS002)
+konform check --fix --unsafe-fixes src/
+
 # Apply fixes only (no lint report)
 konform check --fix src/
 
@@ -108,6 +115,10 @@ konform rule --explain KIS001
 # Clear the local cache
 konform clean
 ```
+
+When some reported violations are fixable only via `--unsafe-fixes` (e.g.
+KIS002), the summary breaks safe and unsafe-only counts out separately, and
+the suggested fix command is adjusted accordingly.
 
 ## Configuration
 
@@ -256,6 +267,14 @@ CLI — no second process, no stale results.
 ```bash
 konform server   # starts the LSP over stdin/stdout
 ```
+
+Code actions mirror the CLI's fix-safety split: a per-violation quickfix is
+offered for every fixable diagnostic (including unsafe ones, e.g. KIS002 —
+editing a single open document is an explicit, reviewable action), plus two
+document-wide "fix all" actions: **Fix all auto-fixable problems** (safe
+fixes only, `source.fixAll.konform`) and **Fix all problems (including
+unsafe fixes)** (`source.fixAll.konform.unsafe`), the latter only offered
+when it would change something beyond the safe-only pass.
 
 ### Neovim (nvim-lspconfig)
 

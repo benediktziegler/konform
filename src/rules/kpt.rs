@@ -219,6 +219,10 @@ impl Rule for KptRule {
         "KPT"
     }
 
+    fn gates_per_violation(&self) -> bool {
+        true
+    }
+
     fn config_name(&self) -> &str {
         "user-defined-patterns"
     }
@@ -254,7 +258,9 @@ impl Rule for KptRule {
         let cwd = std::env::current_dir().ok();
 
         for pattern in &patterns {
-            if !pattern.matches_file(&ctx.path, self.config_dir.as_deref(), cwd.as_deref()) {
+            if !ctx.is_enabled(&pattern.id)
+                || !pattern.matches_file(&ctx.path, self.config_dir.as_deref(), cwd.as_deref())
+            {
                 continue;
             }
 
@@ -358,7 +364,7 @@ impl Rule for KptRule {
             let Some(replacement) = &pattern.replacement else {
                 continue;
             };
-            if target.is_some_and(|t| t.rule != pattern.id) {
+            if !ctx.is_enabled(&pattern.id) || target.is_some_and(|t| t.rule != pattern.id) {
                 continue;
             }
             if !pattern.matches_file(&ctx.path, self.config_dir.as_deref(), cwd.as_deref()) {

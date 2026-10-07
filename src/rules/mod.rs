@@ -6,6 +6,7 @@
 //! to the same rule implementations — no duplication of logic.
 #![allow(dead_code)]
 
+use crate::config::RuleSelection;
 use crate::module_probe::ModuleProbe;
 use crate::types::Violation;
 use anyhow::Result;
@@ -50,6 +51,10 @@ pub struct FileContext {
     /// When set, [`Rule::fix`] must only rewrite the single violation this
     /// identifies (used for per-violation LSP quick-fixes). `None` = fix all.
     pub fix_target: Option<FixTarget>,
+    /// `select` / `ignore` lists. Rules that emit several codes (see
+    /// [`Rule::gates_per_violation`]) use [`FileContext::is_enabled`] to skip
+    /// the codes the user turned off.
+    pub selection: RuleSelection,
 }
 
 /// Identifies one violation by its rule code and 1-based line / 0-based
@@ -81,7 +86,13 @@ impl FileContext {
             ignore_noqa: false,
             noqa_aliases: HashMap::new(),
             fix_target: None,
+            selection: RuleSelection::default(),
         }
+    }
+
+    /// Is the violation code `code` enabled by `select` / `ignore`?
+    pub fn is_enabled(&self, code: &str) -> bool {
+        self.selection.is_enabled(code)
     }
 
     /// Per-line text to scan for `# noqa` (see [`has_noqa`]).
@@ -140,6 +151,16 @@ pub trait Rule: Send + Sync {
 
     /// One-line description shown next to the name in `--list-rules` output.
     fn description(&self) -> &str;
+
+    /// `true` for rules that emit violation codes other than [`Rule::code`]
+    /// (KPT: one code per user-defined pattern).
+    ///
+    /// The engine then always runs the rule, and the rule itself must honour
+    /// [`FileContext::is_enabled`] in both `check` and `fix`, instead of the
+    /// engine gating on `code()` alone.
+    fn gates_per_violation(&self) -> bool {
+        false
+    }
 
     /// Whether this rule can automatically rewrite violations in-place.
     fn fixable(&self) -> bool {

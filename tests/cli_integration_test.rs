@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 
 #[test]
@@ -140,4 +141,34 @@ fn noqa_inside_string_literal_does_not_suppress() {
         .assert()
         .failure()
         .stderr(contains("KIS001"));
+}
+
+/// `--ignore KPT001` must silence only the KPT001 pattern, not every
+/// user-defined pattern (which all share the `KPT` category).
+#[test]
+fn ignore_single_kpt_pattern_id_keeps_other_patterns() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        r#"
+[[tool.konform.lint.user-defined-patterns.rules]]
+id = "KPT001"
+message = "no print"
+pattern = '^\s*print\('
+
+[[tool.konform.lint.user-defined-patterns.rules]]
+id = "KPT002"
+message = "no breakpoint"
+pattern = '^\s*breakpoint\('
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("a.py"), "print(1)\nbreakpoint()\n").unwrap();
+
+    let mut cmd = Command::cargo_bin("konform").unwrap();
+    cmd.current_dir(dir.path())
+        .args(["check", "--no-cache", "--ignore", "KPT001", "a.py"])
+        .assert()
+        .stderr(contains("warning[KPT002]"))
+        .stderr(contains("warning[KPT001]").not());
 }

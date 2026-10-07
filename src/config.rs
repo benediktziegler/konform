@@ -61,6 +61,30 @@ impl Default for LintConfig {
 }
 
 // ---------------------------------------------------------------------------
+// RuleSelection
+// ---------------------------------------------------------------------------
+
+/// The `select` / `ignore` lists, prefix-matched against rule codes.
+///
+/// The default (both empty) enables every code.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuleSelection {
+    pub select: Vec<String>,
+    pub ignore: Vec<String>,
+}
+
+impl RuleSelection {
+    /// `true` when `code` is selected (or nothing is selected explicitly)
+    /// and not ignored. Both lists use prefix matching.
+    pub fn is_enabled(&self, code: &str) -> bool {
+        let selected =
+            self.select.is_empty() || self.select.iter().any(|s| code.starts_with(s.as_str()));
+        let ignored = self.ignore.iter().any(|i| code.starts_with(i.as_str()));
+        selected && !ignored
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
@@ -136,18 +160,16 @@ impl Config {
     /// ignore = ["KIS001"] # except KIS001 specifically
     /// ```
     pub fn is_enabled(&self, code: &str) -> bool {
-        let selected = self.lint.select.is_empty()
-            || self
-                .lint
-                .select
-                .iter()
-                .any(|s| code.starts_with(s.as_str()));
-        let ignored = self
-            .lint
-            .ignore
-            .iter()
-            .any(|i| code.starts_with(i.as_str()));
-        selected && !ignored
+        self.selection().is_enabled(code)
+    }
+
+    /// Snapshot of the `select` / `ignore` lists, for passing to rules via
+    /// [`crate::rules::FileContext::selection`].
+    pub fn selection(&self) -> RuleSelection {
+        RuleSelection {
+            select: self.lint.select.clone(),
+            ignore: self.lint.ignore.clone(),
+        }
     }
 
     /// Return the raw TOML configuration blob for a rule, looked up by its

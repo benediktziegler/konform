@@ -240,6 +240,15 @@ pub trait Rule: Send + Sync {
         false
     }
 
+    /// `true` for rules that are off by default.
+    ///
+    /// An opt-in rule runs only when `select` or `extend-select` names it
+    /// (or a prefix of its code); an empty `select` does not enable it. See
+    /// [`crate::config::RuleSelection::runs_rule`].
+    fn opt_in(&self) -> bool {
+        false
+    }
+
     /// Whether this rule can automatically rewrite violations in-place.
     fn fixable(&self) -> bool {
         false

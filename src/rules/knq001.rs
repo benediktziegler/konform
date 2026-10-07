@@ -17,6 +17,9 @@
 //! recommended because it reads the same to every tool that parses the
 //! comment. See [`super::parse_noqa`] for the exact grammar.
 //!
+//! The rule is **opt-in** (see [`Rule::opt_in`]): enable it with
+//! `extend-select = ["KNQ001"]` or `--extend-select KNQ001`.
+//!
 //! The rule is deliberately **unsuppressible by inline comments**: it never
 //! consults [`super::has_noqa`], so `# noqa: KNQ001` (or a bare `# noqa`)
 //! can't excuse itself. Only `select` / `ignore` / `per-file-ignores` turn
@@ -66,6 +69,10 @@ impl Rule for Knq001Rule {
 
     fn description(&self) -> &str {
         "Requires a reason on every `# noqa` suppression comment."
+    }
+
+    fn opt_in(&self) -> bool {
+        true
     }
 
     fn check(&self, ctx: &FileContext, cfg: &toml::Value) -> Vec<Violation> {
@@ -118,6 +125,10 @@ impl Rule for Knq001Rule {
 KNQ001 — noqa justification [not fixable]
 
   Requires every `# noqa` comment to carry a reason.
+
+  Opt-in: not run by default. Enable it with `extend-select = [\"KNQ001\"]`
+  (or `select = [\"KNQ001\"]`) in [tool.konform.lint], or pass
+  `--extend-select KNQ001`.
 
   Why: a bare suppression hides a violation without recording why that is
   fine. Months later nobody knows whether it is still needed or safe to

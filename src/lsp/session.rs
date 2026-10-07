@@ -156,12 +156,21 @@ impl Session {
     ///
     /// Accepted keys (mirroring `[tool.konform]` in `pyproject.toml`):
     /// - `"select"` — array of rule codes / category prefixes
+    /// - `"extend-select"` — array of codes / prefixes to enable on top of the
+    ///   default set (this is how opt-in rules like KNQ001 are enabled)
     /// - `"ignore"` — array of rule codes / category prefixes to suppress
     /// - `"level"`  — `"error"` or `"warning"`
     pub fn apply_editor_settings(&mut self, settings: &serde_json::Value) {
         let config = Arc::make_mut(&mut self.config);
         if let Some(arr) = settings.get("select").and_then(|v| v.as_array()) {
             config.lint.select = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_owned)
+                .collect();
+        }
+        if let Some(arr) = settings.get("extend-select").and_then(|v| v.as_array()) {
+            config.lint.extend_select = arr
                 .iter()
                 .filter_map(|v| v.as_str())
                 .map(str::to_owned)

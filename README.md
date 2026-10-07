@@ -131,6 +131,9 @@ references to the alias by name, so it's only applied with `--unsafe-fixes`
 
 ### KNQ001 — noqa justification
 
+**Opt-in:** not run by default. Enable it with `extend-select = ["KNQ001"]`
+in `[tool.konform.lint]` (or `--extend-select KNQ001`).
+
 Every `# noqa` comment must say why. A suppression without a reason hides a
 violation without recording that it is fine, so nobody can tell later whether
 it is still needed.
@@ -153,8 +156,8 @@ every tool that parses the comment.
 This rule can't be suppressed with `# noqa` (not even `# noqa: KNQ001`) and
 `--ignore-noqa` doesn't affect it; turn it off with `ignore` or
 `per-file-ignores`. It is not fixable, and `--add-noqa` never targets it.
-The default level is `error`; set `level = "warning"` to roll it out
-gradually.
+Once enabled, the default level is `error`; set `level = "warning"` to roll
+it out gradually.
 
 ### KPT — User-defined pattern rules
 
@@ -347,7 +350,8 @@ src       = [".", "src"]   # search roots for KIS001's module-existence probe;
                             # see "Module search roots" below.
 
 [tool.konform.lint]
-select = []        # [] = all rules; prefix match: "KIS" = all KIS* rules
+select = []        # [] = all default rules; prefix match: "KIS" = all KIS* rules
+extend-select = [] # enable more rules on top; required for opt-in rules, e.g. ["KNQ001"]
 ignore = []
 level  = "error"   # "warning" | "error"
 
@@ -374,7 +378,7 @@ level = "warning"
 # braces. An invalid template is reported on stderr and ignored.
 # alias-template = "{module_last}_{name}"   # foo.bar -> baz as bar_baz
 
-# ── KNQ001 — noqa justification ───────────────────────────────────────────
+# ── KNQ001 — noqa justification (opt-in: add "KNQ001" to extend-select) ───
 [tool.konform.lint.noqa-justification]
 level = "error"   # "error" (default) | "warning"
 
@@ -465,7 +469,7 @@ src = ["lib"]
 
 Results are cached per file (keyed by mtime and permissions) in `cache-dir`.
 The cache is also keyed by the settings that affect results — `select`,
-`ignore`, the Python environment, rule config tables, `per-file-ignores`,
+`extend-select`, `ignore`, the Python environment, rule config tables, `per-file-ignores`,
 `noqa-aliases` and the content of user-defined patterns and structural rules
 (including `konform_patterns.toml` and `konform_rules.toml`) — so editing any
 of them re-lints unchanged files.

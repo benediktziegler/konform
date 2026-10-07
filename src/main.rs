@@ -275,8 +275,12 @@ fn apply_cli_overrides(
     if !select.is_empty() {
         config.lint.select = select.to_vec();
     }
-    // --extend-select appends to whatever is in the config (or the --select override).
-    config.lint.select.extend(extend_select.iter().cloned());
+    // --extend-select adds to the default set (and to opt-in rules) without
+    // narrowing it, so it never fills an empty `select`.
+    config
+        .lint
+        .extend_select
+        .extend(extend_select.iter().cloned());
     // Both --ignore and --extend-ignore are additive.
     config.lint.ignore.extend(ignore.iter().cloned());
     config.lint.ignore.extend(extend_ignore.iter().cloned());
@@ -413,12 +417,20 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
     let level_str = args.level.to_string();
     let cache_root = repo_root.join(&config.cache_dir);
     let _ = cache::init(&cache_root);
+    // `extend-select` changes which rules run, so it is part of the cache key.
+    let selection_key: Vec<String> = config
+        .lint
+        .select
+        .iter()
+        .cloned()
+        .chain(config.lint.extend_select.iter().map(|s| format!("+{s}")))
+        .collect();
     let mut cache = Cache::open(
         repo_root.clone(),
         &cache_root,
         args.no_cache || args.ignore_noqa,
         &level_str,
-        &config.lint.select,
+        &selection_key,
         &config.lint.ignore,
         probe.env_fingerprint(),
         cache::rules_fingerprint(&config, &active_rules),

@@ -128,8 +128,9 @@ fn noqa_with_trailing_comma_does_not_suppress_other_codes() {
         .stderr(contains("KIS001"));
 }
 
-/// KNQ001: a suppression needs a reason. The reason must not break the
-/// suppression itself, and the rule cannot be silenced with `# noqa`.
+/// KNQ001 is opt-in: a suppression needs a reason only once the rule is
+/// enabled. The reason must not break the suppression itself, and the rule
+/// cannot be silenced with `# noqa`.
 #[test]
 fn knq001_requires_a_reason_on_noqa() {
     let dir = tempfile::tempdir().unwrap();
@@ -138,7 +139,13 @@ fn knq001_requires_a_reason_on_noqa() {
         std::fs::write(&file, src).unwrap();
         Command::cargo_bin("konform")
             .unwrap()
-            .args(["check", "--isolated", "--no-cache"])
+            .args([
+                "check",
+                "--isolated",
+                "--no-cache",
+                "--extend-select",
+                "KNQ001",
+            ])
             .arg(&file)
             .assert()
     };
@@ -152,6 +159,43 @@ fn knq001_requires_a_reason_on_noqa() {
     run("from os.path import join  # noqa: KIS001  # re-exported for plugins\n").success();
 }
 
+/// Without `--extend-select` / `select`, KNQ001 stays silent.
+#[test]
+fn knq001_is_off_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    std::fs::write(&file, "from os.path import join  # noqa: KIS001\n").unwrap();
+
+    Command::cargo_bin("konform")
+        .unwrap()
+        .args(["check", "--isolated", "--no-cache"])
+        .arg(&file)
+        .assert()
+        .success();
+}
+
+/// `--extend-select` adds to the default set instead of replacing it.
+#[test]
+fn extend_select_keeps_default_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    std::fs::write(&file, "from os.path import join\n").unwrap();
+
+    Command::cargo_bin("konform")
+        .unwrap()
+        .args([
+            "check",
+            "--isolated",
+            "--no-cache",
+            "--extend-select",
+            "KNQ001",
+        ])
+        .arg(&file)
+        .assert()
+        .failure()
+        .stderr(contains("KIS001"));
+}
+
 /// `--add-noqa` must not try to "suppress" KNQ001 by piling it onto the
 /// comment it flags.
 #[test]
@@ -162,7 +206,14 @@ fn add_noqa_ignores_knq001() {
     let add = || {
         Command::cargo_bin("konform")
             .unwrap()
-            .args(["check", "--isolated", "--no-cache", "--add-noqa"])
+            .args([
+                "check",
+                "--isolated",
+                "--no-cache",
+                "--add-noqa",
+                "--extend-select",
+                "KNQ001",
+            ])
             .arg(&file)
             .assert()
             .success();

@@ -3,7 +3,7 @@
 //! Konform provides:
 //! * **KIS001** — Module-only import checker (rewrite `from X import obj` → `import X`)
 //! * **KIS002** — Unnecessary import alias checker (`from X import Y as Z` → `from X import Y`)
-//! * **KNQ001** — Requires a reason on every `# noqa` comment
+//! * **KNQ001** — Requires a reason on every `# noqa` comment (opt-in via `extend-select`)
 //! * **KPT**    — User-defined regex pattern rules loaded from `konform_patterns.toml`
 //!
 //! Binary resolution order:

@@ -9,10 +9,6 @@ konform enables the following rules by default (when no `select` is configured).
 - [`module-only-imports`](kis001.md) (`KIS001`)
 - [`import-alias-policy`](kis002.md) (`KIS002`)
 
-## noqa comments (KNQ)
-
-- [`noqa-justification`](knq001.md) (`KNQ001`)
-
 ## User-defined patterns (KPT)
 
 - [`user-defined-patterns`](kpt.md) (`KPT*`)

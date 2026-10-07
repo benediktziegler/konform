@@ -36,9 +36,15 @@ src = ["lib"]
 ## Linter — `[tool.konform.lint]`
 
 #### `select`
-Rule codes or prefixes to enable. Empty means all rules.
+Rule codes or prefixes to enable. Empty means all [default rules](../rules/default.md).
 
-**Default:** `[]` · **Type:** `list[str]` · **CLI:** `--select`, `--extend-select`
+**Default:** `[]` · **Type:** `list[str]` · **CLI:** `--select`
+
+#### `extend-select`
+Rule codes or prefixes to enable on top of `select`. Required for opt-in rules such as
+[KNQ001](../rules/knq001.md).
+
+**Default:** `[]` · **Type:** `list[str]` · **CLI:** `--extend-select`
 
 #### `ignore`
 Rule codes or prefixes to disable (prefix-matched).

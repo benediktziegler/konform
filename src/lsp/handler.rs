@@ -16,7 +16,7 @@
 use super::convert::{full_document_edit, violation_to_diagnostic};
 use super::session::Session;
 use crate::engine::{run_check, run_fix, CheckInput};
-use crate::rules::{all_rules, FixTarget, Rule};
+use crate::rules::{FixTarget, Rule};
 use crate::types::Violation;
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::*;
@@ -211,7 +211,7 @@ fn handle_code_action(
 
     // Grab everything we need from the session in a single critical section
     // so we don't hold the lock during expensive fix computations.
-    let (source, config, probe, cached_violations) = {
+    let (source, config, rules, cached_violations) = {
         let sess = session.read().unwrap();
         let source = match sess.source(uri) {
             Some(s) => s.to_owned(),
@@ -220,14 +220,13 @@ fn handle_code_action(
         let violations = sess.diagnostics(uri).to_vec();
         (
             source,
-            sess.config.clone(),
-            Arc::clone(&sess.probe),
+            Arc::clone(&sess.config),
+            Arc::clone(&sess.rules),
             violations,
         )
     };
 
     let path: std::path::PathBuf = uri.path().as_str().into();
-    let rules = all_rules(Arc::clone(&probe), config.config_dir.clone());
     let mut actions: Vec<CodeActionOrCommand> = Vec::new();
 
     // Honour `context.only` (e.g. `["source.fixAll"]` on save, or
@@ -465,12 +464,11 @@ fn handle_formatting(
         Some(s) => s.to_owned(),
         None => return Ok(serde_json::Value::Null),
     };
-    let config = sess.config.clone();
-    let probe = Arc::clone(&sess.probe);
+    let config = Arc::clone(&sess.config);
+    let rules = Arc::clone(&sess.rules);
     drop(sess);
 
     let path: std::path::PathBuf = uri.path().as_str().into();
-    let rules = all_rules(probe, config.config_dir.clone());
     let fix_input = CheckInput::new(&path, &source);
     // Formatting-on-save is also an explicit, reviewable editor action.
     let edits: Vec<TextEdit> = match run_fix(&fix_input, &rules, &config, true) {
@@ -514,8 +512,9 @@ fn handle_notification(
 ) {
     match notif.method.as_str() {
         "initialized" => {
-            // Register file watchers for config files so we can reload on change.
-            register_watchers(connection);
+            // Register file watchers for config and pattern files so we can reload on change.
+            let config = Arc::clone(&session.read().unwrap().config);
+            register_watchers(connection, &config);
         }
         "textDocument/didOpen" => {
             if let Ok(p) = serde_json::from_value::<DidOpenTextDocumentParams>(notif.params) {
@@ -643,12 +642,11 @@ fn run_diagnostics(
         Some(s) => s.to_owned(),
         None => return (vec![], vec![]),
     };
-    let config = sess.config.clone();
-    let probe = Arc::clone(&sess.probe);
+    let config = Arc::clone(&sess.config);
+    let rules = Arc::clone(&sess.rules);
     drop(sess);
 
     let path: std::path::PathBuf = uri.path().as_str().into();
-    let rules = all_rules(Arc::clone(&probe), config.config_dir.clone());
     let input = CheckInput::new(&path, &source);
     let violations: Vec<Violation> = run_check(&input, &rules, &config);
     let lsp_diags = violations.iter().map(violation_to_diagnostic).collect();
@@ -683,24 +681,52 @@ fn publish_empty_diagnostics(connection: &Connection, uri: &Uri) {
 #[cfg(test)]
 mod tests;
 
-/// Dynamically register file watchers for `pyproject.toml` and `konform.toml`
-/// and opt-in to `workspace/didChangeConfiguration` notifications after the
-/// server is initialized.
-fn register_watchers(connection: &Connection) {
+/// Glob patterns of every file whose change must reload the session:
+/// the config files, auto-discovered pattern files, and the configured
+/// `rules_file` (if any).
+fn watch_globs(config: &crate::config::Config) -> Vec<String> {
+    let mut globs: Vec<String> = [
+        "**/pyproject.toml",
+        "**/konform.toml",
+        "**/konform_patterns.toml",
+        "**/konform_patterns.yaml",
+    ]
+    .map(String::from)
+    .to_vec();
+
+    let rules_file = config
+        .rule_config("user-defined-patterns")
+        .get("rules_file")
+        .and_then(|v| v.as_str());
+    if let Some(file) = rules_file {
+        let rel = file.trim_start_matches("./");
+        let glob = if std::path::Path::new(rel).is_absolute() {
+            rel.to_owned()
+        } else {
+            format!("**/{rel}")
+        };
+        if !globs.contains(&glob) {
+            globs.push(glob);
+        }
+    }
+    globs
+}
+
+/// Dynamically register file watchers for the config and pattern files
+/// (see [`watch_globs`]) and opt-in to `workspace/didChangeConfiguration`
+/// notifications after the server is initialized.
+fn register_watchers(connection: &Connection, config: &crate::config::Config) {
     use lsp_types::{FileSystemWatcher, GlobPattern, Registration, RegistrationParams, WatchKind};
 
-    let watchers = vec![
-        FileSystemWatcher {
-            glob_pattern: GlobPattern::String("**/pyproject.toml".into()),
+    let watchers: Vec<FileSystemWatcher> = watch_globs(config)
+        .into_iter()
+        .map(|glob| FileSystemWatcher {
+            glob_pattern: GlobPattern::String(glob),
             kind: Some(WatchKind::all()),
-        },
-        FileSystemWatcher {
-            glob_pattern: GlobPattern::String("**/konform.toml".into()),
-            kind: Some(WatchKind::all()),
-        },
-    ];
+        })
+        .collect();
 
-    // Register file-change watchers (for pyproject.toml / konform.toml).
+    // Register file-change watchers (config and pattern files).
     let file_watcher_reg = Registration {
         id: "konform-watch-config".into(),
         method: "workspace/didChangeWatchedFiles".into(),

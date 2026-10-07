@@ -6,6 +6,7 @@
 
 use crate::config::{load_config, Config};
 use crate::module_probe::ModuleProbe;
+use crate::rules::{all_rules, Rule};
 use crate::types::Violation;
 use lsp_types::{TextDocumentContentChangeEvent, Uri};
 use std::collections::HashMap;
@@ -33,7 +34,11 @@ pub struct DocumentState {
 
 pub struct Session {
     pub documents: HashMap<Uri, DocumentState>,
-    pub config: Config,
+    pub config: Arc<Config>,
+    /// Rules built from `config`, shared with request handlers. Rebuilt by
+    /// [`Session::reload_config`] so that pattern files are re-read (and
+    /// recompiled) only when they change, not on every request.
+    pub rules: Arc<Vec<Box<dyn Rule>>>,
     pub probe: Arc<ModuleProbe>,
     /// Working directory used for config discovery and relative path display.
     pub root: PathBuf,
@@ -41,9 +46,11 @@ pub struct Session {
 
 impl Session {
     pub fn new(config: Config, probe: Arc<ModuleProbe>, root: PathBuf) -> Self {
+        let rules = Arc::new(all_rules(Arc::clone(&probe), config.config_dir.clone()));
         Self {
             documents: HashMap::new(),
-            config,
+            config: Arc::new(config),
+            rules,
             probe,
             root,
         }
@@ -119,10 +126,15 @@ impl Session {
 
     // ── Config reload ───────────────────────────────────────────────────────────
 
-    /// Re-read `pyproject.toml` / `konform.toml` from the session root.
+    /// Re-read `pyproject.toml` / `konform.toml` from the session root and
+    /// rebuild the rules (which re-reads any pattern files).
     /// Called when `workspace/didChangeWatchedFiles` fires.
     pub fn reload_config(&mut self) {
-        self.config = load_config(Some(&self.root), None);
+        self.config = Arc::new(load_config(Some(&self.root), None));
+        self.rules = Arc::new(all_rules(
+            Arc::clone(&self.probe),
+            self.config.config_dir.clone(),
+        ));
         eprintln!("konform server: config reloaded");
     }
 
@@ -138,15 +150,16 @@ impl Session {
     /// - `"ignore"` — array of rule codes / category prefixes to suppress
     /// - `"level"`  — `"error"` or `"warning"`
     pub fn apply_editor_settings(&mut self, settings: &serde_json::Value) {
+        let config = Arc::make_mut(&mut self.config);
         if let Some(arr) = settings.get("select").and_then(|v| v.as_array()) {
-            self.config.lint.select = arr
+            config.lint.select = arr
                 .iter()
                 .filter_map(|v| v.as_str())
                 .map(str::to_owned)
                 .collect();
         }
         if let Some(arr) = settings.get("ignore").and_then(|v| v.as_array()) {
-            self.config.lint.ignore = arr
+            config.lint.ignore = arr
                 .iter()
                 .filter_map(|v| v.as_str())
                 .map(str::to_owned)
@@ -154,7 +167,7 @@ impl Session {
         }
         if let Some(level_str) = settings.get("level").and_then(|v| v.as_str()) {
             if let Ok(level) = level_str.parse::<crate::types::Level>() {
-                self.config.lint.level = level;
+                config.lint.level = level;
             }
         }
         eprintln!("konform server: applied editor workspace settings");

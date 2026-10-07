@@ -182,11 +182,12 @@ konform check -q src/
 # No output — just exit 1 on violations
 konform check -s src/
 
-# List all rules
+# List all rules (including the user-defined KPT patterns of this project)
 konform rule --list
 
-# Explain a rule
+# Explain a rule or a user-defined pattern id
 konform rule --explain KIS001
+konform rule --explain KPT030
 
 # Clear the local cache
 konform clean

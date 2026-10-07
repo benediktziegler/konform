@@ -196,3 +196,49 @@ fn invalid_kpt_regex_is_reported_once_for_many_files() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(stderr.matches("invalid regex").count(), 1, "{stderr}");
 }
+
+/// `rule --list` / `--explain` must discover the same config as `check`, so
+/// user-defined pattern ids are listed and explainable.
+#[test]
+fn rule_list_and_explain_include_user_patterns() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();
+    std::fs::write(
+        dir.path().join("konform_patterns.toml"),
+        "[[rules]]\nid = \"KPT030\"\nmessage = \"no leading x\"\npattern = \"^x\"\n",
+    )
+    .unwrap();
+
+    let mut list = Command::cargo_bin("konform").unwrap();
+    list.current_dir(dir.path())
+        .args(["rule", "--list"])
+        .assert()
+        .success()
+        .stdout(contains("KPT030"))
+        .stdout(contains("no leading x"))
+        .stdout(contains("KIS001"));
+
+    let mut explain = Command::cargo_bin("konform").unwrap();
+    explain
+        .current_dir(dir.path())
+        .args(["rule", "--explain", "KPT030"])
+        .assert()
+        .success()
+        .stdout(contains("konform_patterns.toml"))
+        .stdout(contains("^x"));
+}
+
+/// Outside a project with patterns, `rule --list` still shows the built-ins
+/// and the generic KPT001 entry.
+#[test]
+fn rule_list_without_config_shows_builtin_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cmd = Command::cargo_bin("konform").unwrap();
+    cmd.current_dir(dir.path())
+        .args(["rule", "--list"])
+        .assert()
+        .success()
+        .stdout(contains("KIS001"))
+        .stdout(contains("KIS002"))
+        .stdout(contains("KPT001"));
+}

@@ -122,6 +122,35 @@ impl FileContext {
 }
 
 // ---------------------------------------------------------------------------
+// RuleDoc
+// ---------------------------------------------------------------------------
+
+/// One row of `konform rule --list` and the text of `konform rule --explain`.
+#[derive(Debug, Clone)]
+pub struct RuleDoc {
+    pub code: String,
+    pub category: String,
+    pub config_name: String,
+    pub name: String,
+    pub description: String,
+    pub explain: String,
+}
+
+impl RuleDoc {
+    /// The documentation entry for `rule` itself.
+    pub fn of<R: Rule + ?Sized>(rule: &R) -> Self {
+        Self {
+            code: rule.code().to_owned(),
+            category: rule.category().to_owned(),
+            config_name: rule.config_name().to_owned(),
+            name: rule.name().to_owned(),
+            description: rule.description().to_owned(),
+            explain: rule.explain(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Rule trait
 // ---------------------------------------------------------------------------
 
@@ -192,6 +221,16 @@ pub trait Rule: Send + Sync {
     /// The default implementation is a no-op for rules that are not fixable.
     fn fix(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Result<Option<String>> {
         Ok(None)
+    }
+
+    /// Documentation entries this rule contributes to `konform rule --list`
+    /// and `--explain`.
+    ///
+    /// The default is a single entry for [`Rule::code`]. Rules whose codes
+    /// come from user configuration (KPT) override this to list each one;
+    /// `cfg` is the same rule config passed to [`Rule::check`].
+    fn catalog(&self, _cfg: &toml::Value) -> Vec<RuleDoc> {
+        vec![RuleDoc::of(self)]
     }
 
     /// Multi-line human-readable explanation with a bad/good code example.

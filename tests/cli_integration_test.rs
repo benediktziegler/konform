@@ -1250,8 +1250,8 @@ placeholder-reasons = ["legacy"]
     run("x = 1  # noqa: E501  # legacy\n")
         .failure()
         .stderr(contains("says nothing"));
-    // The built-in `ok` is gone.
-    run("x = 1  # noqa: E501  # ok\n").success();
+    // The built-in `todo` is gone.
+    run("x = 1  # noqa: E501  # todo\n").success();
 }
 
 /// A config table that doesn't parse is reported, not silently ignored.
@@ -1282,4 +1282,40 @@ level = 3
         .failure()
         .stderr(contains("invalid [tool.konform.lint.noqa-justification]"))
         .stderr(contains("invalid [tool.konform.lint.noqa-style]"));
+}
+
+/// `min-reason-letters` and `reject-repeated-characters` come from
+/// `[tool.konform.lint.noqa-justification]`.
+#[test]
+fn knq001_minimum_letters_and_repeated_characters_are_configurable() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |toml: &str, src: &str| {
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            format!(
+                "[tool.konform.lint]\nextend-select = [\"KNQ001\"]\n\n\
+                 [tool.konform.lint.noqa-justification]\n{toml}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("mod.py"), src).unwrap();
+        Command::cargo_bin("konform")
+            .unwrap()
+            .current_dir(dir.path())
+            .args(["check", "--no-cache", "mod.py"])
+            .assert()
+    };
+
+    run("", "x = 1  # noqa: E501  # xxxxxxxx\n")
+        .failure()
+        .stderr(contains("one repeated character"));
+    run("", "x = 1  # noqa: E501  # ab\n")
+        .failure()
+        .stderr(contains("too short"));
+    run("min-reason-letters = 2", "x = 1  # noqa: E501  # ab\n").success();
+    run(
+        "reject-repeated-characters = false",
+        "x = 1  # noqa: E501  # xxxxxxxx\n",
+    )
+    .success();
 }

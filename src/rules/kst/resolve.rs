@@ -8,8 +8,11 @@
 //! `from … import` anywhere in the file contributes, and local rebinding is
 //! not tracked. That is a deliberate trade-off for a linter-grade check.
 
-use ruff_python_ast::visitor::source_order::{SourceOrderVisitor, TraversalSignal};
-use ruff_python_ast::{AnyNodeRef, Expr, ExprAttribute, ExprName, ModModule};
+//! Together with `node.rs` this is the only KST code that sees parser types;
+//! the public API here speaks [`Node`].
+
+use super::node::{walk, Flow, Node, Visitor};
+use ruff_python_ast::{AnyNodeRef, Expr, ExprAttribute, ExprName};
 use std::collections::HashMap;
 
 /// Alias → fully qualified name, e.g. `fx` → `pytest.fixture`.
@@ -18,9 +21,9 @@ pub(super) struct Imports(HashMap<String, String>);
 
 struct Collector<'m>(&'m mut HashMap<String, String>);
 
-impl<'a> SourceOrderVisitor<'a> for Collector<'_> {
-    fn enter_node(&mut self, node: AnyNodeRef<'a>) -> TraversalSignal {
-        match node {
+impl<'a> Visitor<'a> for Collector<'_> {
+    fn enter(&mut self, node: Node<'a>) -> Flow {
+        match node.raw() {
             AnyNodeRef::StmtImport(import) => {
                 for alias in &import.names {
                     // `import a.b` binds `a` to itself, which resolution
@@ -50,21 +53,53 @@ impl<'a> SourceOrderVisitor<'a> for Collector<'_> {
             }
             _ => {}
         }
-        TraversalSignal::Traverse
+        Flow::Descend
     }
+
+    fn leave(&mut self, _node: Node<'a>) {}
 }
 
 impl Imports {
-    pub(super) fn collect(module: &ModModule) -> Self {
+    pub(super) fn collect(root: Node<'_>) -> Self {
         let mut table = HashMap::new();
-        AnyNodeRef::from(module).visit_source_order(&mut Collector(&mut table));
+        walk(root, &mut Collector(&mut table));
         Self(table)
+    }
+
+    /// Resolved dotted name of a `name` / `attribute` node.
+    pub(super) fn node_qualname(&self, node: Node<'_>) -> Option<String> {
+        match node.raw() {
+            AnyNodeRef::ExprName(n) => Some(self.name(n)),
+            AnyNodeRef::ExprAttribute(a) => self.attribute(a),
+            _ => None,
+        }
+    }
+
+    /// Resolved dotted name of a `call` node's callee.
+    pub(super) fn callee_qualname(&self, node: Node<'_>) -> Option<String> {
+        match node.raw() {
+            AnyNodeRef::ExprCall(c) => self.qualname(&c.func),
+            _ => None,
+        }
+    }
+
+    /// Resolved names of the decorators of a `function` / `class` node.
+    pub(super) fn decorator_qualnames(&self, node: Node<'_>) -> Vec<String> {
+        let decorators = match node.raw() {
+            AnyNodeRef::StmtFunctionDef(f) => &f.decorator_list[..],
+            AnyNodeRef::StmtClassDef(c) => &c.decorator_list[..],
+            _ => &[],
+        };
+        decorators
+            .iter()
+            .filter_map(|d| self.callable_qualname(&d.expression))
+            .collect()
     }
 
     /// Dotted name of a `Name` / `Attribute` chain with the leading name
     /// resolved through the imports. `None` for anything else (calls,
     /// subscripts, literals, …).
-    pub(super) fn qualname(&self, expr: &Expr) -> Option<String> {
+    fn qualname(&self, expr: &Expr) -> Option<String> {
         match expr {
             Expr::Name(name) => Some(self.name(name)),
             Expr::Attribute(attr) => self.attribute(attr),
@@ -72,21 +107,21 @@ impl Imports {
         }
     }
 
-    pub(super) fn name(&self, name: &ExprName) -> String {
+    fn name(&self, name: &ExprName) -> String {
         self.0
             .get(name.id.as_str())
             .cloned()
             .unwrap_or_else(|| name.id.to_string())
     }
 
-    pub(super) fn attribute(&self, attr: &ExprAttribute) -> Option<String> {
+    fn attribute(&self, attr: &ExprAttribute) -> Option<String> {
         Some(format!("{}.{}", self.qualname(&attr.value)?, attr.attr))
     }
 
     /// Like [`Imports::qualname`], but sees through one call, so the
     /// decorator `@pytest.fixture(scope="session")` resolves like
     /// `@pytest.fixture`.
-    pub(super) fn callable_qualname(&self, expr: &Expr) -> Option<String> {
+    fn callable_qualname(&self, expr: &Expr) -> Option<String> {
         match expr {
             Expr::Call(call) => self.qualname(&call.func),
             other => self.qualname(other),
@@ -100,7 +135,8 @@ mod tests {
     use ruff_python_ast::Stmt;
 
     fn imports(src: &str) -> Imports {
-        Imports::collect(ruff_python_parser::parse_module(src).unwrap().syntax())
+        let parsed = ruff_python_parser::parse_module(src).unwrap();
+        Imports::collect(Node::root(parsed.syntax()))
     }
 
     fn expr_of(src: &str) -> Expr {

@@ -32,6 +32,14 @@ growing.
 - **Built-in language server** that shares the CLI's engine.
 - **CI-ready** output: GitHub, GitLab, SARIF, JUnit, Zuul and JSON.
 
+The node kinds and condition keys above are **konform's own vocabulary**, not
+the parser's: each kind maps onto one or more parser node types inside
+konform (for example `assign` covers `=`, annotated and augmented
+assignment; `function` covers `def` and `async def`; `yield` covers
+`yield from`). Rules therefore stay valid when the underlying parser is
+upgraded or replaced, and parser type names (such as Ruff's `StmtAssert`)
+are rejected as unknown kinds.
+
 ## Installation
 
 ```bash

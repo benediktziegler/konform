@@ -365,6 +365,11 @@ fixes only, `source.fixAll.konform`) and **Fix all problems (including
 unsafe fixes)** (`source.fixAll.konform.unsafe`), the latter only offered
 when it would change something beyond the safe-only pass.
 
+The server builds its rules once and reloads them when `pyproject.toml`,
+`konform.toml`, `konform_patterns.toml` / `.yaml`, or the configured
+`rules_file` changes (it asks the editor to watch those files). If you point
+`rules_file` at a different path, restart the server so the new file is watched.
+
 ### Neovim (nvim-lspconfig)
 
 ```lua

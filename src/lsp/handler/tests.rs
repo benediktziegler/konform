@@ -952,6 +952,74 @@ fn did_change_watched_files_reloads_config_from_disk() {
 }
 
 #[test]
+fn did_change_watched_files_reloads_pattern_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let patterns = dir.path().join("konform_patterns.toml");
+    std::fs::write(
+        &patterns,
+        "[[rules]]\nid = \"KPT040\"\nmessage = \"old\"\npattern = '^x'\n",
+    )
+    .unwrap();
+    // A config file must exist so a reload rediscovers `config_dir`, which is
+    // what makes KPT auto-discover `konform_patterns.toml`.
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();
+    let config = Config {
+        config_dir: Some(dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::new(dir.path().to_path_buf(), config);
+    server.initialize();
+
+    server.open(&uri, "x = 1\ny = 2\n");
+    let before = server.next_diagnostics(&uri);
+    assert_eq!(before.diagnostics.len(), 1);
+    assert!(before.diagnostics[0].message.contains("old"));
+
+    // Edit the pattern file, then tell the server it changed.
+    std::fs::write(
+        &patterns,
+        "[[rules]]\nid = \"KPT040\"\nmessage = \"new\"\npattern = '^y'\n",
+    )
+    .unwrap();
+    server.notify(
+        "workspace/didChangeWatchedFiles",
+        serde_json::json!({ "changes": [] }),
+    );
+
+    let after = server.next_diagnostics(&uri);
+    assert_eq!(after.diagnostics.len(), 1);
+    assert!(after.diagnostics[0].message.contains("new"));
+    assert_eq!(after.diagnostics[0].range.start.line, 1);
+
+    server.shutdown();
+}
+
+#[test]
+fn watch_globs_cover_config_pattern_and_rules_files() {
+    let globs = watch_globs(&Config::default());
+    for g in [
+        "**/pyproject.toml",
+        "**/konform.toml",
+        "**/konform_patterns.toml",
+        "**/konform_patterns.yaml",
+    ] {
+        assert!(globs.iter().any(|x| x == g), "missing {g}: {globs:?}");
+    }
+
+    let mut config = Config::default();
+    config.lint.rules.insert(
+        "user-defined-patterns".into(),
+        toml::from_str("rules_file = \"./rules/custom.yaml\"").unwrap(),
+    );
+    let globs = watch_globs(&config);
+    assert!(
+        globs.iter().any(|g| g == "**/rules/custom.yaml"),
+        "missing rules_file glob: {globs:?}"
+    );
+}
+
+#[test]
 fn unknown_request_returns_method_not_found() {
     let dir = tempfile::tempdir().unwrap();
     let mut server = TestServer::with_default_config(dir.path().to_path_buf());

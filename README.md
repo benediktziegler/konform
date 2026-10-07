@@ -155,9 +155,38 @@ every tool that parses the comment.
 
 This rule can't be suppressed with `# noqa` (not even `# noqa: KNQ001`) and
 `--ignore-noqa` doesn't affect it; turn it off with `ignore` or
-`per-file-ignores`. It is not fixable, and `--add-noqa` never targets it.
-Once enabled, the default level is `error`; set `level = "warning"` to roll
-it out gradually.
+`per-file-ignores`. It is not fixable. `konform check --add-noqa --reason
+"..."` fills in a missing reason on the comments it flags (see
+[Baselining](#baselining-with---add-noqa)). Once enabled, the default level
+is `error`; set `level = "warning"` to roll it out gradually.
+
+### KNQ002 — noqa style
+
+**Opt-in:** not run by default. Enable it with `extend-select = ["KNQ002"]`
+in `[tool.konform.lint]` (or `--extend-select KNQ002`), or `select = ["KNQ"]`
+for both KNQ rules.
+
+The reason on a `# noqa` comment should start its own `#` comment. Text glued
+onto the directive reads differently to every tool that parses suppression
+comments (mypy, for one, rejects stray text after `# type: ignore[...]`);
+a second `#` comment reads the same everywhere.
+
+```python
+# Bad — KNQ002
+from os.path import join   # noqa: KIS001 re-exported for plugins
+from os.path import join   # noqa: KIS001 - re-exported for plugins
+
+# Good
+from os.path import join   # noqa: KIS001  # re-exported for plugins
+```
+
+`konform check --fix` rewrites it. The fix is **safe**: it only moves existing
+text behind a `#`, and the suppressed codes do not change. Comments without a
+reason are [KNQ001](#knq001--noqa-justification)'s concern, and
+`# noqa: kis001` (not a code, so possibly a typo) is left alone.
+
+Like KNQ001 it can't be suppressed with `# noqa`, `--ignore-noqa` doesn't
+affect it, and the default level is `error`.
 
 ### KPT — User-defined pattern rules
 
@@ -382,6 +411,10 @@ level = "warning"
 [tool.konform.lint.noqa-justification]
 level = "error"   # "error" (default) | "warning"
 
+# ── KNQ002 — noqa style (opt-in: add "KNQ002" to extend-select) ─────────────────
+[tool.konform.lint.noqa-style]
+level = "error"   # "error" (default) | "warning"
+
 # ── KPT001 — user-defined patterns ─────────────────────────────────────────
 [tool.konform.lint.user-defined-patterns]
 level = "warning"
@@ -490,7 +523,23 @@ inside a string literal does not suppress anything.
 
 Text after the codes is a free-form explanation and never changes what is
 suppressed: `# noqa: KIS001  # re-exported for plugins` suppresses `KIS001`
-only. [KNQ001](#knq001--noqa-justification) requires that explanation.
+only. [KNQ001](#knq001--noqa-justification) requires that explanation, and
+[KNQ002](#knq002--noqa-style) wants it in its own `# ...` comment.
+
+### Baselining with `--add-noqa`
+
+`konform check --add-noqa` appends `# noqa: CODE` to every line with a
+violation (merging into an existing `# noqa: ...`; a blanket `# noqa` is left
+as is). Pass `--reason` to record why, once, for the whole baseline:
+
+```sh
+konform check --add-noqa --reason "legacy, tracked in ABC-123" src/
+# from os.path import join  # noqa: KIS001  # legacy, tracked in ABC-123
+```
+
+With `--extend-select KNQ001`, `--reason` also fills in the reason of existing
+`# noqa` comments that lack one. A reason that is already there is never
+overwritten. `--reason` requires `--add-noqa`.
 
 ### Aliasing noqa codes
 

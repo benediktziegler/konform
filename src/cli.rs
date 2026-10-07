@@ -14,6 +14,18 @@ fn parse_level(s: &str) -> Result<Level, String> {
     s.parse::<Level>()
 }
 
+/// A `--reason` must be a single line with something readable in it.
+fn parse_reason(s: &str) -> Result<String, String> {
+    let reason = s.trim();
+    if reason.contains(['\n', '\r']) {
+        return Err("the reason must be a single line".to_owned());
+    }
+    if !reason.chars().any(char::is_alphanumeric) {
+        return Err("the reason must contain at least one letter or digit".to_owned());
+    }
+    Ok(reason.to_owned())
+}
+
 // ---------------------------------------------------------------------------
 // Top-level Cli
 // ---------------------------------------------------------------------------
@@ -245,11 +257,18 @@ pub struct CheckArgs {
 
     /// Append `# noqa: CODE` to every line that has a violation, then exit 0.
     ///
-    /// Lines that already carry any `# noqa` comment are left untouched.
-    /// When `-` is used as a FILE_PATH, the annotated source is written to
-    /// stdout instead of back to disk.
+    /// Missing codes are merged into an existing `# noqa: ...` comment; a
+    /// blanket `# noqa` is left as is. When `-` is used as a FILE_PATH, the
+    /// annotated source is written to stdout instead of back to disk.
     #[arg(long, default_value_t = false)]
     pub add_noqa: bool,
+
+    /// Reason to record with `--add-noqa`, as `# noqa: CODE  # TEXT`.
+    ///
+    /// Also fills in the reason of existing `# noqa` comments reported by
+    /// KNQ001 (enable it with `--extend-select KNQ001`).
+    #[arg(long, value_name = "TEXT", requires = "add_noqa", value_parser = parse_reason)]
+    pub reason: Option<String>,
 
     /// Write output to this file instead of stderr.
     ///

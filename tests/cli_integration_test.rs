@@ -227,6 +227,126 @@ fn add_noqa_ignores_knq001() {
     );
 }
 
+fn konform_in(dir: &std::path::Path, args: &[&str]) -> assert_cmd::assert::Assert {
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir)
+        .args(["check", "--isolated", "--no-cache"])
+        .args(args)
+        .assert()
+}
+
+#[test]
+fn add_noqa_reason_requires_add_noqa_and_text() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("mod.py"), "import os\n").unwrap();
+
+    konform_in(dir.path(), &["--reason", "why", "mod.py"]).failure();
+    for bad in ["", "   ", "...", "two\nlines"] {
+        konform_in(dir.path(), &["--add-noqa", "--reason", bad, "mod.py"]).failure();
+    }
+}
+
+#[test]
+fn add_noqa_with_reason_records_it_in_its_own_comment() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    std::fs::write(&file, "from os.path import join\n").unwrap();
+
+    konform_in(
+        dir.path(),
+        &[
+            "--add-noqa",
+            "--reason",
+            "legacy, tracked in ABC-123",
+            "mod.py",
+        ],
+    )
+    .success();
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "from os.path import join  # noqa: KIS001  # legacy, tracked in ABC-123\n"
+    );
+
+    // The baseline satisfies KNQ001 and KNQ002, and a rerun changes nothing.
+    konform_in(dir.path(), &["--extend-select", "KNQ001,KNQ002", "mod.py"]).success();
+    konform_in(
+        dir.path(),
+        &[
+            "--add-noqa",
+            "--reason",
+            "other",
+            "--extend-select",
+            "KNQ001",
+            "mod.py",
+        ],
+    )
+    .success();
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "from os.path import join  # noqa: KIS001  # legacy, tracked in ABC-123\n"
+    );
+}
+
+#[test]
+fn add_noqa_with_reason_fills_reasonless_comments_flagged_by_knq001() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    std::fs::write(
+        &file,
+        "from os.path import join  # noqa: KIS001\nx = 1  # noqa\ny = 2  # noqa: E501  # kept\n",
+    )
+    .unwrap();
+
+    // Without KNQ001 selected only real violations are touched.
+    konform_in(dir.path(), &["--add-noqa", "--reason", "legacy", "mod.py"]).success();
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "from os.path import join  # noqa: KIS001\nx = 1  # noqa\ny = 2  # noqa: E501  # kept\n"
+    );
+
+    konform_in(
+        dir.path(),
+        &[
+            "--add-noqa",
+            "--reason",
+            "legacy",
+            "--extend-select",
+            "KNQ001",
+            "mod.py",
+        ],
+    )
+    .success();
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "from os.path import join  # noqa: KIS001  # legacy\nx = 1  # noqa  # legacy\ny = 2  # noqa: E501  # kept\n"
+    );
+}
+
+#[test]
+fn knq002_is_off_by_default_and_fixed_when_selected() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    let src = "from os.path import join  # noqa: KIS001 legacy api\n";
+    std::fs::write(&file, src).unwrap();
+
+    konform_in(dir.path(), &["mod.py"]).success();
+    konform_in(dir.path(), &["--extend-select", "KNQ002", "mod.py"])
+        .failure()
+        .stderr(contains("KNQ002"));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), src);
+
+    konform_in(
+        dir.path(),
+        &["--extend-select", "KNQ002", "--fix", "mod.py"],
+    )
+    .success();
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "from os.path import join  # noqa: KIS001  # legacy api\n"
+    );
+}
+
 /// `# noqa` text inside a string literal is not a suppression comment.
 #[test]
 fn noqa_inside_string_literal_does_not_suppress() {

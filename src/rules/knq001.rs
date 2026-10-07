@@ -27,10 +27,8 @@
 //! string literal is not a violation.
 
 use super::scope::{build_line_starts, offset_to_line_col};
-use super::{parse_noqa, FileContext, Rule};
+use super::{noqa_comments, FileContext, NoqaComment, Rule};
 use crate::types::{Level, Violation};
-use ruff_python_ast::token::TokenKind;
-use ruff_text_size::Ranged;
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
@@ -79,30 +77,19 @@ impl Rule for Knq001Rule {
         // Deliberately no `has_noqa` / `ignore_noqa` handling: this rule
         // polices suppression comments, so one must not be able to excuse
         // itself (see module docs).
-        if !ctx.is_python() || !ctx.source.contains("noqa") {
-            return Vec::new();
-        }
         let level = Knq001Settings::deserialize(cfg.clone())
             .unwrap_or_default()
             .level;
-        let source = ctx.source.as_str();
-        let line_starts = build_line_starts(source);
+        let comments = noqa_comments(ctx);
+        let line_starts = build_line_starts(ctx.source.as_str());
 
         let mut violations = Vec::new();
-        for tok in ctx.parsed().tokens().iter() {
-            if tok.kind() != TokenKind::Comment {
-                continue;
-            }
-            let range = tok.range();
-            let comment_start = range.start().to_usize();
-            let Some(noqa) = parse_noqa(&source[comment_start..range.end().to_usize()]) else {
-                continue;
-            };
+        for NoqaComment { start, noqa, .. } in comments {
             if noqa.has_reason() {
                 continue;
             }
-            let (line, col) = offset_to_line_col(&line_starts, (comment_start + noqa.start) as u32);
-            let (_, end_col) = offset_to_line_col(&line_starts, (comment_start + noqa.end) as u32);
+            let (line, col) = offset_to_line_col(&line_starts, (start + noqa.start) as u32);
+            let (_, end_col) = offset_to_line_col(&line_starts, (start + noqa.end) as u32);
             violations.push(Violation {
                 rule: "KNQ001".to_owned(),
                 line,
@@ -157,7 +144,9 @@ KNQ001 — noqa justification [not fixable]
     level = \"error\"   # default: \"error\" | \"warning\"
 
   `konform check --add-noqa` appends reasonless comments, which this rule
-  then flags until a reason is added.
+  then flags until a reason is added. Pass `--reason \"...\"` to record the
+  reason at the same time; with this rule selected it also fills in the
+  reason of existing comments that lack one.
 "
         .to_owned()
     }

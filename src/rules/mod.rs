@@ -467,6 +467,24 @@ pub fn parse_noqa(text: &str) -> Option<Noqa<'_>> {
     })
 }
 
+/// Deserialize a rule's `[tool.konform.lint.<section>]` table.
+///
+/// A table that doesn't parse (unknown key, wrong type) is reported on
+/// stderr once per `warned` and replaced by the defaults, rather than being
+/// silently ignored.
+pub(crate) fn rule_settings<T: serde::de::DeserializeOwned + Default>(
+    cfg: &toml::Value,
+    section: &str,
+    warned: &std::sync::Once,
+) -> T {
+    T::deserialize(cfg.clone()).unwrap_or_else(|err| {
+        warned.call_once(|| {
+            eprintln!("konform: ignoring invalid [tool.konform.lint.{section}]: {err}");
+        });
+        T::default()
+    })
+}
+
 /// Return `true` if the violation with code `code` is suppressed on `line`
 /// by a `# noqa` comment.
 ///

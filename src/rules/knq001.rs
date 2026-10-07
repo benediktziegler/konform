@@ -39,10 +39,11 @@
 
 use super::docs::{DocSection, Example, RuleDocs, RuleOption};
 use super::scope::{build_line_starts, offset_to_line_col};
-use super::{noqa_comments, FileContext, NoqaComment, Rule};
+use super::{noqa_comments, rule_settings, FileContext, NoqaComment, Rule};
 use crate::types::{Level, Violation};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::sync::Once;
 
 // ---------------------------------------------------------------------------
 // Rule struct
@@ -90,7 +91,8 @@ impl Rule for Knq001Rule {
         // Deliberately no `has_noqa` / `ignore_noqa` handling: this rule
         // polices suppression comments, so one must not be able to excuse
         // itself (see module docs).
-        let settings = Knq001Settings::deserialize(cfg.clone()).unwrap_or_default();
+        static WARNED: Once = Once::new();
+        let settings: Knq001Settings = rule_settings(cfg, "noqa-justification", &WARNED);
         let level = settings.level;
         let policy = Policy::new(&settings);
         let source = ctx.source.as_str();
@@ -248,7 +250,7 @@ const DEFAULT_PLACEHOLDERS: &[&str] = &[
 
 /// `[tool.konform.lint.noqa-justification]` settings for KNQ001.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 struct Knq001Settings {
     level: Level,
     /// Replaces [`DEFAULT_PLACEHOLDERS`] when set; `[]` disables the check.
@@ -476,6 +478,22 @@ mod tests {
             lines("placeholder-reasons = []\nextend-placeholder-reasons = [\"ok\"]"),
             [2]
         );
+    }
+
+    #[test]
+    fn invalid_settings_fall_back_to_defaults() {
+        // A typo'd key or a wrong type must not half-apply: the whole table
+        // is replaced by the defaults (and reported on stderr).
+        let src = "x = 1  # noqa: F401\ny = 2  # noqa: A  # ok\n";
+        for cfg in [
+            "exempt-code = [\"F401\"]",
+            "exempt-codes = \"F401\"",
+            "level = \"warning\"\nexempt-codes = \"F401\"",
+        ] {
+            let v = check_cfg(src, cfg);
+            assert_eq!(v.len(), 2, "{cfg:?}");
+            assert!(v.iter().all(|v| v.level == Level::Error), "{cfg:?}");
+        }
     }
 
     #[test]

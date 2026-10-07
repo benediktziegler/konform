@@ -85,6 +85,7 @@ konform check [OPTIONS] <FILE_PATHS>...
 | `--exit-non-zero-on-fix` | Exit with a non-zero status code if any files were modified by `--fix` |
 | `--ignore-noqa` | Ignore all `# noqa` suppression comments; report every violation |
 | `--add-noqa` | Append `# noqa: CODE` to every line that has a violation, then exit 0.<br><br>Codes are merged into an existing `# noqa: ...` list (sorted, no duplicates); a bare `# noqa` already suppresses everything and is left untouched. When `-` is used as a FILE_PATH, the annotated source is written to stdout instead of back to disk. |
+| `--reason <TEXT>` | Reason to record with `--add-noqa`, as `# noqa: CODE # TEXT`.<br><br>Also fills in the reason of existing `# noqa` comments reported by KNQ001 (enable it with `--extend-select KNQ001`). |
 | `-o, --output-file <OUTPUT_FILE>` | Write output to this file instead of stderr.<br><br>For `--output-format json` the JSON is written here; for other formats the text output is written here instead of stderr. |
 
 ### Miscellaneous

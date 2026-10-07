@@ -112,8 +112,14 @@ fn print_unified_diff(path: &Path, original: &str, modified: &str) {
 /// - Bare `# noqa` suppresses everything → left unchanged.
 /// - `# noqa: CODES` → missing codes from the violation set are merged in (sorted).
 /// - No `# noqa` → `  # noqa: CODES` is appended.
+/// - With a `reason`, new comments get `  # REASON` appended, and existing
+///   `# noqa` comments that KNQ001 flags for lacking one are given it.
 /// - Returns the modified source, or `None` if no changes were made.
-fn add_noqa_to_source(source: &str, violations: &[serde_json::Value]) -> Option<String> {
+fn add_noqa_to_source(
+    source: &str,
+    violations: &[serde_json::Value],
+    reason: Option<&str>,
+) -> Option<String> {
     use std::collections::BTreeSet;
 
     if violations.is_empty() {
@@ -125,10 +131,23 @@ fn add_noqa_to_source(source: &str, violations: &[serde_json::Value]) -> Option<
     for v in violations {
         let line_no = v.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
         let rule = v.get("rule").and_then(|r| r.as_str()).unwrap_or("");
-        // KNQ001 flags the noqa comments themselves; "suppressing" it would
-        // only pile junk onto the comment it complains about.
-        if line_no > 0 && !rule.is_empty() && rule != "KNQ001" {
-            by_line.entry(line_no).or_default().insert(rule.to_owned());
+        if line_no == 0 || rule.is_empty() {
+            continue;
+        }
+        match rule {
+            // KNQ001 flags the noqa comments themselves. Suppressing it would
+            // only pile junk onto the comment it complains about, but with a
+            // reason in hand the missing explanation can be filled in.
+            "KNQ001" => {
+                if reason.is_some() {
+                    by_line.entry(line_no).or_default();
+                }
+            }
+            // Style findings about an existing comment; nothing to suppress.
+            "KNQ002" => {}
+            _ => {
+                by_line.entry(line_no).or_default().insert(rule.to_owned());
+            }
         }
     }
 
@@ -143,7 +162,7 @@ fn add_noqa_to_source(source: &str, violations: &[serde_json::Value]) -> Option<
     for (idx, line) in source.lines().enumerate() {
         let line_no = idx + 1;
         if let Some(new_codes) = by_line.get(&line_no) {
-            out.push_str(&merge_noqa(line, new_codes, &mut changed));
+            out.push_str(&merge_noqa(line, new_codes, reason, &mut changed));
         } else {
             out.push_str(line);
         }
@@ -160,52 +179,65 @@ fn add_noqa_to_source(source: &str, violations: &[serde_json::Value]) -> Option<
 
 /// Merge `new_codes` into any existing `# noqa` comment on `line`.
 ///
-/// Three cases:
-/// 1. Bare `# noqa` (no code list) — suppresses everything; left unchanged.
+/// Cases:
+/// 1. No `# noqa` at all — `  # noqa: CODES` (plus `  # REASON`) is appended.
+///    Without codes there is nothing to add and the line stays as is.
 /// 2. `# noqa: CODES` — codes from `new_codes` absent from `CODES` are merged
 ///    in, sorted.  Any trailing reason after the code list is preserved.
-/// 3. No `# noqa` at all — `  # noqa: CODES` is appended to the line.
+/// 3. Bare `# noqa` — suppresses everything; the codes are left unchanged.
+///
+/// With a `reason`, an existing comment that has none gets it appended.
+/// An existing reason is never overwritten.
 fn merge_noqa(
     line: &str,
     new_codes: &std::collections::BTreeSet<String>,
+    reason: Option<&str>,
     changed: &mut bool,
 ) -> String {
     use std::collections::BTreeSet;
 
     let Some(noqa) = rules::parse_noqa(line) else {
+        if new_codes.is_empty() {
+            return line.to_owned();
+        }
         // No existing noqa — append one.
         let codes_str = new_codes.iter().cloned().collect::<Vec<_>>().join(", ");
         *changed = true;
-        return format!("{line}  # noqa: {codes_str}");
+        return match reason {
+            Some(r) => format!("{line}  # noqa: {codes_str}  # {r}"),
+            None => format!("{line}  # noqa: {codes_str}"),
+        };
     };
 
-    let Some(existing_codes) = noqa.codes else {
-        // Bare `# noqa` — suppresses everything; leave unchanged.
+    let existing: Option<BTreeSet<String>> = noqa
+        .codes
+        .as_ref()
+        .map(|codes| codes.iter().map(|c| (*c).to_owned()).collect());
+    // A bare `# noqa` already suppresses everything.
+    let missing = existing
+        .as_ref()
+        .is_some_and(|have| new_codes.iter().any(|c| !have.contains(c)));
+    let new_reason = reason.filter(|_| !noqa.has_reason());
+
+    if !missing && new_reason.is_none() {
         return line.to_owned();
-    };
-    let existing: BTreeSet<String> = existing_codes.into_iter().map(str::to_owned).collect();
-
-    let missing: Vec<&str> = new_codes
-        .iter()
-        .map(String::as_str)
-        .filter(|c| !existing.contains(*c))
-        .collect();
-
-    if missing.is_empty() {
-        return line.to_owned(); // All codes already present.
     }
 
-    // Merge all codes (existing + missing) into one sorted list.
-    let mut all: BTreeSet<String> = existing;
-    all.extend(missing.iter().map(|s| s.to_string()));
-    let codes_str = all.into_iter().collect::<Vec<_>>().join(", ");
+    let directive = match existing {
+        Some(mut all) if missing => {
+            all.extend(new_codes.iter().cloned());
+            format!("# noqa: {}", all.into_iter().collect::<Vec<_>>().join(", "))
+        }
+        _ => line[noqa.start..noqa.end].to_owned(),
+    };
+    // Keep the original tail unless it is only separators that the new
+    // reason replaces.
+    let tail = match new_reason {
+        Some(r) => format!("  # {r}"),
+        None => line[noqa.end..].to_owned(),
+    };
     *changed = true;
-    format!(
-        "{}# noqa: {}{}",
-        &line[..noqa.start],
-        codes_str,
-        &line[noqa.end..]
-    )
+    format!("{}{directive}{tail}", &line[..noqa.start])
 }
 
 // ---------------------------------------------------------------------------
@@ -643,7 +675,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
             if wants_stdin && *file_path_str == stdin_key {
                 // stdin: write annotated source to stdout.
                 if let Some(ref src) = stdin_source {
-                    match add_noqa_to_source(src, viols) {
+                    match add_noqa_to_source(src, viols, args.reason.as_deref()) {
                         Some(modified) => print!("{modified}"),
                         None => print!("{src}"),
                     }
@@ -657,7 +689,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
                         continue;
                     }
                 };
-                if let Some(modified) = add_noqa_to_source(&src, viols) {
+                if let Some(modified) = add_noqa_to_source(&src, viols, args.reason.as_deref()) {
                     if let Err(e) = std::fs::write(&path, &modified) {
                         eprintln!("error writing {}: {e}", path.display());
                     }
@@ -1412,7 +1444,7 @@ mod noqa_tests {
     fn merge_noqa_no_existing_appends_comment() {
         let mut changed = false;
         let codes = ["KIS001".to_owned()].into_iter().collect();
-        let result = merge_noqa("from os.path import join", &codes, &mut changed);
+        let result = merge_noqa("from os.path import join", &codes, None, &mut changed);
         assert_eq!(result, "from os.path import join  # noqa: KIS001");
         assert!(changed);
     }
@@ -1496,7 +1528,7 @@ mod noqa_tests {
     fn merge_noqa_foreign_code_merges_sorted() {
         let mut changed = false;
         let codes = ["KIS001".to_owned()].into_iter().collect();
-        let result = merge_noqa("code()  # noqa: E501", &codes, &mut changed);
+        let result = merge_noqa("code()  # noqa: E501", &codes, None, &mut changed);
         assert_eq!(result, "code()  # noqa: E501, KIS001");
         assert!(changed);
     }
@@ -1505,7 +1537,7 @@ mod noqa_tests {
     fn merge_noqa_code_already_present_unchanged() {
         let mut changed = false;
         let codes = ["KIS001".to_owned()].into_iter().collect();
-        let result = merge_noqa("code()  # noqa: KIS001", &codes, &mut changed);
+        let result = merge_noqa("code()  # noqa: KIS001", &codes, None, &mut changed);
         assert_eq!(result, "code()  # noqa: KIS001");
         assert!(!changed);
     }
@@ -1514,7 +1546,7 @@ mod noqa_tests {
     fn merge_noqa_bare_noqa_unchanged() {
         let mut changed = false;
         let codes = ["KIS001".to_owned()].into_iter().collect();
-        let result = merge_noqa("code()  # noqa", &codes, &mut changed);
+        let result = merge_noqa("code()  # noqa", &codes, None, &mut changed);
         assert_eq!(result, "code()  # noqa");
         assert!(!changed);
     }
@@ -1525,7 +1557,7 @@ mod noqa_tests {
         let codes = ["KPT001".to_owned(), "KIS001".to_owned()]
             .into_iter()
             .collect();
-        let result = merge_noqa("code()", &codes, &mut changed);
+        let result = merge_noqa("code()", &codes, None, &mut changed);
         assert_eq!(result, "code()  # noqa: KIS001, KPT001");
         assert!(changed);
     }
@@ -1535,7 +1567,12 @@ mod noqa_tests {
         // A reason after the code list survives the merge.
         let mut changed = false;
         let codes = ["KIS001".to_owned()].into_iter().collect();
-        let result = merge_noqa("code()  # noqa: E501  # intentional", &codes, &mut changed);
+        let result = merge_noqa(
+            "code()  # noqa: E501  # intentional",
+            &codes,
+            None,
+            &mut changed,
+        );
         assert_eq!(result, "code()  # noqa: E501, KIS001  # intentional");
         assert!(changed);
     }
@@ -1543,20 +1580,20 @@ mod noqa_tests {
     #[test]
     fn add_noqa_source_skips_knq001() {
         let src = "x = 1  # noqa: E501\n";
-        assert!(add_noqa_to_source(src, &[viol("KNQ001", 1)]).is_none());
+        assert!(add_noqa_to_source(src, &[viol("KNQ001", 1)], None).is_none());
     }
 
     // add_noqa_to_source -------------------------------------------------------
 
     #[test]
     fn add_noqa_source_no_violations_returns_none() {
-        assert!(add_noqa_to_source("import os\n", &[]).is_none());
+        assert!(add_noqa_to_source("import os\n", &[], None).is_none());
     }
 
     #[test]
     fn add_noqa_source_appends_comment() {
         let viols = vec![viol("KIS001", 1)];
-        let result = add_noqa_to_source("from os.path import join\n", &viols).unwrap();
+        let result = add_noqa_to_source("from os.path import join\n", &viols, None).unwrap();
         assert_eq!(result, "from os.path import join  # noqa: KIS001\n");
     }
 
@@ -1564,21 +1601,144 @@ mod noqa_tests {
     fn add_noqa_source_merges_foreign_noqa() {
         let viols = vec![viol("KIS001", 1)];
         let src = "from os.path import join  # noqa: E501\n";
-        let result = add_noqa_to_source(src, &viols).unwrap();
+        let result = add_noqa_to_source(src, &viols, None).unwrap();
         assert_eq!(result, "from os.path import join  # noqa: E501, KIS001\n");
     }
 
     #[test]
     fn add_noqa_source_preserves_trailing_newline() {
         let viols = vec![viol("KIS001", 1)];
-        let result = add_noqa_to_source("from os.path import join\n", &viols).unwrap();
+        let result = add_noqa_to_source("from os.path import join\n", &viols, None).unwrap();
         assert!(result.ends_with('\n'));
     }
 
     #[test]
     fn add_noqa_source_no_trailing_newline() {
         let viols = vec![viol("KIS001", 1)];
-        let result = add_noqa_to_source("from os.path import join", &viols).unwrap();
+        let result = add_noqa_to_source("from os.path import join", &viols, None).unwrap();
         assert!(!result.ends_with('\n'));
+    }
+
+    // --reason ----------------------------------------------------------------
+
+    fn codes(c: &[&str]) -> std::collections::BTreeSet<String> {
+        c.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn merge_noqa_new_comment_gets_reason() {
+        let mut changed = false;
+        let r = merge_noqa("code()", &codes(&["KIS001"]), Some("legacy"), &mut changed);
+        assert_eq!(r, "code()  # noqa: KIS001  # legacy");
+        assert!(changed);
+    }
+
+    #[test]
+    fn merge_noqa_merge_adds_reason_when_missing() {
+        let mut changed = false;
+        let r = merge_noqa(
+            "code()  # noqa: E501",
+            &codes(&["KIS001"]),
+            Some("legacy"),
+            &mut changed,
+        );
+        assert_eq!(r, "code()  # noqa: E501, KIS001  # legacy");
+        assert!(changed);
+    }
+
+    #[test]
+    fn merge_noqa_merge_replaces_empty_tail() {
+        let mut changed = false;
+        let r = merge_noqa(
+            "code()  # noqa: E501  #",
+            &codes(&["KIS001"]),
+            Some("legacy"),
+            &mut changed,
+        );
+        assert_eq!(r, "code()  # noqa: E501, KIS001  # legacy");
+    }
+
+    #[test]
+    fn merge_noqa_never_overwrites_an_existing_reason() {
+        let mut changed = false;
+        let r = merge_noqa(
+            "code()  # noqa: E501  # intentional",
+            &codes(&["KIS001"]),
+            Some("legacy"),
+            &mut changed,
+        );
+        assert_eq!(r, "code()  # noqa: E501, KIS001  # intentional");
+        let mut changed = false;
+        let r = merge_noqa(
+            "code()  # noqa: KIS001  # intentional",
+            &codes(&["KIS001"]),
+            Some("legacy"),
+            &mut changed,
+        );
+        assert_eq!(r, "code()  # noqa: KIS001  # intentional");
+        assert!(!changed);
+    }
+
+    #[test]
+    fn merge_noqa_fills_reason_without_touching_codes() {
+        let mut changed = false;
+        // No codes to add (a KNQ001-only line): the code list keeps its order.
+        let r = merge_noqa(
+            "code()  # noqa: KPT001, KIS001",
+            &codes(&[]),
+            Some("legacy"),
+            &mut changed,
+        );
+        assert_eq!(r, "code()  # noqa: KPT001, KIS001  # legacy");
+        assert!(changed);
+    }
+
+    #[test]
+    fn merge_noqa_blanket_noqa_only_gets_a_reason() {
+        let mut changed = false;
+        let r = merge_noqa(
+            "code()  # noqa",
+            &codes(&["KIS001"]),
+            Some("legacy"),
+            &mut changed,
+        );
+        assert_eq!(r, "code()  # noqa  # legacy");
+        assert!(changed);
+    }
+
+    #[test]
+    fn merge_noqa_without_codes_leaves_plain_lines_alone() {
+        let mut changed = false;
+        let r = merge_noqa("code()", &codes(&[]), Some("legacy"), &mut changed);
+        assert_eq!(r, "code()");
+        assert!(!changed);
+    }
+
+    #[test]
+    fn add_noqa_source_with_reason_on_new_comment() {
+        let r = add_noqa_to_source("import os\n", &[viol("KIS001", 1)], Some("legacy")).unwrap();
+        assert_eq!(r, "import os  # noqa: KIS001  # legacy\n");
+    }
+
+    #[test]
+    fn add_noqa_source_fills_reason_for_knq001() {
+        let src = "x = 1  # noqa: E501\ny = 2\n";
+        let r = add_noqa_to_source(src, &[viol("KNQ001", 1)], Some("legacy")).unwrap();
+        assert_eq!(r, "x = 1  # noqa: E501  # legacy\ny = 2\n");
+    }
+
+    #[test]
+    fn add_noqa_source_knq001_and_other_rule_share_one_comment() {
+        let src = "x = 1  # noqa\n";
+        let viols = [viol("KNQ001", 1), viol("KIS001", 1)];
+        let r = add_noqa_to_source(src, &viols, Some("legacy")).unwrap();
+        assert_eq!(r, "x = 1  # noqa  # legacy\n");
+    }
+
+    #[test]
+    fn add_noqa_source_skips_knq002() {
+        let src = "x = 1  # noqa: E501 legacy\n";
+        assert!(add_noqa_to_source(src, &[viol("KNQ002", 1)], Some("why")).is_none());
+        assert!(add_noqa_to_source(src, &[viol("KNQ002", 1)], None).is_none());
     }
 }

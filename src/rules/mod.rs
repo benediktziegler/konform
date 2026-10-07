@@ -25,6 +25,7 @@ pub mod docs;
 pub mod kis001;
 pub mod kis002;
 pub mod knq001;
+pub mod knq002;
 pub mod kpt;
 pub mod kst;
 mod scope;
@@ -369,6 +370,38 @@ impl Noqa<'_> {
     }
 }
 
+/// A real `# noqa` comment in a Python file, see [`noqa_comments`].
+#[derive(Debug, Clone)]
+pub struct NoqaComment<'a> {
+    /// Byte offset of the whole comment (its leading `#`) in the source.
+    pub start: usize,
+    /// Byte offset just past the comment (before the newline).
+    pub end: usize,
+    /// The directive; its offsets are relative to `start`.
+    pub noqa: Noqa<'a>,
+}
+
+/// Every comment token of a Python file that holds a `# noqa` directive.
+///
+/// Text inside string literals is never returned, and neither is anything
+/// in non-Python files. Works on unparsable sources (the parser is
+/// error-tolerant), so suppression-comment rules still see broken files.
+pub fn noqa_comments(ctx: &FileContext) -> Vec<NoqaComment<'_>> {
+    if !ctx.is_python() || !ctx.source.contains("noqa") {
+        return Vec::new();
+    }
+    let source = ctx.source.as_str();
+    ctx.parsed()
+        .tokens()
+        .iter()
+        .filter(|tok| tok.kind() == TokenKind::Comment)
+        .filter_map(|tok| {
+            let (start, end) = (tok.range().start().to_usize(), tok.range().end().to_usize());
+            parse_noqa(&source[start..end]).map(|noqa| NoqaComment { start, end, noqa })
+        })
+        .collect()
+}
+
 /// `A`, `KIS`, `KIS001`, `E501`: uppercase letters then optional digits.
 fn is_noqa_code(token: &str) -> bool {
     let letters = token.bytes().take_while(u8::is_ascii_uppercase).count();
@@ -490,6 +523,7 @@ pub fn all_rules(
         Box::new(kis001::Kis001Rule::new(probe)),
         Box::new(kis002::Kis002Rule::new()),
         Box::new(knq001::Knq001Rule::new()),
+        Box::new(knq002::Knq002Rule::new()),
         Box::new(kpt::KptRule::new(config_dir.clone())),
         Box::new(kst::KstRule::new(config_dir)),
     ]

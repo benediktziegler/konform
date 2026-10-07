@@ -189,7 +189,7 @@ KNQ001 — noqa justification [not fixable]
     # bare `# noqa` is never exempt.
 
   `konform check --add-noqa` appends reasonless comments, which this rule
-  then flags until a reason is added. Pass `--reason \"...\"` to record the
+  then flags until a reason is added. Pass `--noqa-reason \"...\"` to record the
   reason at the same time; with this rule selected it also fills in the
   reason of existing comments that lack one.
 "

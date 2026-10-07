@@ -14,7 +14,7 @@ fn parse_level(s: &str) -> Result<Level, String> {
     s.parse::<Level>()
 }
 
-/// A `--reason` must be a single line with something readable in it.
+/// A `--noqa-reason` must be a single line with something readable in it.
 fn parse_reason(s: &str) -> Result<String, String> {
     let reason = s.trim();
     if reason.contains(['\n', '\r']) {
@@ -268,7 +268,7 @@ pub struct CheckArgs {
     /// Also fills in the reason of existing `# noqa` comments reported by
     /// KNQ001 (enable it with `--extend-select KNQ001`).
     #[arg(long, value_name = "TEXT", requires = "add_noqa", value_parser = parse_reason)]
-    pub reason: Option<String>,
+    pub noqa_reason: Option<String>,
 
     /// Write output to this file instead of stderr.
     ///

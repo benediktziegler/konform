@@ -672,7 +672,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
             if wants_stdin && *file_path_str == stdin_key {
                 // stdin: write annotated source to stdout.
                 if let Some(ref src) = stdin_source {
-                    match add_noqa_to_source(src, viols, args.reason.as_deref()) {
+                    match add_noqa_to_source(src, viols, args.noqa_reason.as_deref()) {
                         Some(modified) => print!("{modified}"),
                         None => print!("{src}"),
                     }
@@ -686,7 +686,8 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
                         continue;
                     }
                 };
-                if let Some(modified) = add_noqa_to_source(&src, viols, args.reason.as_deref()) {
+                if let Some(modified) = add_noqa_to_source(&src, viols, args.noqa_reason.as_deref())
+                {
                     if let Err(e) = std::fs::write(&path, &modified) {
                         eprintln!("error writing {}: {e}", path.display());
                     }
@@ -1465,7 +1466,7 @@ mod noqa_tests {
         assert!(!result.ends_with('\n'));
     }
 
-    // --reason ----------------------------------------------------------------
+    // --noqa-reason ----------------------------------------------------------------
 
     fn codes(c: &[&str]) -> std::collections::BTreeSet<String> {
         c.iter().map(|s| (*s).to_owned()).collect()

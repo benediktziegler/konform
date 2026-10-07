@@ -181,7 +181,7 @@ whole files instead (say `__init__.py`), use `per-file-ignores`:
 
 This rule can't be suppressed with `# noqa` (not even `# noqa: KNQ001`) and
 `--ignore-noqa` doesn't affect it; turn it off with `ignore` or
-`per-file-ignores`. It is not fixable. `konform check --add-noqa --reason
+`per-file-ignores`. It is not fixable. `konform check --add-noqa --noqa-reason
 "..."` fills in a missing reason on the comments it flags (see
 [Baselining](#baselining-with---add-noqa)). Once enabled, the default level
 is `error`; set `level = "warning"` to roll it out gradually.
@@ -559,16 +559,16 @@ only. [KNQ001](#knq001--noqa-justification) requires that explanation, and
 
 `konform check --add-noqa` appends `# noqa: CODE` to every line with a
 violation (merging into an existing `# noqa: ...`; a blanket `# noqa` is left
-as is). Pass `--reason` to record why, once, for the whole baseline:
+as is). Pass `--noqa-reason` to record why, once, for the whole baseline:
 
 ```sh
-konform check --add-noqa --reason "legacy, tracked in ABC-123" src/
+konform check --add-noqa --noqa-reason "legacy, tracked in ABC-123" src/
 # from os.path import join  # noqa: KIS001  # legacy, tracked in ABC-123
 ```
 
-With `--extend-select KNQ001`, `--reason` also fills in the reason of existing
+With `--extend-select KNQ001`, `--noqa-reason` also fills in the reason of existing
 `# noqa` comments that lack one. A reason that is already there is never
-overwritten. `--reason` requires `--add-noqa`.
+overwritten. `--noqa-reason` requires `--add-noqa`.
 
 ### Aliasing noqa codes
 

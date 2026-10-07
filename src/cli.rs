@@ -96,6 +96,10 @@ pub enum Command {
     /// List or explain rules.
     Rule(RuleArgs),
 
+    /// Print the syntax tree as KST rules see it (kinds, names, resolved
+    /// qualified names). Use it to write `match` conditions.
+    Ast(AstArgs),
+
     /// Print konform's version.
     Version,
 
@@ -364,6 +368,12 @@ pub struct InitArgs {
 // ---------------------------------------------------------------------------
 // rule
 // ---------------------------------------------------------------------------
+
+#[derive(Args, Debug)]
+pub struct AstArgs {
+    /// Python file to print the tree of.
+    pub file: std::path::PathBuf,
+}
 
 #[derive(Args, Debug)]
 pub struct RuleArgs {

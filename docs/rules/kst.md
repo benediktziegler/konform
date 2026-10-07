@@ -75,6 +75,17 @@ A `match` is a table whose conditions must **all** hold:
 | `not` | the node does not match |
 | `all` / `any` | lists of matchers; all / at least one must match |
 
+## Writing rules
+
+`konform ast FILE` prints the tree exactly as KST sees it. Each line is a node you can match with `kind`, with its position and the values the conditions compare against (`name`, import-resolved `qualname` / `callee`, `decorators`):
+
+```text
+$ konform ast tests/conftest.py
+import 1:1
+function 5:5  name=my_fixture  decorators=[pytest.fixture]
+  assert 8:5
+```
+
 ## Stopping the search
 
 `inside` and `has` accept `stop_by`, a matcher that ends the search: the node matching it is still tried first, nothing beyond it is. To ignore helper functions nested in a fixture:

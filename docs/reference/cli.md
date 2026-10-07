@@ -13,6 +13,7 @@ konform [OPTIONS] [COMMAND]
 | [`check`](#check) | Lint Python files for rule violations (default when no subcommand given) |
 | [`server`](#server) | Start the Language Server (communicates over stdin/stdout) |
 | [`rule`](#rule) | List or explain rules |
+| [`ast`](#ast) | Print the syntax tree as KST rules see it (kinds, names, resolved qualified names). Use it to write `match` conditions |
 | [`version`](#version) | Print konform's version |
 | [`clean`](#clean) | Clear any caches in the current directory or directories |
 | [`init`](#init) | Initialise konform in the current directory |
@@ -120,6 +121,20 @@ konform rule [OPTIONS]
 | ------ | ----------- |
 | `--list` | List all available rules and exit |
 | `--explain <EXPLAIN>` | Print full documentation for a rule code and exit.<br><br>Example: `konform rule --explain KIS001` |
+
+## ast
+
+Print the syntax tree as KST rules see it (kinds, names, resolved qualified names). Use it to write `match` conditions
+
+```text
+konform ast [OPTIONS] <FILE>
+```
+
+### Arguments
+
+| Argument | Description |
+| -------- | ----------- |
+| `<FILE>` | Python file to print the tree of |
 
 ## version
 

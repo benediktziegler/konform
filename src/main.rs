@@ -877,28 +877,35 @@ fn recheck_batch(files: &[PathBuf], ctx: &RecheckContext<'_>, cache: &mut Cache)
     }
 }
 
-fn run_rule(args: RuleArgs) {
+fn run_rule(args: RuleArgs, isolated: bool) {
+    // Same config discovery as `check`, so user-defined rules show up.
+    let config = if isolated {
+        config::Config::default()
+    } else {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        load_config(Some(&cwd), None)
+    };
     let probe = Arc::new(ModuleProbe::default());
-    let all = all_rules(probe, None);
+    let all = all_rules(probe, config.config_dir.clone());
+    let docs: Vec<rules::RuleDoc> = all
+        .iter()
+        .flat_map(|r| r.catalog(config.rule_config(r.config_name())))
+        .collect();
 
     if args.list {
-        for rule in &all {
+        for doc in &docs {
             println!(
                 "{:8}  {:<10}  {:<24}  {}  — {}",
-                rule.code(),
-                rule.category(),
-                rule.config_name(),
-                rule.name(),
-                rule.description(),
+                doc.code, doc.category, doc.config_name, doc.name, doc.description,
             );
         }
         std::process::exit(0);
     }
 
     if let Some(code) = &args.explain {
-        match all.iter().find(|r| r.code() == code.as_str()) {
-            Some(rule) => {
-                println!("{}", rule.explain());
+        match docs.iter().find(|d| d.code == code.as_str()) {
+            Some(doc) => {
+                println!("{}", doc.explain);
                 std::process::exit(0);
             }
             None => {
@@ -1205,7 +1212,7 @@ fn main() {
     match cli.command {
         Some(Command::Server) | None => lsp::run(),
         Some(Command::Check(a)) => run_check(*a, isolated),
-        Some(Command::Rule(a)) => run_rule(a),
+        Some(Command::Rule(a)) => run_rule(a, isolated),
         Some(Command::Version) => run_version(),
         Some(Command::Clean(a)) => run_clean(a),
         Some(Command::Init(a)) => run_init(a),

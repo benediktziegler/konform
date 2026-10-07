@@ -24,7 +24,7 @@
 //! * `sub_rules` — ordered list of refinements; the first sub-rule whose
 //!   pattern(s) match the already-flagged line overrides `message` and `help`
 
-use super::{has_noqa, FileContext, FixTarget, Rule};
+use super::{has_noqa, FileContext, FixTarget, Rule, RuleDoc};
 use crate::types::{Level, Violation};
 use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -139,6 +139,12 @@ impl CompiledSubRule {
 #[derive(Debug)]
 struct CompiledPattern {
     id: String,
+    /// Where the pattern came from: a file path, or `"inline config"`.
+    source: String,
+    /// The regex sources as written by the user (before `(?s)` prefixing).
+    raw_regexes: Vec<String>,
+    /// The `files` globs as written by the user (empty = every file).
+    raw_files: Vec<String>,
     message: String,
     help: Option<String>,
     /// One or more compiled regexes — a match on any fires this rule.
@@ -156,6 +162,32 @@ struct CompiledPattern {
 }
 
 impl CompiledPattern {
+    /// Human-readable summary printed by `konform rule --explain <ID>`.
+    fn explain(&self) -> String {
+        let mut out = format!("{} — {}\n\n", self.id, self.message);
+        out.push_str(&format!("  Level:   {}\n", self.level));
+        out.push_str(&format!("  Source:  {}\n", self.source));
+        let files = if self.raw_files.is_empty() {
+            "all files".to_owned()
+        } else {
+            self.raw_files.join(", ")
+        };
+        out.push_str(&format!("  Files:   {files}\n"));
+        for re in &self.raw_regexes {
+            out.push_str(&format!("  Pattern: {re}\n"));
+        }
+        if self.multiline {
+            out.push_str("  Match:   whole file (multiline)\n");
+        }
+        if let Some(r) = &self.replacement {
+            out.push_str(&format!("  Fix:     replace with `{r}`\n"));
+        }
+        if let Some(h) = &self.help {
+            out.push_str(&format!("  Help:    {h}\n"));
+        }
+        out
+    }
+
     /// Returns `true` when the compiled file-glob set matches `path`.
     ///
     /// Mirrors the multi-candidate strategy used by `engine::per_file_ignored`
@@ -435,6 +467,24 @@ impl Rule for KptRule {
         }
     }
 
+    fn catalog(&self, cfg: &toml::Value) -> Vec<RuleDoc> {
+        let patterns = self.patterns(cfg);
+        if patterns.is_empty() {
+            return vec![RuleDoc::of(self)];
+        }
+        patterns
+            .iter()
+            .map(|p| RuleDoc {
+                code: p.id.clone(),
+                category: self.category().to_owned(),
+                config_name: self.config_name().to_owned(),
+                name: "User pattern".to_owned(),
+                description: p.message.clone(),
+                explain: format!("{}\n{}", p.explain(), self.explain()),
+            })
+            .collect()
+    }
+
     fn explain(&self) -> String {
         r#"KPT001 — User-defined pattern rules
 
@@ -539,7 +589,7 @@ fn load_patterns(
                 .iter()
                 .filter_map(|v| RawPattern::deserialize(v.clone()).ok())
                 .collect();
-            return compile_patterns(raws, default_level);
+            return compile_patterns(raws, default_level, INLINE_SOURCE);
         }
     }
 
@@ -578,6 +628,8 @@ fn resolve_path(file_path: &str, config_dir: Option<&Path>) -> PathBuf {
     }
 }
 
+const INLINE_SOURCE: &str = "inline config";
+
 fn load_from_file(path: &Path, default_level: Level) -> Option<Vec<CompiledPattern>> {
     let content = std::fs::read_to_string(path).ok()?;
     let pf: PatternFile = if path.extension().is_some_and(|e| e == "yaml" || e == "yml") {
@@ -585,10 +637,18 @@ fn load_from_file(path: &Path, default_level: Level) -> Option<Vec<CompiledPatte
     } else {
         toml::from_str(&content).ok()?
     };
-    Some(compile_patterns(pf.rules, default_level))
+    Some(compile_patterns(
+        pf.rules,
+        default_level,
+        &path.display().to_string(),
+    ))
 }
 
-fn compile_patterns(raws: Vec<RawPattern>, default_level: Level) -> Vec<CompiledPattern> {
+fn compile_patterns(
+    raws: Vec<RawPattern>,
+    default_level: Level,
+    source: &str,
+) -> Vec<CompiledPattern> {
     raws.into_iter()
         .filter_map(|r| {
             // Destructure up-front so we can move fields independently.
@@ -699,6 +759,9 @@ fn compile_patterns(raws: Vec<RawPattern>, default_level: Level) -> Vec<Compiled
 
             Some(CompiledPattern {
                 id,
+                source: source.to_owned(),
+                raw_regexes: raw_patterns,
+                raw_files: file_globs,
                 message,
                 help,
                 regexes,
@@ -758,6 +821,63 @@ mod tests {
         let r = rule();
         assert_eq!(r.patterns(&a)[0].id, "KPT001");
         assert_eq!(r.patterns(&b)[0].id, "KPT002");
+    }
+
+    // ── catalog (rule --list / --explain) ──────────────────────────────────
+
+    #[test]
+    fn catalog_without_patterns_is_the_umbrella_rule() {
+        let docs = rule().catalog(&toml::Value::Table(toml::map::Map::new()));
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].code, "KPT001");
+    }
+
+    #[test]
+    fn catalog_lists_each_user_pattern_with_details() {
+        let cfg = cfg_with_rules(
+            r#"
+[[rules]]
+id      = "KPT030"
+message = "No x."
+pattern = '^x'
+files   = ["src/**/*.py"]
+level   = "error"
+help    = "Rename it."
+"#,
+        );
+        let docs = rule().catalog(&cfg);
+        assert_eq!(docs.len(), 1);
+        let d = &docs[0];
+        assert_eq!(d.code, "KPT030");
+        assert_eq!(d.description, "No x.");
+        for needle in [
+            "No x.",
+            "error",
+            "src/**/*.py",
+            "^x",
+            "inline config",
+            "Rename it.",
+        ] {
+            assert!(
+                d.explain.contains(needle),
+                "missing {needle:?}: {}",
+                d.explain
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_reports_pattern_file_as_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("konform_patterns.toml"),
+            "[[rules]]\nid = \"KPT031\"\nmessage = \"m\"\npattern = 'y'\n",
+        )
+        .unwrap();
+        let r = KptRule::new(Some(tmp.path().to_path_buf()));
+        let docs = r.catalog(&toml::Value::Table(toml::map::Map::new()));
+        assert_eq!(docs[0].code, "KPT031");
+        assert!(docs[0].explain.contains("konform_patterns.toml"));
     }
 
     // ── no patterns ────────────────────────────────────────────────────────

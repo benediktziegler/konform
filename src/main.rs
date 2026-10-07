@@ -250,7 +250,7 @@ fn inject_default_subcommand(args: &mut Vec<std::ffi::OsString>) {
     let first = args[i].to_string_lossy();
     let is_subcommand = matches!(
         first.as_ref(),
-        "check" | "server" | "rule" | "version" | "clean" | "init" | "help"
+        "check" | "server" | "rule" | "ast" | "version" | "clean" | "init" | "help"
     );
     let is_top_level_flag = matches!(first.as_ref(), "--help" | "-h" | "--version" | "-V");
     if !is_subcommand && !is_top_level_flag {
@@ -895,6 +895,28 @@ fn exit_on_config_errors(config: &config::Config, rules: &[Box<dyn rules::Rule>]
     std::process::exit(2);
 }
 
+fn run_ast(args: cli::AstArgs) {
+    let source = match std::fs::read_to_string(&args.file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "{} cannot read {}: {e}",
+                "error:".red().bold(),
+                args.file.display()
+            );
+            std::process::exit(2);
+        }
+    };
+    let ctx = rules::FileContext::from_source(args.file.clone(), source);
+    match rules::kst::dump_ast(&ctx) {
+        Ok(tree) => print!("{tree}"),
+        Err(e) => {
+            eprintln!("{} {}: {e}", "error:".red().bold(), args.file.display());
+            std::process::exit(1);
+        }
+    }
+}
+
 fn run_rule(args: RuleArgs, isolated: bool) {
     // Same config discovery as `check`, so user-defined rules show up.
     let config = if isolated {
@@ -1231,6 +1253,7 @@ fn main() {
         Some(Command::Server) | None => lsp::run(),
         Some(Command::Check(a)) => run_check(*a, isolated),
         Some(Command::Rule(a)) => run_rule(a, isolated),
+        Some(Command::Ast(a)) => run_ast(a),
         Some(Command::Version) => run_version(),
         Some(Command::Clean(a)) => run_clean(a),
         Some(Command::Init(a)) => run_init(a),

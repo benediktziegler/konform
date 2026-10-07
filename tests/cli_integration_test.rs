@@ -417,6 +417,37 @@ fn kst_invalid_rule_is_a_hard_error() {
 }
 
 #[test]
+fn ast_prints_kinds_and_resolved_names() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.py"), FIXTURE_SRC).unwrap();
+    std::fs::write(dir.path().join("bad.py"), "def (:\n").unwrap();
+
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["ast", "a.py"])
+        .assert()
+        .success()
+        .stdout(contains(
+            "function 5:5  name=my_fixture  decorators=[pytest.fixture]",
+        ))
+        .stdout(contains("  assert 8:5"));
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["ast", "bad.py"])
+        .assert()
+        .code(1)
+        .stderr(contains("syntax error"));
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["ast", "missing.py"])
+        .assert()
+        .code(2);
+}
+
+#[test]
 fn kst_rules_are_listed_and_explainable() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();

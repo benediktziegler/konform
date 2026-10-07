@@ -216,6 +216,18 @@ instead shows one warning (`window/showMessage`) and keeps running the valid
 rules. KST rules are not auto-fixable. `konform rule --explain KST000` documents
 the format.
 
+**Writing rules:** `konform ast FILE` prints the tree exactly as KST sees it.
+Each line is a node you can match with `kind`, with its position and the
+values the conditions compare against (`name`, import-resolved `qualname` /
+`callee`, `decorators`):
+
+```text
+$ konform ast tests/conftest.py
+import 1:1
+function 5:5  name=my_fixture  decorators=[pytest.fixture]
+  assert 8:5
+```
+
 The node kinds and condition keys above are **konform's own vocabulary**, not
 the parser's: each kind maps onto one or more parser node types inside
 konform (for example `assign` covers `=`, annotated and augmented

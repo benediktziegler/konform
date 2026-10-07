@@ -12,9 +12,12 @@
 //!
 //! See [`KstRule::explain`] for the rule format and matcher vocabulary.
 
+mod dump;
 mod matcher;
 mod node;
 mod resolve;
+
+pub use dump::dump as dump_ast;
 
 use super::kpt::{glob_matches, resolve_path};
 use super::scope::{build_line_starts, offset_to_line_col};

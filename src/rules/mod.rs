@@ -257,6 +257,14 @@ pub trait Rule: Send + Sync {
         Ok(None)
     }
 
+    /// Problems in this rule's user configuration (e.g. a KST rule that
+    /// failed to compile), one human-readable message each. Offending
+    /// entries are skipped by `check`; the CLI turns these into a hard error
+    /// and the LSP surfaces them to the user. Empty when the config is fine.
+    fn config_errors(&self, _cfg: &toml::Value) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Documentation entries this rule contributes to `konform rule --list`
     /// and `--explain`.
     ///

@@ -209,8 +209,11 @@ result (`fx = pytest.fixture(scope="session")`) is a value, not an alias.
 Resolution
 is file-wide and ignores local rebinding. Violations are reported at the
 matched node (the name for functions and classes, the first line for other
-blocks). An invalid rule is reported on stderr and skipped; the others still
-run. KST rules are not auto-fixable. `konform rule --explain KST000` documents
+blocks). An invalid rule is a hard error: `konform check` prints
+every problem (`error: <source>: rule 'KST002': <why>`) and exits 2 without
+linting, so a typo cannot produce a false green in CI. The language server
+instead shows one warning (`window/showMessage`) and keeps running the valid
+rules. KST rules are not auto-fixable. `konform rule --explain KST000` documents
 the format.
 
 The node kinds and condition keys above are **konform's own vocabulary**, not

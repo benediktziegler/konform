@@ -107,6 +107,12 @@ impl ServerProcess {
         let resp = read_message(&mut self.reader);
         assert_eq!(resp["id"], 1, "unexpected response id: {resp}");
         send(&mut self.stdin, "initialized", None, json!({}));
+        // The server registers its config/rule-file watchers right after the
+        // handshake (regression guard: this used to never happen).
+        let reg = read_message(&mut self.reader);
+        assert_eq!(reg["method"], "client/registerCapability", "{reg}");
+        let watchers = reg["params"]["registrations"][0]["registerOptions"]["watchers"].to_string();
+        assert!(watchers.contains("konform_rules.toml"), "{watchers}");
         resp
     }
 

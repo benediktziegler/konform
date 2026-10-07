@@ -412,6 +412,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
         );
     }
     let active_rules = all_rules(Arc::clone(&probe), config.config_dir.clone());
+    exit_on_config_errors(&config, &active_rules);
 
     let level_str = args.level.to_string();
     let cache_root = repo_root.join(&config.cache_dir);
@@ -876,6 +877,22 @@ fn recheck_batch(files: &[PathBuf], ctx: &RecheckContext<'_>, cache: &mut Cache)
     if violations.is_empty() {
         eprintln!("All checked files are clean \u{2713}");
     }
+}
+
+/// Invalid user rule definitions are a hard error (exit 2): silently skipping
+/// them would give false greens in CI.
+fn exit_on_config_errors(config: &config::Config, rules: &[Box<dyn rules::Rule>]) {
+    let errors: Vec<String> = rules
+        .iter()
+        .flat_map(|r| r.config_errors(config.rule_config(r.config_name())))
+        .collect();
+    if errors.is_empty() {
+        return;
+    }
+    for e in &errors {
+        eprintln!("{} {e}", "error:".red().bold());
+    }
+    std::process::exit(2);
 }
 
 fn run_rule(args: RuleArgs, isolated: bool) {

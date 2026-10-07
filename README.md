@@ -308,6 +308,15 @@ Each entry is resolved relative to the directory containing `pyproject.toml`
 src = ["lib"]
 ```
 
+## Caching
+
+Results are cached per file (keyed by mtime and permissions) in `cache-dir`.
+The cache is also keyed by the settings that affect results — `select`,
+`ignore`, the Python environment, rule config tables, `per-file-ignores`,
+`noqa-aliases` and the content of user-defined patterns (including
+`konform_patterns.toml`) — so editing any of them re-lints unchanged files.
+Use `--no-cache` to bypass it, or `konform clean` to delete it.
+
 ## Suppressing violations
 
 ```python

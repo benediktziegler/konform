@@ -16,6 +16,8 @@
 //! # Wire format
 //! Each cache file is a [`bincode`]-encoded [`PackageCache`] struct.
 
+use crate::config::Config;
+use crate::rules::Rule;
 use anyhow::Result;
 use bincode::{Decode, Encode};
 use seahash::SeaHasher;
@@ -156,12 +158,77 @@ impl FileCacheKey {
 // Settings hash — determines the cache file name
 // ---------------------------------------------------------------------------
 
+/// Hash of everything that changes lint results besides the file contents
+/// and the select/ignore/level settings: rule config tables, per-file
+/// ignores, noqa aliases, and each rule's own [`Rule::fingerprint`] (e.g. the
+/// content of loaded pattern files).
+pub fn rules_fingerprint(config: &Config, rules: &[Box<dyn Rule>]) -> u64 {
+    let mut h = SeaHasher::new();
+
+    let mut tables: Vec<_> = config.lint.rules.iter().collect();
+    tables.sort_by_key(|(name, _)| name.as_str());
+    for (name, value) in tables {
+        name.hash(&mut h);
+        hash_toml(value, &mut h);
+    }
+
+    let mut ignores: Vec<_> = config.lint.per_file_ignores.iter().collect();
+    ignores.sort_by_key(|(glob, _)| glob.as_str());
+    for (glob, codes) in ignores {
+        glob.hash(&mut h);
+        let mut codes = codes.clone();
+        codes.sort();
+        codes.hash(&mut h);
+    }
+
+    let mut aliases: Vec<_> = config.lint.noqa_aliases.iter().collect();
+    aliases.sort();
+    aliases.hash(&mut h);
+
+    for rule in rules {
+        rule.code().hash(&mut h);
+        rule.fingerprint(config.rule_config(rule.config_name()))
+            .hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Feed `value` into `h` with table keys in sorted order, so the result does
+/// not depend on map iteration order.
+fn hash_toml(value: &toml::Value, h: &mut SeaHasher) {
+    use toml::Value;
+    match value {
+        Value::String(s) => (0u8, s).hash(h),
+        Value::Integer(i) => (1u8, i).hash(h),
+        Value::Float(f) => (2u8, f.to_bits()).hash(h),
+        Value::Boolean(b) => (3u8, b).hash(h),
+        Value::Datetime(d) => (4u8, d.to_string()).hash(h),
+        Value::Array(a) => {
+            5u8.hash(h);
+            a.len().hash(h);
+            for v in a {
+                hash_toml(v, h);
+            }
+        }
+        Value::Table(t) => {
+            6u8.hash(h);
+            let mut entries: Vec<_> = t.iter().collect();
+            entries.sort_by_key(|(k, _)| k.as_str());
+            for (k, v) in entries {
+                k.hash(h);
+                hash_toml(v, h);
+            }
+        }
+    }
+}
+
 fn settings_hash(
     package_root: &Path,
     select: &[String],
     ignore: &[String],
     level: &str,
     env_fingerprint: u64,
+    rules_fingerprint: u64,
 ) -> u64 {
     let mut h = SeaHasher::new();
     for component in package_root.components() {
@@ -181,6 +248,8 @@ fn settings_hash(
     // now-stale `sys.path`. The old file is simply orphaned and swept up by
     // the existing 30-day eviction/pruning of unused cache directories.
     env_fingerprint.hash(&mut h);
+    // Rule config and external rule files (see `rules_fingerprint`).
+    rules_fingerprint.hash(&mut h);
     h.finish()
 }
 
@@ -233,6 +302,10 @@ impl Cache {
     /// checks to a fresh cache file rather than replaying stale
     /// module-existence results. Pass `0` when no probe-dependent rule is in
     /// use (e.g. in tests).
+    ///
+    /// `rules_fingerprint` should be [`rules_fingerprint`] so that editing a
+    /// rule's config table or pattern file starts from a fresh cache file.
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         package_root: PathBuf,
         cache_root: &Path,
@@ -241,8 +314,16 @@ impl Cache {
         select: &[String],
         ignore: &[String],
         env_fingerprint: u64,
+        rules_fingerprint: u64,
     ) -> Self {
-        let hash = settings_hash(&package_root, select, ignore, level, env_fingerprint);
+        let hash = settings_hash(
+            &package_root,
+            select,
+            ignore,
+            level,
+            env_fingerprint,
+            rules_fingerprint,
+        );
         let path = cache_root.join(VERSION).join(format!("{hash:016x}"));
         let root_str = package_root.to_string_lossy().into_owned();
 
@@ -384,7 +465,7 @@ mod tests {
         let sel: Vec<String> = select.iter().map(|s| s.to_string()).collect();
         let ign: Vec<String> = ignore.iter().map(|s| s.to_string()).collect();
         let _ = init(tmp);
-        Cache::open(tmp.to_path_buf(), tmp, false, "error", &sel, &ign, 0)
+        Cache::open(tmp.to_path_buf(), tmp, false, "error", &sel, &ign, 0, 0)
     }
 
     // ── Environment fingerprint ───────────────────────────────────────────
@@ -398,8 +479,8 @@ mod tests {
         let sel: Vec<String> = vec![];
         let ign: Vec<String> = vec![];
 
-        let hash_before = settings_hash(tmp.path(), &sel, &ign, "error", 111);
-        let hash_after = settings_hash(tmp.path(), &sel, &ign, "error", 222);
+        let hash_before = settings_hash(tmp.path(), &sel, &ign, "error", 111, 0);
+        let hash_after = settings_hash(tmp.path(), &sel, &ign, "error", 222, 0);
 
         assert_ne!(
             hash_before, hash_after,
@@ -415,8 +496,8 @@ mod tests {
         let sel: Vec<String> = vec![];
         let ign: Vec<String> = vec![];
 
-        let hash_a = settings_hash(tmp.path(), &sel, &ign, "error", 42);
-        let hash_b = settings_hash(tmp.path(), &sel, &ign, "error", 42);
+        let hash_a = settings_hash(tmp.path(), &sel, &ign, "error", 42, 0);
+        let hash_b = settings_hash(tmp.path(), &sel, &ign, "error", 42, 0);
 
         assert_eq!(hash_a, hash_b, "identical inputs must hash identically");
     }
@@ -440,6 +521,7 @@ mod tests {
             &[],
             &[],
             111,
+            0,
         );
         cache.set_linted(&file, &key, &[]);
         cache.persist().unwrap();
@@ -456,6 +538,7 @@ mod tests {
             &[],
             &[],
             222,
+            0,
         );
         assert!(
             cache2.get(&file, &key).is_none(),
@@ -635,7 +718,7 @@ mod tests {
             let _ = init(tmp.path());
             let sel: Vec<String> = vec![];
             let ign: Vec<String> = vec![];
-            let hash = settings_hash(tmp.path(), &sel, &ign, "error", 0);
+            let hash = settings_hash(tmp.path(), &sel, &ign, "error", 0, 0);
             let path = tmp.path().join(VERSION).join(format!("{hash:016x}"));
             let mut pkg = PackageCache {
                 package_root: tmp.path().to_string_lossy().into_owned(),
@@ -664,5 +747,89 @@ mod tests {
             c2.get(&file, &key).is_none(),
             "old entry should have been evicted"
         );
+    }
+}
+
+#[cfg(test)]
+mod rules_fingerprint_tests {
+    use super::*;
+    use crate::module_probe::ModuleProbe;
+    use crate::rules::all_rules;
+    use std::sync::Arc;
+
+    fn fp(config: &Config) -> u64 {
+        let rules = all_rules(Arc::new(ModuleProbe::default()), config.config_dir.clone());
+        rules_fingerprint(config, &rules)
+    }
+
+    fn table(src: &str) -> toml::Value {
+        toml::from_str(src).unwrap()
+    }
+
+    #[test]
+    fn stable_for_identical_config() {
+        assert_eq!(fp(&Config::default()), fp(&Config::default()));
+    }
+
+    #[test]
+    fn rule_table_edit_changes_fingerprint() {
+        let mut a = Config::default();
+        a.lint
+            .rules
+            .insert("module-only-imports".into(), table("level = \"error\""));
+        let mut b = a.clone();
+        b.lint
+            .rules
+            .insert("module-only-imports".into(), table("level = \"warning\""));
+        assert_ne!(fp(&a), fp(&b));
+    }
+
+    #[test]
+    fn table_key_order_does_not_change_fingerprint() {
+        let mut a = Config::default();
+        a.lint.rules.insert("t".into(), table("a = 1\nb = 2"));
+        let mut b = Config::default();
+        b.lint.rules.insert("t".into(), table("b = 2\na = 1"));
+        assert_eq!(fp(&a), fp(&b));
+    }
+
+    #[test]
+    fn per_file_ignores_edit_changes_fingerprint() {
+        let a = Config::default();
+        let mut b = Config::default();
+        b.lint
+            .per_file_ignores
+            .insert("tests/**".into(), vec!["KIS001".into()]);
+        assert_ne!(fp(&a), fp(&b));
+    }
+
+    #[test]
+    fn noqa_aliases_edit_changes_fingerprint() {
+        let a = Config::default();
+        let mut b = Config::default();
+        b.lint.noqa_aliases.insert("IS001".into(), "KIS001".into());
+        assert_ne!(fp(&a), fp(&b));
+    }
+
+    #[test]
+    fn pattern_file_edit_changes_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("konform_patterns.toml");
+        let config = Config {
+            config_dir: Some(dir.path().to_path_buf()),
+            ..Config::default()
+        };
+        let write = |msg: &str| {
+            std::fs::write(
+                &file,
+                format!("[[rules]]\nid = \"KPT050\"\nmessage = \"{msg}\"\npattern = 'x'\n"),
+            )
+            .unwrap();
+        };
+        write("one");
+        let before = fp(&config);
+        assert_eq!(before, fp(&config), "unchanged file => unchanged hash");
+        write("two");
+        assert_ne!(before, fp(&config));
     }
 }

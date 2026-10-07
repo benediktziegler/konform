@@ -1176,3 +1176,45 @@ fn editing_kst_rules_file_invalidates_cache() {
     let after = run_check_cached(dir.path());
     assert!(after.contains("warning[KST001]"), "stale cache: {after}");
 }
+
+/// Placeholder reasons and exempt codes come from
+/// `[tool.konform.lint.noqa-justification]`.
+#[test]
+fn knq001_placeholder_and_exempt_codes_are_configurable() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        r#"
+[tool.konform.lint]
+extend-select = ["KNQ001"]
+
+[tool.konform.lint.noqa-justification]
+extend-placeholder-reasons = ["legacy"]
+exempt-codes = ["KIS001"]
+"#,
+    )
+    .unwrap();
+    let run = |src: &str| {
+        std::fs::write(dir.path().join("mod.py"), src).unwrap();
+        Command::cargo_bin("konform")
+            .unwrap()
+            .current_dir(dir.path())
+            .args(["check", "--no-cache", "mod.py"])
+            .assert()
+    };
+
+    // Exempt: no reason needed, and a placeholder is fine too.
+    run("from os.path import join  # noqa: KIS001\n").success();
+    run("from os.path import join  # noqa: KIS001  # ok\n").success();
+    // Not exempt: bare noqa, and codes mixed with a non-exempt one.
+    run("x = 1  # noqa\n")
+        .failure()
+        .stderr(contains("without a reason"));
+    run("from os.path import join  # noqa: KIS001, E501\n").failure();
+    // Default and extended placeholders are both rejected.
+    run("x = 1  # noqa: E501  # ok\n")
+        .failure()
+        .stderr(contains("says nothing"));
+    run("x = 1  # noqa: E501  # Legacy\n").failure();
+    run("x = 1  # noqa: E501  # legacy api\n").success();
+}

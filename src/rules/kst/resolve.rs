@@ -4,24 +4,63 @@
 //! `@fixture`, `@pt.fixture` and `@pytest.fixture` all resolve to
 //! `pytest.fixture` given the right imports.
 //!
-//! The import table is file-wide and scope-agnostic: every `import` /
+//! The table is file-wide and scope-agnostic: every `import` /
 //! `from … import` anywhere in the file contributes, and local rebinding is
 //! not tracked. That is a deliberate trade-off for a linter-grade check.
-
+//!
+//! Plain alias assignments (`fx = pytest.fixture`, `fx = pt.fixture`) count
+//! like imports. They are deliberately conservative: only `name = <dotted
+//! name>` qualifies (never a call result, which is a value, not an alias),
+//! and a name that is assigned anything else, or two different aliases,
+//! anywhere in the file is not treated as an alias at all.
+//!
 //! Together with `node.rs` this is the only KST code that sees parser types;
 //! the public API here speaks [`Node`].
 
 use super::node::{walk, Flow, Node, Visitor};
-use ruff_python_ast::{AnyNodeRef, Expr, ExprAttribute, ExprName};
-use std::collections::HashMap;
+use ruff_python_ast::{AnyNodeRef, Expr, ExprAttribute, ExprContext, ExprName};
+use std::collections::{HashMap, HashSet};
 
 /// Alias → fully qualified name, e.g. `fx` → `pytest.fixture`.
 #[derive(Debug, Default)]
 pub(super) struct Imports(HashMap<String, String>);
 
-struct Collector<'m>(&'m mut HashMap<String, String>);
+#[derive(Default)]
+struct Collector {
+    imports: Imports,
+    /// Names bound by an alias assignment (as opposed to an import).
+    assigned: HashSet<String>,
+    /// Names also bound to something that is not a single consistent alias.
+    tainted: HashSet<String>,
+}
 
-impl<'a> Visitor<'a> for Collector<'_> {
+impl Collector {
+    fn assign(&mut self, targets: &[&Expr], value: Option<&Expr>) {
+        let alias = match (targets, value) {
+            ([Expr::Name(_)], Some(v @ (Expr::Name(_) | Expr::Attribute(_)))) => {
+                self.imports.qualname(v)
+            }
+            _ => None,
+        };
+        for target in targets {
+            let Expr::Name(name) = target else { continue };
+            let id = name.id.as_str();
+            match &alias {
+                Some(q) if self.imports.0.get(id).is_none_or(|prev| prev == q) => {
+                    if !self.imports.0.contains_key(id) {
+                        self.assigned.insert(id.to_owned());
+                    }
+                    self.imports.0.insert(id.to_owned(), q.clone());
+                }
+                _ => {
+                    self.tainted.insert(id.to_owned());
+                }
+            }
+        }
+    }
+}
+
+impl<'a> Visitor<'a> for Collector {
     fn enter(&mut self, node: Node<'a>) -> Flow {
         match node.raw() {
             AnyNodeRef::StmtImport(import) => {
@@ -29,7 +68,8 @@ impl<'a> Visitor<'a> for Collector<'_> {
                     // `import a.b` binds `a` to itself, which resolution
                     // already assumes; only `import a.b as x` needs a row.
                     if let Some(asname) = &alias.asname {
-                        self.0
+                        self.imports
+                            .0
                             .insert(asname.as_str().to_owned(), alias.name.as_str().to_owned());
                     }
                 }
@@ -45,12 +85,18 @@ impl<'a> Visitor<'a> for Collector<'_> {
                         continue;
                     }
                     let bound = alias.asname.as_ref().unwrap_or(&alias.name);
-                    self.0.insert(
+                    self.imports.0.insert(
                         bound.as_str().to_owned(),
                         format!("{prefix}{}", alias.name.as_str()),
                     );
                 }
             }
+            AnyNodeRef::StmtAssign(a) => {
+                let targets: Vec<&Expr> = a.targets.iter().collect();
+                self.assign(&targets, Some(&a.value));
+            }
+            AnyNodeRef::StmtAnnAssign(a) => self.assign(&[&a.target], a.value.as_deref()),
+            AnyNodeRef::StmtAugAssign(a) => self.assign(&[&a.target], None),
             _ => {}
         }
         Flow::Descend
@@ -61,14 +107,25 @@ impl<'a> Visitor<'a> for Collector<'_> {
 
 impl Imports {
     pub(super) fn collect(root: Node<'_>) -> Self {
-        let mut table = HashMap::new();
-        walk(root, &mut Collector(&mut table));
-        Self(table)
+        let mut collector = Collector::default();
+        walk(root, &mut collector);
+        let Collector {
+            mut imports,
+            assigned,
+            tainted,
+        } = collector;
+        for name in assigned.intersection(&tainted) {
+            imports.0.remove(name);
+        }
+        imports
     }
 
-    /// Resolved dotted name of a `name` / `attribute` node.
+    /// Resolved dotted name of a `name` / `attribute` node. A name that is
+    /// being bound (assignment target, `del`) is not a reference, so it
+    /// resolves to itself rather than through the alias table.
     pub(super) fn node_qualname(&self, node: Node<'_>) -> Option<String> {
         match node.raw() {
+            AnyNodeRef::ExprName(n) if n.ctx != ExprContext::Load => Some(n.id.to_string()),
             AnyNodeRef::ExprName(n) => Some(self.name(n)),
             AnyNodeRef::ExprAttribute(a) => self.attribute(a),
             _ => None,
@@ -217,6 +274,55 @@ mod tests {
     fn non_name_expressions_do_not_resolve() {
         assert_eq!(resolve("(1).real"), None);
         assert_eq!(resolve("a()[0]"), None);
+    }
+
+    #[test]
+    fn alias_assignment_resolves_like_an_import() {
+        assert_eq!(
+            resolve("import pytest\nfx = pytest.fixture\nfx").as_deref(),
+            Some("pytest.fixture")
+        );
+        assert_eq!(
+            resolve("from pytest import fixture\nfx = fixture\nfx").as_deref(),
+            Some("pytest.fixture")
+        );
+    }
+
+    #[test]
+    fn alias_chains_follow_source_order() {
+        assert_eq!(
+            resolve("import pytest\na = pytest.fixture\nb = a\nb").as_deref(),
+            Some("pytest.fixture")
+        );
+    }
+
+    #[test]
+    fn call_results_are_values_not_aliases() {
+        assert_eq!(
+            resolve("import pytest\nclient = pytest.fixture()\nclient").as_deref(),
+            Some("client")
+        );
+    }
+
+    #[test]
+    fn rebinding_in_any_order_disables_the_alias() {
+        for src in [
+            "import pytest\nfx = pytest.fixture\nfx = 1\nfx",
+            "import pytest\nfx = 1\nfx = pytest.fixture\nfx",
+            "import pytest\nimport os\nfx = pytest.fixture\nfx = os.path\nfx",
+            "import pytest\nfx = pytest.fixture\nfx += 1\nfx",
+            "import pytest\nfx = fy = pytest.fixture\nfx",
+        ] {
+            assert_eq!(resolve(src).as_deref(), Some("fx"), "{src}");
+        }
+    }
+
+    #[test]
+    fn assigning_the_same_alias_twice_is_fine() {
+        assert_eq!(
+            resolve("import pytest\nfx = pytest.fixture\nfx = pytest.fixture\nfx").as_deref(),
+            Some("pytest.fixture")
+        );
     }
 
     #[test]

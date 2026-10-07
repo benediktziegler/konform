@@ -241,9 +241,9 @@ fn add_noqa_reason_requires_add_noqa_and_text() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("mod.py"), "import os\n").unwrap();
 
-    konform_in(dir.path(), &["--reason", "why", "mod.py"]).failure();
+    konform_in(dir.path(), &["--noqa-reason", "why", "mod.py"]).failure();
     for bad in ["", "   ", "...", "two\nlines"] {
-        konform_in(dir.path(), &["--add-noqa", "--reason", bad, "mod.py"]).failure();
+        konform_in(dir.path(), &["--add-noqa", "--noqa-reason", bad, "mod.py"]).failure();
     }
 }
 
@@ -257,7 +257,7 @@ fn add_noqa_with_reason_records_it_in_its_own_comment() {
         dir.path(),
         &[
             "--add-noqa",
-            "--reason",
+            "--noqa-reason",
             "legacy, tracked in ABC-123",
             "mod.py",
         ],
@@ -274,7 +274,7 @@ fn add_noqa_with_reason_records_it_in_its_own_comment() {
         dir.path(),
         &[
             "--add-noqa",
-            "--reason",
+            "--noqa-reason",
             "other",
             "--extend-select",
             "KNQ001",
@@ -299,7 +299,11 @@ fn add_noqa_with_reason_fills_reasonless_comments_flagged_by_knq001() {
     .unwrap();
 
     // Without KNQ001 selected only real violations are touched.
-    konform_in(dir.path(), &["--add-noqa", "--reason", "legacy", "mod.py"]).success();
+    konform_in(
+        dir.path(),
+        &["--add-noqa", "--noqa-reason", "legacy", "mod.py"],
+    )
+    .success();
     assert_eq!(
         std::fs::read_to_string(&file).unwrap(),
         "from os.path import join  # noqa: KIS001\nx = 1  # noqa\ny = 2  # noqa: E501  # kept\n"
@@ -309,7 +313,7 @@ fn add_noqa_with_reason_fills_reasonless_comments_flagged_by_knq001() {
         dir.path(),
         &[
             "--add-noqa",
-            "--reason",
+            "--noqa-reason",
             "legacy",
             "--extend-select",
             "KNQ001",

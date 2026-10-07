@@ -1,0 +1,60 @@
+site_name: konform
+site_description: Multi-rule Python linter and language server — fast, configurable, CI-ready
+site_url: https://benediktziegler.github.io/konform/
+repo_url: https://github.com/benediktziegler/konform
+repo_name: benediktziegler/konform
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; Benedikt Ziegler
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: { icon: material/weather-night, name: Switch to dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: { icon: material/weather-sunny, name: Switch to light mode }
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: installation.md
+      - Usage: usage.md
+      - Configuration: configuration.md
+      - Suppressing violations: suppressing.md
+  - Rules:
+      - Overview: rules/index.md
+      - KIS001 — Module-only imports: rules/kis001.md
+      - KIS002 — Import alias policy: rules/kis002.md
+      - KPT — User-defined patterns: rules/kpt.md
+  - Editors: editors.md
+  - Development: contributing.md
+  - Changelog: changelog.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn

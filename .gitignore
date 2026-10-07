@@ -27,3 +27,6 @@ dist/
 
 # Python
 .coverage
+
+# MkDocs build output
+site/

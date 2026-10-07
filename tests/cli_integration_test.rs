@@ -417,6 +417,42 @@ fn kst_invalid_rule_is_a_hard_error() {
 }
 
 #[test]
+fn rule_test_runs_embedded_snippets() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();
+    let run = |rules: &str| {
+        std::fs::write(dir.path().join("konform_rules.toml"), rules).unwrap();
+        Command::cargo_bin("konform")
+            .unwrap()
+            .current_dir(dir.path())
+            .args(["rule", "--test"])
+            .assert()
+    };
+    let passing = format!(
+        "{NO_ASSERT_RULE}\n[rules.test]\nvalid = [\"x = 1\\n\"]\ninvalid = [\"import pytest\\n@pytest.fixture\\ndef f():\\n    assert 1\\n\"]\n"
+    );
+    run(&passing)
+        .success()
+        .stdout(contains("KST001").and(contains("2 passed")));
+
+    let failing = passing.replace(
+        "valid = [\"x = 1\\n\"]",
+        "valid = [\"import pytest\\n@pytest.fixture\\ndef f():\\n    assert 1\\n\"]",
+    );
+    run(&failing)
+        .code(1)
+        .stdout(contains("FAIL").and(contains("valid[0]: expected no violation")));
+
+    run(NO_ASSERT_RULE)
+        .success()
+        .stdout(contains("no test.valid"));
+
+    run(&format!("{NO_ASSERT_RULE}\n[rules.test]\nbogus = 1\n"))
+        .code(2)
+        .stderr(contains("unknown field `bogus`"));
+}
+
+#[test]
 fn ast_prints_kinds_and_resolved_names() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.py"), FIXTURE_SRC).unwrap();

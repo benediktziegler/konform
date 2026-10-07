@@ -21,7 +21,7 @@ pub use dump::dump as dump_ast;
 
 use super::kpt::{glob_matches, resolve_path};
 use super::scope::{build_line_starts, offset_to_line_col};
-use super::{has_noqa, FileContext, Rule, RuleDoc};
+use super::{has_noqa, FileContext, Rule, RuleDoc, SelfTestReport};
 use crate::types::{Level, Violation};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use matcher::{Matcher, RawMatcher};
@@ -47,6 +47,21 @@ struct RawRule {
     files: Vec<String>,
     level: Option<String>,
     help: Option<String>,
+    #[serde(default)]
+    test: RawTests,
+}
+
+/// Embedded self-tests, run by `konform rule --test`. They never affect what
+/// a rule reports, so they are not part of the cache fingerprint.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTests {
+    /// Snippets the rule must not flag.
+    #[serde(default)]
+    valid: Vec<String>,
+    /// Snippets the rule must flag at least once.
+    #[serde(default)]
+    invalid: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +81,7 @@ struct CompiledRule {
     raw_files: Vec<String>,
     raw: RawMatcher,
     matcher: Matcher,
+    tests: RawTests,
 }
 
 impl CompiledRule {
@@ -200,6 +216,7 @@ fn compile_rules(
             files: raw_files,
             level,
             help,
+            test,
         } = raw;
         let mut skip = |why: &str| errors.push(format!("{source}: rule '{id}': {why}"));
 
@@ -253,6 +270,7 @@ fn compile_rules(
             raw_files,
             raw: raw_matcher,
             matcher,
+            tests: test,
         });
     }
     out
@@ -342,6 +360,22 @@ impl<'a> Visitor<'a> for Walker<'a> {
     }
 }
 
+/// Run `active` over the (valid-syntax) tree of `ctx` in a single traversal.
+fn run_rules(ctx: &FileContext, active: Vec<&CompiledRule>) -> Vec<Violation> {
+    let root = Node::root(ctx.parsed().syntax());
+    let mut walker = Walker {
+        ctx,
+        active,
+        imports: Imports::collect(root),
+        noqa: ctx.noqa_lines(),
+        line_starts: build_line_starts(&ctx.source),
+        path: Vec::new(),
+        out: Vec::new(),
+    };
+    walk(root, &mut walker);
+    walker.out
+}
+
 impl Rule for KstRule {
     fn code(&self) -> &str {
         "KST000"
@@ -391,18 +425,52 @@ impl Rule for KstRule {
             return vec![];
         }
 
-        let root = Node::root(ctx.parsed().syntax());
-        let mut walker = Walker {
-            ctx,
-            active,
-            imports: Imports::collect(root),
-            noqa: ctx.noqa_lines(),
-            line_starts: build_line_starts(&ctx.source),
-            path: Vec::new(),
-            out: Vec::new(),
-        };
-        walk(root, &mut walker);
-        walker.out
+        run_rules(ctx, active)
+    }
+
+    fn self_tests(&self, cfg: &toml::Value) -> Vec<SelfTestReport> {
+        self.rules(cfg)
+            .iter()
+            .map(|rule| {
+                let mut report = SelfTestReport {
+                    code: rule.id.clone(),
+                    passed: 0,
+                    failures: vec![],
+                };
+                let cases = rule
+                    .tests
+                    .valid
+                    .iter()
+                    .enumerate()
+                    .map(|(i, src)| (format!("valid[{i}]"), src, false))
+                    .chain(
+                        rule.tests
+                            .invalid
+                            .iter()
+                            .enumerate()
+                            .map(|(i, src)| (format!("invalid[{i}]"), src, true)),
+                    );
+                for (label, src, want_violation) in cases {
+                    // `files` is deliberately ignored: a snippet has no path.
+                    let ctx = FileContext::from_source(PathBuf::from("snippet.py"), src.clone());
+                    let outcome = if !ctx.has_valid_syntax() {
+                        Err("snippet does not parse".to_owned())
+                    } else {
+                        let hits = run_rules(&ctx, vec![rule]).len();
+                        match (want_violation, hits) {
+                            (true, 0) => Err("expected a violation, found none".to_owned()),
+                            (false, 0) | (true, _) => Ok(()),
+                            (false, n) => Err(format!("expected no violation, found {n}")),
+                        }
+                    };
+                    match outcome {
+                        Ok(()) => report.passed += 1,
+                        Err(why) => report.failures.push(format!("{label}: {why}")),
+                    }
+                }
+                report
+            })
+            .collect()
     }
 
     fn config_errors(&self, cfg: &toml::Value) -> Vec<String> {
@@ -458,6 +526,14 @@ impl Rule for KstRule {
 
   Ids must start with KST. Each violation is reported at the matched node
   (the name for functions and classes, the first line for other blocks).
+
+  Rules can carry self-tests, run by `konform rule --test`. Every `valid`
+  snippet must produce no violation of the rule, every `invalid` one at least
+  one (`files` is ignored for snippets):
+
+    [rules.test]
+    valid   = ["@pytest.fixture\ndef f():\n    return 1"]
+    invalid = ["@pytest.fixture\ndef f():\n    assert 1"]
 
   A matcher is a table; every condition in it must hold:
     kind           node kind, or a list of kinds (any of):
@@ -1028,6 +1104,73 @@ match = { all = [{ kind = "function" }, { name = "^_" }] }
         );
         assert_ne!(a, r.fingerprint(&cfg(&one("match = { kind = \"raise\" }"))));
         assert_ne!(a, r.fingerprint(&cfg("")));
+    }
+
+    const TESTED_RULE: &str = r#"
+[[rules]]
+id = "KST001"
+message = "no assert in fixtures"
+files = ["never/matches/**"]
+match = { kind = "assert", inside = { kind = "function", decorated_with = "pytest.fixture" } }
+
+[rules.test]
+valid = ["import pytest\n@pytest.fixture\ndef f():\n    return 1\n"]
+invalid = ["import pytest\n@pytest.fixture\ndef f():\n    assert 1\n"]
+"#;
+
+    #[test]
+    fn self_tests_pass_and_ignore_the_files_glob() {
+        let reports = rule().self_tests(&cfg(TESTED_RULE));
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].code, "KST001");
+        assert_eq!(reports[0].passed, 2);
+        assert!(reports[0].failures.is_empty(), "{:?}", reports[0]);
+    }
+
+    #[test]
+    fn self_tests_report_each_failing_case() {
+        let toml = r#"
+[[rules]]
+id = "KST001"
+message = "m"
+match = { kind = "assert" }
+
+[rules.test]
+valid = ["assert 1\n", "x = 1\n"]
+invalid = ["x = 1\n", "def (:\n", "assert 1\n"]
+"#;
+        let r = &rule().self_tests(&cfg(toml))[0];
+        assert_eq!(r.passed, 2, "{r:?}");
+        assert_eq!(
+            r.failures,
+            [
+                "valid[0]: expected no violation, found 1",
+                "invalid[0]: expected a violation, found none",
+                "invalid[1]: snippet does not parse",
+            ]
+        );
+    }
+
+    #[test]
+    fn rules_without_tests_report_nothing_to_run() {
+        let r = &rule().self_tests(&cfg(&one("match = { kind = \"assert\" }")))[0];
+        assert_eq!((r.passed, r.failures.len()), (0, 0));
+    }
+
+    #[test]
+    fn unknown_test_key_is_a_config_error() {
+        let toml = one("match = { kind = \"assert\" }\n[rules.test]\nvalids = []");
+        assert_eq!(rule().config_errors(&cfg(&toml)).len(), 1);
+    }
+
+    #[test]
+    fn self_tests_do_not_change_the_fingerprint() {
+        let bare = one("match = { kind = \"assert\" }");
+        let tested = format!("{bare}[rules.test]\nvalid = [\"x = 1\\n\"]\n");
+        assert_eq!(
+            rule().fingerprint(&cfg(&bare)),
+            rule().fingerprint(&cfg(&tested))
+        );
     }
 
     #[test]

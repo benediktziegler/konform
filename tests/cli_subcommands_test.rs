@@ -224,8 +224,10 @@ fn add_noqa_annotates_violating_lines_and_merges_existing_codes() {
          print(join(\"a\", sep))\n"
     );
 
-    // The annotated file is now clean.
-    check(dir.path(), &["mod.py"]).assert().success();
+    // The annotated file is now clean (KNQ001 would ask for reasons).
+    check(dir.path(), &["--ignore", "KNQ001", "mod.py"])
+        .assert()
+        .success();
 }
 
 #[test]

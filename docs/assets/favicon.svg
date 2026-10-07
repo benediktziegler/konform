@@ -1,8 +1,28 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#00897b"/>
-  <g fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M22 14v36"/>
-    <path d="M46 18 22 34"/>
-    <path d="M30 36l16 14"/>
+  <defs>
+    <linearGradient id="bg" x1="8" y1="0" x2="56" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#26c6a8"/>
+      <stop offset="1" stop-color="#00695c"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="18" fill="url(#bg)"/>
+  <rect width="64" height="64" rx="18" fill="url(#sheen)"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="10">
+    <g stroke="#003d33" stroke-opacity=".35" transform="translate(0 2.5)">
+      <path d="M21 14v36"/>
+      <path d="M44 17 21 34"/>
+      <path d="M29 35l16 15"/>
+    </g>
+    <g stroke="#fff">
+      <path d="M21 14v36"/>
+      <path d="M44 17 21 34"/>
+      <path d="M29 35l16 15"/>
+    </g>
   </g>
+  <circle cx="49" cy="15" r="6" fill="#ffd54f"/>
+  <path d="M46.2 15.2l2 2 3.6-3.9" fill="none" stroke="#5d4300" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

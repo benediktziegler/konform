@@ -36,21 +36,89 @@ Flags `from X import Y as Z` when the alias `Z` buys nothing -- `Y` isn't
 bound to anything else in the module, so the alias only adds a layer of
 indirection.
 
+**Why:** an alias that isn't needed gives one thing two names. Readers have
+to learn that `bar_baz` is really `foo.bar.baz`, grepping for `baz` misses
+its uses, and the same import can end up aliased differently from file to
+file. Aliases earn their place when they resolve a real name clash; this rule
+flags the ones that don't.
+
 ```python
 # Bad — KIS002: `bar_baz` isn't needed, nothing else is named `baz`
 from foo.bar import baz as bar_baz
 
+bar_baz()
+
 # Good
 from foo.bar import baz
+
+baz()
 ```
 
-The alias is left alone when it's actually doing something: renaming away a
-collision with a local name or another import, a leading-underscore "don't
-re-export this" marker, a self-alias (`import x as x`, which is Ruff's
-`PLC0414` territory), or a relative import (`from . import x as y`, which has
-no stable module identity to key a collision check on). Plain
-`import X as Z` statements are out of scope too -- dropping the alias there
-changes what gets bound, unlike `from X import Y as Z`.
+#### What the fix does
+
+With `--fix --unsafe-fixes`, konform drops the alias and renames every use of
+it back to the original name:
+
+```python
+# Before
+from foo.bar import baz as bar_baz
+
+def run():
+    return bar_baz()
+
+# After
+from foo.bar import baz
+
+def run():
+    return baz()
+```
+
+#### When an alias is legitimate (not flagged)
+
+```python
+# The alias avoids a clash with a local name or another import
+from foo.bar import baz as bar_baz
+baz = compute()                 # `baz` is already taken here
+
+# Several imports of the same name from different modules: the aliases keep
+# them apart
+from foo.bar import baz as bar_baz
+from nor.kind import baz as kind_baz
+
+# The alias is a deliberate re-export under that name
+__all__ = ["bar_baz"]
+from foo.bar import baz as bar_baz
+
+# Leading underscore: a "private, don't re-export" marker
+from foo.bar import baz as _baz
+```
+
+The alias is also left alone for a self-alias (`from X import Y as Y`, which
+is Ruff's `PLC0414` territory) and for relative imports
+(`from . import x as y`, which have no stable module identity to key a
+collision check on). Plain `import X as Z` statements are out of scope too --
+dropping the alias there changes what gets bound, unlike
+`from X import Y as Z`.
+
+#### Enforcing one aliasing convention
+
+If your project deliberately aliases some imports (say, always
+`<last module part>_<name>`), set `alias-template` and aliases matching it
+are never flagged, even when the rename isn't needed:
+
+```toml
+[tool.konform.lint.import-alias-policy]
+alias-template = "{module_last}_{name}"
+```
+
+```python
+from foo.bar import baz as bar_baz    # OK: matches the template
+from foo.bar import baz as other      # KIS002: doesn't match, and isn't needed
+```
+
+Placeholders are `{name}`, `{module}` (dots become `_`), `{module_first}` and
+`{module_last}`. The template only exempts aliases; it never flags any. An
+invalid template is reported on stderr and ignored.
 
 This rule is sometimes fixable: konform drops the alias and renames every use
 of it back to the original name. It leaves the violation for you to fix by

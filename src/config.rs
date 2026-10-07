@@ -18,6 +18,10 @@ use std::sync::OnceLock;
 pub struct LintConfig {
     // ── Rule selection (prefix-matched, empty = all rules enabled) ────────
     pub select: Vec<String>,
+    /// Codes / prefixes enabled *in addition to* the default set. This is
+    /// how opt-in rules (see [`crate::rules::Rule::opt_in`]) are turned on
+    /// without narrowing the rules that already run.
+    pub extend_select: Vec<String>,
     pub ignore: Vec<String>,
 
     // ── Global default level ───────────────────────────────────────────────
@@ -51,6 +55,7 @@ impl Default for LintConfig {
     fn default() -> Self {
         Self {
             select: vec![],
+            extend_select: vec![],
             ignore: vec![],
             level: Level::Error,
             per_file_ignores: HashMap::new(),
@@ -66,21 +71,36 @@ impl Default for LintConfig {
 
 /// The `select` / `ignore` lists, prefix-matched against rule codes.
 ///
-/// The default (both empty) enables every code.
+/// The default (all empty) enables every code except opt-in rules, which
+/// need an explicit match in `select` or `extend_select`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuleSelection {
     pub select: Vec<String>,
+    pub extend_select: Vec<String>,
     pub ignore: Vec<String>,
 }
 
 impl RuleSelection {
+    fn explicitly_selected(&self, code: &str) -> bool {
+        self.select
+            .iter()
+            .chain(&self.extend_select)
+            .any(|s| code.starts_with(s.as_str()))
+    }
+
     /// `true` when `code` is selected (or nothing is selected explicitly)
-    /// and not ignored. Both lists use prefix matching.
+    /// and not ignored. All lists use prefix matching.
     pub fn is_enabled(&self, code: &str) -> bool {
-        let selected =
-            self.select.is_empty() || self.select.iter().any(|s| code.starts_with(s.as_str()));
+        let selected = self.select.is_empty() || self.explicitly_selected(code);
         let ignored = self.ignore.iter().any(|i| code.starts_with(i.as_str()));
         selected && !ignored
+    }
+
+    /// Like [`Self::is_enabled`], but an `opt_in` rule additionally needs an
+    /// explicit match in `select` / `extend_select`: an empty `select`, or a
+    /// `select` naming other rules, does not enable it.
+    pub fn runs_rule(&self, code: &str, opt_in: bool) -> bool {
+        self.is_enabled(code) && (!opt_in || self.explicitly_selected(code))
     }
 }
 
@@ -159,15 +179,24 @@ impl Config {
     /// select = ["KIS"]   # run all KIS* rules
     /// ignore = ["KIS001"] # except KIS001 specifically
     /// ```
+    #[cfg(test)]
     pub fn is_enabled(&self, code: &str) -> bool {
         self.selection().is_enabled(code)
     }
 
-    /// Snapshot of the `select` / `ignore` lists, for passing to rules via
-    /// [`crate::rules::FileContext::selection`].
+    /// Return `true` when a whole rule should run. Differs from
+    /// [`Self::is_enabled`] only for opt-in rules, which must be selected
+    /// explicitly (`select` / `extend-select`).
+    pub fn runs_rule(&self, code: &str, opt_in: bool) -> bool {
+        self.selection().runs_rule(code, opt_in)
+    }
+
+    /// Snapshot of the `select` / `extend-select` / `ignore` lists, for
+    /// passing to rules via [`crate::rules::FileContext::selection`].
     pub fn selection(&self) -> RuleSelection {
         RuleSelection {
             select: self.lint.select.clone(),
+            extend_select: self.lint.extend_select.clone(),
             ignore: self.lint.ignore.clone(),
         }
     }
@@ -393,6 +422,53 @@ mod tests {
         };
         assert!(cfg.is_enabled("KIS001"));
         assert!(!cfg.is_enabled("KPT001"));
+    }
+
+    fn sel(select: &[&str], extend: &[&str], ignore: &[&str]) -> RuleSelection {
+        let own = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect();
+        RuleSelection {
+            select: own(select),
+            extend_select: own(extend),
+            ignore: own(ignore),
+        }
+    }
+
+    #[test]
+    fn opt_in_rule_is_off_unless_explicitly_selected() {
+        assert!(!sel(&[], &[], &[]).runs_rule("KNQ001", true));
+        assert!(!sel(&["KIS"], &[], &[]).runs_rule("KNQ001", true));
+        for s in [
+            sel(&["KNQ"], &[], &[]),
+            sel(&["KNQ001"], &[], &[]),
+            sel(&[], &["KNQ001"], &[]),
+        ] {
+            assert!(s.runs_rule("KNQ001", true), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn ignore_beats_opt_in_selection() {
+        assert!(!sel(&[], &["KNQ"], &["KNQ001"]).runs_rule("KNQ001", true));
+    }
+
+    #[test]
+    fn extend_select_does_not_narrow_default_rules() {
+        let s = sel(&[], &["KNQ001"], &[]);
+        assert!(s.runs_rule("KIS001", false));
+        assert!(s.runs_rule("KPT001", false));
+    }
+
+    #[test]
+    fn non_opt_in_rules_ignore_the_opt_in_gate() {
+        assert!(sel(&[], &[], &[]).runs_rule("KIS001", false));
+        assert!(!sel(&["KPT"], &[], &[]).runs_rule("KIS001", false));
+    }
+
+    #[test]
+    fn extend_select_is_read_from_toml() {
+        let cfg: Config = toml::from_str("[lint]\nextend-select = [\"KNQ001\"]\n").unwrap();
+        assert_eq!(cfg.lint.extend_select, vec!["KNQ001".to_owned()]);
+        assert!(cfg.runs_rule("KNQ001", true));
     }
 
     #[test]

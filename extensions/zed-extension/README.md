@@ -8,7 +8,7 @@ Python linter and language server.
 * **Inline diagnostics** for every open `.py` file (push + pull, LSP 3.17)
 * **KIS001** — flags `from X import obj` imports that should be `import X`
 * **KIS002** — flags unnecessary import aliases (`from X import Y as Z` when the alias buys nothing)
-* **KNQ001** — requires a reason on every `# noqa` comment (`# noqa: CODE  # why`)
+* **KNQ001** — requires a reason on every `# noqa` comment (`# noqa: CODE  # why`); opt-in via `extend-select`
 * **KPT** — user-defined regex pattern rules from `konform_patterns.toml`
 * **Code actions** — "Konform: Fix <rule-name> [<rule-code>]" per violation, and "Konform: Fix all auto-fixable problems" for the whole file
 * **Auto-fix on save** via `textDocument/formatting`

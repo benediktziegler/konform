@@ -87,7 +87,7 @@ pub fn run_check(
     ctx.selection = config.selection();
     let mut violations: Vec<Violation> = rules
         .iter()
-        .filter(|r| r.gates_per_violation() || config.is_enabled(r.code()))
+        .filter(|r| r.gates_per_violation() || config.runs_rule(r.code(), r.opt_in()))
         .flat_map(|r| r.check(&ctx, config.rule_config(r.config_name())))
         .collect();
 
@@ -182,7 +182,7 @@ pub fn run_fix(
         // fix is unsafe (`Rule::is_unsafe_fix`) are skipped unless the caller
         // opted in via `unsafe_fixes` -- Ruff's `--unsafe-fixes` separation.
         for rule in rules.iter().filter(|r| {
-            (r.gates_per_violation() || config.is_enabled(r.code()))
+            (r.gates_per_violation() || config.runs_rule(r.code(), r.opt_in()))
                 && (unsafe_fixes || !r.is_unsafe_fix())
         }) {
             let mut ctx = FileContext::from_source(input.path.to_path_buf(), src.clone());
@@ -445,10 +445,40 @@ mod tests {
             .collect()
     }
 
+    /// Default config plus `extend-select = ["KNQ001"]` (the rule is opt-in).
+    fn knq_config() -> Config {
+        let mut config = Config::default();
+        config.lint.extend_select = vec!["KNQ001".into()];
+        config
+    }
+
+    #[test]
+    fn knq001_is_off_by_default() {
+        let src = "from os.path import join  # noqa: KIS001\nx = 1  # noqa\n";
+        assert!(rule_ids(src, &Config::default()).is_empty());
+
+        // A `select` that doesn't name it must not turn it on either.
+        let mut config = Config::default();
+        config.lint.select = vec!["KIS".into()];
+        assert!(rule_ids(src, &config).is_empty());
+    }
+
+    #[test]
+    fn knq001_runs_when_selected() {
+        let src = "x = 1  # noqa\n";
+        assert_eq!(rule_ids(src, &knq_config()), ["KNQ001"]);
+
+        for select in ["KNQ001", "KNQ"] {
+            let mut config = Config::default();
+            config.lint.select = vec![select.into()];
+            assert_eq!(rule_ids(src, &config), ["KNQ001"], "select = {select}");
+        }
+    }
+
     #[test]
     fn knq001_flags_reasonless_noqa_even_when_it_suppresses_another_rule() {
         let src = "from os.path import join  # noqa: KIS001\n";
-        assert_eq!(rule_ids(src, &Config::default()), ["KNQ001"]);
+        assert_eq!(rule_ids(src, &knq_config()), ["KNQ001"]);
     }
 
     #[test]
@@ -458,19 +488,19 @@ mod tests {
             "x = 1  # noqa: KNQ001\n",
             "x = 1  # noqa: KNQ\n",
         ] {
-            assert_eq!(rule_ids(src, &Config::default()), ["KNQ001"], "{src:?}");
+            assert_eq!(rule_ids(src, &knq_config()), ["KNQ001"], "{src:?}");
         }
     }
 
     #[test]
     fn knq001_accepts_noqa_with_reason_and_still_suppresses() {
         let src = "from os.path import join  # noqa: KIS001  # re-exported\n";
-        assert!(rule_ids(src, &Config::default()).is_empty());
+        assert!(rule_ids(src, &knq_config()).is_empty());
     }
 
     #[test]
     fn knq001_can_be_ignored_via_config() {
-        let mut config = Config::default();
+        let mut config = knq_config();
         config.lint.ignore = vec!["KNQ001".into()];
         assert!(rule_ids("x = 1  # noqa\n", &config).is_empty());
     }

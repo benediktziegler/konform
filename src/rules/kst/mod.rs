@@ -962,6 +962,7 @@ match = { all = [{ kind = "function" }, { name = "^_" }] }
             c.selection = RuleSelection {
                 select: select.iter().map(|s| s.to_string()).collect(),
                 ignore: ignore.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
             };
             let mut found: Vec<String> = rule()
                 .check(&c, &cfg(&two))

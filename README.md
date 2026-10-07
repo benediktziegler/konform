@@ -153,6 +153,32 @@ The reason is any text after the directive in the same comment (leading `#`,
 `# noqa: CODE  # reason` form is recommended because it reads the same to
 every tool that parses the comment.
 
+A reason that only repeats a placeholder is flagged too: `ok`, `fine`,
+`todo`, `fixme`, `tbd`, `wip`, `later`, `fix later`, `n/a`, `ignore`, `noqa`.
+The whole reason has to match (ignoring case, spacing and a trailing `.`/`!`),
+so `todo: drop in v3` or `ok for generated code` are fine. Tighten the list
+in `[tool.konform.lint.noqa-justification]`:
+
+```toml
+[tool.konform.lint.noqa-justification]
+extend-placeholder-reasons = ["legacy", "needed"]  # add to the defaults
+# placeholder-reasons = ["ok", "todo"]  # ... or replace them ([] = off)
+```
+
+**Exempt codes.** Some suppressions explain themselves, such as `F401` on a
+re-export or `E501` on a long URL. List those codes (prefixes, like
+`# noqa`) and their comments need no reason:
+
+```toml
+[tool.konform.lint.noqa-justification]
+exempt-codes = ["F401", "E501"]
+```
+
+The comment is only exempt when **every** listed code is. `# noqa: F401,
+KIS001` still needs a reason, and a bare `# noqa` is never exempt. To exempt
+whole files instead (say `__init__.py`), use `per-file-ignores`:
+`"**/__init__.py" = ["KNQ001"]`.
+
 This rule can't be suppressed with `# noqa` (not even `# noqa: KNQ001`) and
 `--ignore-noqa` doesn't affect it; turn it off with `ignore` or
 `per-file-ignores`. It is not fixable. `konform check --add-noqa --reason
@@ -410,6 +436,9 @@ level = "warning"
 # ── KNQ001 — noqa justification (opt-in: add "KNQ001" to extend-select) ───
 [tool.konform.lint.noqa-justification]
 level = "error"   # "error" (default) | "warning"
+# extend-placeholder-reasons = ["legacy"]  # reasons that say nothing, on top of the defaults
+# placeholder-reasons = ["ok", "todo"]     # replace the defaults ([] = no placeholder check)
+# exempt-codes = ["F401", "E501"]          # these codes need no reason (prefix match)
 
 # ── KNQ002 — noqa style (opt-in: add "KNQ002" to extend-select) ─────────────────
 [tool.konform.lint.noqa-style]

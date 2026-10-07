@@ -13,6 +13,7 @@
 //! See [`KstRule::explain`] for the rule format and matcher vocabulary.
 
 mod matcher;
+mod node;
 mod resolve;
 
 use super::kpt::{glob_matches, resolve_path};
@@ -21,10 +22,8 @@ use super::{has_noqa, FileContext, Rule, RuleDoc};
 use crate::types::{Level, Violation};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use matcher::{Matcher, RawMatcher};
+use node::{walk, Flow, Node, Visitor};
 use resolve::Imports;
-use ruff_python_ast::visitor::source_order::{SourceOrderVisitor, TraversalSignal};
-use ruff_python_ast::AnyNodeRef;
-use ruff_text_size::{Ranged, TextRange, TextSize};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -260,26 +259,6 @@ impl KstRule {
     }
 }
 
-/// Where a violation for `node` is reported: the name for functions and
-/// classes, the header line for other compound statements, else the node.
-fn report_range(node: AnyNodeRef<'_>, source: &str) -> TextRange {
-    match node {
-        AnyNodeRef::StmtFunctionDef(f) => f.name.range(),
-        AnyNodeRef::StmtClassDef(c) => c.name.range(),
-        AnyNodeRef::StmtIf(_)
-        | AnyNodeRef::StmtFor(_)
-        | AnyNodeRef::StmtWhile(_)
-        | AnyNodeRef::StmtWith(_)
-        | AnyNodeRef::StmtTry(_) => {
-            let range = node.range();
-            let text = &source[range];
-            let first = text.lines().next().unwrap_or("");
-            TextRange::at(range.start(), TextSize::of(first))
-        }
-        _ => node.range(),
-    }
-}
-
 /// One pass over the tree, testing every active rule at every node.
 struct Walker<'a> {
     ctx: &'a FileContext,
@@ -288,19 +267,19 @@ struct Walker<'a> {
     noqa: Vec<&'a str>,
     line_starts: Vec<u32>,
     /// Ancestors of the node being visited, outermost first.
-    path: Vec<AnyNodeRef<'a>>,
+    path: Vec<Node<'a>>,
     out: Vec<Violation>,
 }
 
-impl<'a> SourceOrderVisitor<'a> for Walker<'a> {
-    fn enter_node(&mut self, node: AnyNodeRef<'a>) -> TraversalSignal {
+impl<'a> Visitor<'a> for Walker<'a> {
+    fn enter(&mut self, node: Node<'a>) -> Flow {
         for rule in &self.active {
             if !rule.matcher.matches(node, &self.path, &self.imports) {
                 continue;
             }
-            let range = report_range(node, &self.ctx.source);
-            let (line, col) = offset_to_line_col(&self.line_starts, range.start().to_u32());
-            let (end_line, end_col) = offset_to_line_col(&self.line_starts, range.end().to_u32());
+            let span = node.report_span(&self.ctx.source);
+            let (line, col) = offset_to_line_col(&self.line_starts, span.start);
+            let (end_line, end_col) = offset_to_line_col(&self.line_starts, span.end);
             let noqa = self.noqa.get(line - 1).copied().unwrap_or("");
             if !self.ctx.ignore_noqa && has_noqa(noqa, &rule.id, &self.ctx.noqa_aliases) {
                 continue;
@@ -318,10 +297,10 @@ impl<'a> SourceOrderVisitor<'a> for Walker<'a> {
             });
         }
         self.path.push(node);
-        TraversalSignal::Traverse
+        Flow::Descend
     }
 
-    fn leave_node(&mut self, _node: AnyNodeRef<'a>) {
+    fn leave(&mut self, _node: Node<'a>) {
         self.path.pop();
     }
 }
@@ -375,17 +354,17 @@ impl Rule for KstRule {
             return vec![];
         }
 
-        let module = ctx.parsed().syntax();
+        let root = Node::root(ctx.parsed().syntax());
         let mut walker = Walker {
             ctx,
             active,
-            imports: Imports::collect(module),
+            imports: Imports::collect(root),
             noqa: ctx.noqa_lines(),
             line_starts: build_line_starts(&ctx.source),
             path: Vec::new(),
             out: Vec::new(),
         };
-        AnyNodeRef::from(module).visit_source_order(&mut walker);
+        walk(root, &mut walker);
         walker.out
     }
 
@@ -480,6 +459,28 @@ impl Rule for KstRule {
 mod tests {
     use super::*;
     use crate::config::RuleSelection;
+
+    /// Architecture guard: KST's public vocabulary is konform-defined, so
+    /// parser crates may only be named in the adapter layer.
+    #[test]
+    fn no_parser_types_outside_adapter() {
+        const ADAPTER: [&str; 2] = ["node.rs", "resolve.rs"];
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/rules/kst");
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            if ADAPTER.contains(&file.as_str()) || !file.ends_with(".rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            // Only inspect code above the test module.
+            let code = text.split("#[cfg(test)]").next().unwrap();
+            assert!(
+                !code.contains("ruff_"),
+                "{file} names a parser crate; route it through kst/node.rs"
+            );
+        }
+    }
 
     const NO_ASSERT_IN_FIXTURE: &str = r#"
 [[rules]]

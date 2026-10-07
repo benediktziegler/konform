@@ -13,6 +13,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ruff_python_ast::token::TokenKind;
+use ruff_python_ast::PySourceType;
+use ruff_text_size::Ranged;
+
 // ---------------------------------------------------------------------------
 // Sub-modules
 // ---------------------------------------------------------------------------
@@ -77,6 +81,23 @@ impl FileContext {
             ignore_noqa: false,
             noqa_aliases: HashMap::new(),
             fix_target: None,
+        }
+    }
+
+    /// Per-line text to scan for `# noqa` (see [`has_noqa`]).
+    ///
+    /// For Python files this is only the real comment tokens, so `# noqa`
+    /// inside a string literal is ignored. Other file types (KPT can target
+    /// them) fall back to the raw line text.
+    pub fn noqa_lines(&self) -> Vec<&str> {
+        let is_python = self
+            .path
+            .extension()
+            .is_some_and(|e| e == "py" || e == "pyi");
+        if is_python {
+            noqa_lines(&self.source)
+        } else {
+            self.lines.iter().map(String::as_str).collect()
         }
     }
 
@@ -179,14 +200,50 @@ pub fn has_noqa(line: &str, code: &str, aliases: &HashMap<String, String>) -> bo
         return true;
     }
 
-    let codes = rest.trim_start_matches(':');
-    codes.split(',').any(|c| {
-        let c = c.trim();
+    // Empty entries (`# noqa: A,` / `# noqa: A,,B`) are ignored: an empty
+    // prefix would otherwise match every code. A list with no codes at all
+    // (`# noqa:`) stays a blanket suppression, like Ruff.
+    let mut codes = rest
+        .trim_start_matches(':')
+        .split(',')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .peekable();
+    if codes.peek().is_none() {
+        return true;
+    }
+    codes.any(|c| {
         code.starts_with(c)
             || aliases
                 .get(c)
                 .is_some_and(|target| code.starts_with(target.as_str()))
     })
+}
+
+/// Per-line text in which `# noqa` may appear: one entry per source line,
+/// holding that line's comment token (or `""` if it has none).
+///
+/// Tokenizing keeps `# noqa` inside string literals from suppressing
+/// anything. Works on syntactically broken files too (unchecked parse).
+pub fn noqa_lines(source: &str) -> Vec<&str> {
+    let n_lines = source.lines().count();
+    let mut out = vec![""; n_lines];
+    if !source.contains("noqa") {
+        return out;
+    }
+    let parsed = ruff_python_parser::parse_unchecked_source(source, PySourceType::Python);
+    let starts = scope::build_line_starts(source);
+    for tok in parsed.tokens().iter() {
+        if tok.kind() != TokenKind::Comment {
+            continue;
+        }
+        let range = tok.range();
+        let (line, _) = scope::offset_to_line_col(&starts, range.start().to_u32());
+        if let Some(slot) = out.get_mut(line - 1) {
+            *slot = &source[range.start().to_usize()..range.end().to_usize()];
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -229,5 +286,70 @@ mod noqa_alias_tests {
         let mut aliases = HashMap::new();
         aliases.insert("IS".to_owned(), "KIS".to_owned());
         assert!(has_noqa("x = 1  # noqa: IS", "KIS001", &aliases));
+    }
+}
+
+#[cfg(test)]
+mod noqa_matching_tests {
+    use super::*;
+
+    fn none() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    #[test]
+    fn trailing_comma_does_not_suppress_unlisted_codes() {
+        assert!(has_noqa("x  # noqa: KIS001,", "KIS001", &none()));
+        assert!(!has_noqa("x  # noqa: KIS001,", "KPT020", &none()));
+    }
+
+    #[test]
+    fn empty_entries_between_codes_are_ignored() {
+        assert!(!has_noqa("x  # noqa: KIS001,,KIS002", "KPT020", &none()));
+        assert!(has_noqa("x  # noqa: KIS001,,KIS002", "KIS002", &none()));
+    }
+
+    #[test]
+    fn bare_noqa_and_empty_code_list_stay_blanket() {
+        assert!(has_noqa("x  # noqa", "KPT020", &none()));
+        assert!(has_noqa("x  # noqa:", "KPT020", &none()));
+    }
+
+    #[test]
+    fn noqa_lines_keeps_only_comment_text() {
+        let src = "a = 1  # noqa: KIS001\nb = '# noqa'\nc = 3\n";
+        let lines = noqa_lines(src);
+        assert_eq!(lines[0], "# noqa: KIS001");
+        assert_eq!(lines[1], "", "string literal is not a comment");
+        assert_eq!(lines[2], "");
+    }
+
+    #[test]
+    fn noqa_lines_ignores_noqa_inside_multiline_string() {
+        let src = "s = '''\n# noqa\n'''\nx = 1  # noqa\n";
+        let lines = noqa_lines(src);
+        assert_eq!(lines[1], "", "inside a triple-quoted string");
+        assert_eq!(lines[3], "# noqa");
+    }
+
+    #[test]
+    fn noqa_lines_handles_no_trailing_newline_and_empty_source() {
+        let lines = noqa_lines("x = 1  # noqa");
+        assert_eq!(lines.first().copied(), Some("# noqa"));
+        assert!(noqa_lines("").iter().all(|l| l.is_empty()));
+    }
+
+    #[test]
+    fn noqa_lines_still_works_on_unparsable_source() {
+        let lines = noqa_lines("def (:\nx = 1  # noqa\n");
+        assert_eq!(lines[1], "# noqa");
+    }
+
+    #[test]
+    fn file_context_uses_raw_lines_for_non_python_files() {
+        let yaml = FileContext::from_source(PathBuf::from("data.yaml"), "key: 1  # noqa\n".into());
+        assert_eq!(yaml.noqa_lines()[0], "key: 1  # noqa");
+        let py = FileContext::from_source(PathBuf::from("a.py"), "s = '# noqa'\n".into());
+        assert_eq!(py.noqa_lines()[0], "");
     }
 }

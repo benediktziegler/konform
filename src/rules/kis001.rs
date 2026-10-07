@@ -17,7 +17,7 @@ use super::scope::{
     build_line_starts, build_scope_index, collect_all_exports, collect_load_names,
     offset_to_line_col, parse_module_stmts, shadowed_at_occurrences_of,
 };
-use super::{has_noqa, FileContext, Rule};
+use super::{has_noqa, noqa_lines, FileContext, Rule};
 use crate::module_probe::{ModuleCheck, ModuleProbe};
 use crate::types::{Level, Violation};
 use anyhow::Result;
@@ -565,7 +565,7 @@ fn check_imports(
     ignore_noqa: bool,
     noqa_aliases: &HashMap<String, String>,
 ) -> Vec<Violation> {
-    let lines: Vec<&str> = source.lines().collect();
+    let lines = noqa_lines(source);
     let (imports, all_exports) = parse_ast(source);
     let stmts = parse_module_stmts(source);
     let scope_index = build_scope_index(&stmts);
@@ -756,6 +756,7 @@ fn apply_fixes(ctx: &FileContext, probe: &ModuleProbe, exceptions: &[String]) ->
     let ignore_noqa = ctx.ignore_noqa;
     let noqa_aliases = &ctx.noqa_aliases;
     let lines: Vec<&str> = source.lines().collect();
+    let noqa = noqa_lines(source);
     let (imports, all_exports) = parse_ast(source);
     let stmts = parse_module_stmts(source);
     let scope_index = build_scope_index(&stmts);
@@ -781,7 +782,7 @@ fn apply_fixes(ctx: &FileContext, probe: &ModuleProbe, exceptions: &[String]) ->
         if exception_set.contains(imp.module.as_str()) {
             continue;
         }
-        let start_line_str = lines
+        let start_line_str = noqa
             .get(imp.start_line.saturating_sub(1))
             .copied()
             .unwrap_or("");
@@ -816,7 +817,7 @@ fn apply_fixes(ctx: &FileContext, probe: &ModuleProbe, exceptions: &[String]) ->
                 // non-fixable violation with an explanatory `help` message.
                 continue;
             }
-            let alias_line_str = lines
+            let alias_line_str = noqa
                 .get(alias.line.saturating_sub(1))
                 .copied()
                 .unwrap_or("");
@@ -1339,6 +1340,29 @@ mod tests {
             &empty_cfg(),
         );
         assert!(violations.is_empty(), "noqa should suppress");
+    }
+
+    #[test]
+    fn noqa_with_trailing_comma_only_suppresses_listed_codes() {
+        let violations = rule().check(
+            &ctx("from os.path import join  # noqa: KIS002,\n"),
+            &empty_cfg(),
+        );
+        assert_eq!(violations.len(), 1, "KIS002 noqa must not hide KIS001");
+        let violations = rule().check(
+            &ctx("from os.path import join  # noqa: KIS001,\n"),
+            &empty_cfg(),
+        );
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn noqa_text_inside_string_literal_does_not_suppress() {
+        let violations = rule().check(
+            &ctx("from os.path import join; s = \"# noqa\"\n"),
+            &empty_cfg(),
+        );
+        assert_eq!(violations.len(), 1);
     }
 
     #[test]

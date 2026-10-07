@@ -110,3 +110,34 @@ fn fix_with_unsafe_fixes_fixes_kis002() {
     );
     assert!(after.contains("print(etree)"), "got: {after:?}");
 }
+
+/// `# noqa: KIS002,` (trailing comma) lists only KIS002; it must not act as
+/// a blanket suppression and hide the KIS001 violation on the same line.
+#[test]
+fn noqa_with_trailing_comma_does_not_suppress_other_codes() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    std::fs::write(&file, "from os.path import join  # noqa: KIS002,\n").unwrap();
+
+    let mut cmd = Command::cargo_bin("konform").unwrap();
+    cmd.args(["check", "--isolated", "--no-cache"])
+        .arg(&file)
+        .assert()
+        .failure()
+        .stderr(contains("KIS001"));
+}
+
+/// `# noqa` text inside a string literal is not a suppression comment.
+#[test]
+fn noqa_inside_string_literal_does_not_suppress() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    std::fs::write(&file, "from os.path import join; s = \"# noqa\"\n").unwrap();
+
+    let mut cmd = Command::cargo_bin("konform").unwrap();
+    cmd.args(["check", "--isolated", "--no-cache"])
+        .arg(&file)
+        .assert()
+        .failure()
+        .stderr(contains("KIS001"));
+}

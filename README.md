@@ -311,6 +311,11 @@ from os.path import join   # noqa: KIS       ← whole category
 from os.path import join   # noqa             ← everything on this line
 ```
 
+Multiple codes are comma-separated (`# noqa: KIS001, KPT010`); empty entries
+(e.g. a trailing comma) are ignored, and `# noqa:` with no codes behaves like
+a bare `# noqa`. In Python files, only real comments count: the text `# noqa`
+inside a string literal does not suppress anything.
+
 ### Aliasing noqa codes
 
 When a rule code changes (e.g. a rule is renamed, or a project migrates

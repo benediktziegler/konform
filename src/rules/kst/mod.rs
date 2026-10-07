@@ -462,8 +462,11 @@ impl Rule for KstRule {
                     title: "Name resolution",
                     body: "Names resolve through the file's imports: `@fixture` after \
                         `from pytest import fixture`, `@pt.fixture` after `import pytest as pt` and \
-                        `@pytest.fixture(scope=\"session\")` all count as `pytest.fixture`. \
-                        Resolution is file-wide and ignores local rebinding.",
+                        `@pytest.fixture(scope=\"session\")` all count as `pytest.fixture`. Simple \
+                        alias assignments (`fx = pytest.fixture`) resolve the same way; they are \
+                        ignored for any name that is also assigned something else in the file, \
+                        and a call result (`fx = pytest.fixture(scope=\"session\")`) is a value, \
+                        not an alias. Resolution is file-wide and ignores local rebinding.",
                 },
             ],
             options: vec![
@@ -598,6 +601,31 @@ match = { kind = "assert", inside = { kind = "function", decorated_with = "pytes
                 "{imports} / {deco}"
             );
         }
+    }
+
+    #[test]
+    fn assigned_fixture_aliases_are_resolved() {
+        for (setup, deco) in [
+            ("import pytest\nfx = pytest.fixture", "@fx"),
+            ("import pytest\nfx = pytest.fixture", "@fx(scope='session')"),
+            ("import pytest as pt\nfx = pt.fixture", "@fx"),
+            ("from pytest import fixture\nfx = fixture", "@fx"),
+            ("import pytest\nfx: object = pytest.fixture", "@fx"),
+            ("import pytest\nfx = pytest.fixture\nfy = fx", "@fy"),
+        ] {
+            let src = format!("{setup}\n\n{deco}\ndef f():\n    assert 1\n");
+            assert_eq!(
+                hits(NO_ASSERT_IN_FIXTURE, &src).len(),
+                1,
+                "{setup} / {deco}"
+            );
+        }
+    }
+
+    #[test]
+    fn rebound_alias_is_not_trusted() {
+        let src = "import pytest\nfx = pytest.fixture\nfx = something_else()\n\n@fx\ndef f():\n    assert 1\n";
+        assert!(hits(NO_ASSERT_IN_FIXTURE, src).is_empty());
     }
 
     #[test]

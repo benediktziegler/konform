@@ -85,7 +85,7 @@ match = { kind = "assert", inside = { decorated_with = "pytest.fixture", stop_by
 
 ## Name resolution
 
-Names resolve through the file's imports: `@fixture` after `from pytest import fixture`, `@pt.fixture` after `import pytest as pt` and `@pytest.fixture(scope="session")` all count as `pytest.fixture`. Resolution is file-wide and ignores local rebinding.
+Names resolve through the file's imports: `@fixture` after `from pytest import fixture`, `@pt.fixture` after `import pytest as pt` and `@pytest.fixture(scope="session")` all count as `pytest.fixture`. Simple alias assignments (`fx = pytest.fixture`) resolve the same way; they are ignored for any name that is also assigned something else in the file, and a call result (`fx = pytest.fixture(scope="session")`) is a value, not an alias. Resolution is file-wide and ignores local rebinding.
 
 ## Options
 

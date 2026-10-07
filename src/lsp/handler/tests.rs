@@ -453,7 +453,7 @@ fn code_action_offers_quickfix_only_for_the_fixable_alias_in_a_collision() {
     server.initialize();
 
     let source = "from a.plugin import plugin as a_plugin\n\
-                  from b.plugin import plugin as b_plugin\n\n\
+                  from a.plugin import plugin as b_plugin\n\n\
                   a_plugin()\nb_plugin()\n";
     server.open(&uri, source);
     let diags = server.next_diagnostics(&uri);
@@ -775,7 +775,7 @@ fn kis002_quickfix_fixes_only_its_own_alias() {
     server.next_diagnostics(&uri);
 
     let actions = code_actions_at(&mut server, &uri, 1, None);
-    let quick = find_action(&actions, "Konform: Fix Unnecessary import alias [KIS002]");
+    let quick = find_action(&actions, "Konform: Fix Import alias policy [KIS002]");
     assert_eq!(quick.is_preferred, Some(true));
     assert_eq!(
         apply_action(source, quick, &uri),

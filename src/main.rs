@@ -937,7 +937,7 @@ const KONFORM_TOML: &str = r#"# konform.toml — project linting configuration
 # collections.abc) if your project has additional exempted modules:
 # exceptions = ["mycompany.compat"]
 
-[konform.lint.unnecessary-import-alias]
+[konform.lint.import-alias-policy]
 # Defaults to level = "warning"; uncomment to make it a hard error:
 # level = "error"
 
@@ -954,7 +954,7 @@ const PYPROJECT_APPEND: &str = r#"
 # collections.abc) if your project has additional exempted modules:
 # exceptions = ["mycompany.compat"]
 
-[tool.konform.lint.unnecessary-import-alias]
+[tool.konform.lint.import-alias-policy]
 # Defaults to level = "warning"; uncomment to make it a hard error:
 # level = "error"
 

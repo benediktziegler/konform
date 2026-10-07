@@ -16,8 +16,10 @@ mod dump;
 mod matcher;
 mod node;
 mod resolve;
+mod schema;
 
 pub use dump::dump as dump_ast;
+pub use schema::rules_schema;
 
 use super::kpt::{glob_matches, resolve_path};
 use super::scope::{build_line_starts, offset_to_line_col};

@@ -228,6 +228,11 @@ function 5:5  name=my_fixture  decorators=[pytest.fixture]
   assert 8:5
 ```
 
+**Editor support:** `konform rule --schema > konform-rules.schema.json`
+writes a JSON Schema of the rules file (the `kind` list is generated from the
+vocabulary). Reference it for completion and validation, e.g. with taplo put
+`#:schema ./konform-rules.schema.json` at the top of `konform_rules.toml`.
+
 **Testing rules:** add `valid` / `invalid` snippets to a rule and run
 `konform rule --test`. Each `valid` snippet must produce no violation of that
 rule, each `invalid` one at least one (the rule's `files` glob is ignored for

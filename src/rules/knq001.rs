@@ -26,7 +26,7 @@
 //! it off. Only real comment tokens are inspected, so `"# noqa"` inside a
 //! string literal is not a violation.
 //!
-//! Two knobs tune it (see [`Knq001Settings`]):
+//! Four knobs tune it (see [`Knq001Settings`]):
 //!
 //! * **Placeholder reasons.** A reason that is nothing but `ok`, `todo`,
 //!   `fix later`, … says as little as no reason. The match is on the whole
@@ -34,6 +34,10 @@
 //!   `legacy api` or `todo: drop in v3` are fine. A short default list can
 //!   be replaced (`placeholder-reasons`) or extended
 //!   (`extend-placeholder-reasons`).
+//! * **Minimum letters.** A reason needs at least `min-reason-letters`
+//!   letters (default 3), so `ab` or `#123` alone don't pass.
+//! * **Repeated character.** `xxxx`, `1111` or `a a a` is rejected
+//!   (`reject-repeated-characters`, default on).
 //! * **Exempt codes.** Comments whose codes are *all* exempt need no reason,
 //!   for rules whose suppression explains itself (`exempt-codes`).
 
@@ -103,19 +107,16 @@ impl Rule for Knq001Rule {
                 continue;
             }
             // Span the directive when the reason is missing, the reason
-            // text when it is a placeholder.
+            // text when it is weak (placeholder, too short, repeated char).
             let (message, span) = if !noqa.has_reason() {
                 (
                     "`# noqa` without a reason".to_owned(),
                     (start + noqa.start, start + noqa.end),
                 )
-            } else if policy.is_placeholder(noqa.reason) {
+            } else if let Some(message) = policy.weak_reason(noqa.reason) {
                 let comment = &source[start..];
                 let from = start + noqa.end + comment[noqa.end..].find(noqa.reason).unwrap_or(0);
-                (
-                    format!("`# noqa` reason `{}` says nothing", noqa.reason),
-                    (from, from + noqa.reason.len()),
-                )
+                (message, (from, from + noqa.reason.len()))
             } else {
                 continue;
             };
@@ -170,6 +171,10 @@ KNQ001 — noqa justification [not fixable]
   too. The whole reason must match, ignoring case, spacing and a trailing
   `.` or `!`, so `todo: drop in v3` is fine.
 
+  A reason also needs at least `min-reason-letters` letters (default 3, so
+  `ab` or `#123` alone are flagged), and one repeated character such as
+  `xxxx` or `1111` is flagged unless `reject-repeated-characters = false`.
+
   Not flagged: `# noqa` inside a string literal (only real comments count).
 
   This rule cannot be suppressed with `# noqa` (not even `# noqa: KNQ001`),
@@ -187,6 +192,10 @@ KNQ001 — noqa justification [not fixable]
     # exempt-codes = [\"F401\", \"E501\"]
     # A comment mixing exempt and other codes still needs a reason, and a
     # bare `# noqa` is never exempt.
+    # Letters a reason needs (default: 3; 0 turns the check off):
+    # min-reason-letters = 3
+    # Reject a reason that is one repeated character (default: true):
+    # reject-repeated-characters = true
 
   `konform check --add-noqa` appends reasonless comments, which this rule
   then flags until a reason is added. Pass `--noqa-reason \"...\"` to record the
@@ -218,6 +227,10 @@ const DEFAULT_PLACEHOLDERS: &[&str] = &[
     "noqa",
 ];
 
+/// Letters a reason needs unless `min-reason-letters` says otherwise: enough
+/// for `why`, too few for `ok` or an issue number alone.
+const DEFAULT_MIN_REASON_LETTERS: usize = 3;
+
 /// `[tool.konform.lint.noqa-justification]` settings for KNQ001.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
@@ -229,6 +242,11 @@ struct Knq001Settings {
     extend_placeholder_reasons: Vec<String>,
     /// Code prefixes whose `# noqa` comments need no reason.
     exempt_codes: Vec<String>,
+    /// Minimum number of letters (`char::is_alphabetic`) a reason needs;
+    /// `0` turns the check off.
+    min_reason_letters: usize,
+    /// Reject a reason made of one repeated character (`xxxx`, `1111`).
+    reject_repeated_characters: bool,
 }
 
 impl Default for Knq001Settings {
@@ -238,6 +256,8 @@ impl Default for Knq001Settings {
             placeholder_reasons: None,
             extend_placeholder_reasons: Vec::new(),
             exempt_codes: Vec::new(),
+            min_reason_letters: DEFAULT_MIN_REASON_LETTERS,
+            reject_repeated_characters: true,
         }
     }
 }
@@ -246,6 +266,18 @@ impl Default for Knq001Settings {
 struct Policy {
     placeholders: HashSet<String>,
     exempt: Vec<String>,
+    min_letters: usize,
+    reject_repeated: bool,
+}
+
+/// Is the text, ignoring whitespace and case, a single character repeated
+/// (`xxxx`, `1 1 1`)? One character alone counts too.
+fn is_single_character(s: &str) -> bool {
+    let mut chars = s
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase);
+    chars.next().is_some_and(|first| chars.all(|c| c == first))
 }
 
 /// Lowercase, collapse whitespace and drop a trailing `.` / `!`, so `OK.`
@@ -282,11 +314,33 @@ impl Policy {
         Self {
             placeholders,
             exempt,
+            min_letters: settings.min_reason_letters,
+            reject_repeated: settings.reject_repeated_characters,
         }
     }
 
     fn is_placeholder(&self, reason: &str) -> bool {
         self.placeholders.contains(&normalize_reason(reason))
+    }
+
+    /// Why a (non-empty) reason says too little, if it does.
+    fn weak_reason(&self, reason: &str) -> Option<String> {
+        if self.is_placeholder(reason) {
+            return Some(format!("`# noqa` reason `{reason}` says nothing"));
+        }
+        let letters = reason.chars().filter(|c| c.is_alphabetic()).count();
+        if letters < self.min_letters {
+            return Some(format!(
+                "`# noqa` reason `{reason}` is too short (needs at least {} letters)",
+                self.min_letters
+            ));
+        }
+        if self.reject_repeated && is_single_character(reason) {
+            return Some(format!(
+                "`# noqa` reason `{reason}` is one repeated character"
+            ));
+        }
+        None
     }
 
     /// Is every listed code covered by an exempt prefix? Blanket comments
@@ -429,7 +483,7 @@ mod tests {
 
     #[test]
     fn placeholder_list_can_be_extended_or_replaced() {
-        let src = "x = 1  # noqa: A  # legacy\ny = 2  # noqa: A  # ok\n";
+        let src = "x = 1  # noqa: A  # legacy\ny = 2  # noqa: A  # todo\n";
         let lines = |cfg| {
             check_cfg(src, cfg)
                 .iter()
@@ -445,7 +499,7 @@ mod tests {
         assert!(lines("placeholder-reasons = []").is_empty());
         // ... but extending on top of it still works.
         assert_eq!(
-            lines("placeholder-reasons = []\nextend-placeholder-reasons = [\"ok\"]"),
+            lines("placeholder-reasons = []\nextend-placeholder-reasons = [\"todo\"]"),
             [2]
         );
     }
@@ -464,6 +518,64 @@ mod tests {
             assert_eq!(v.len(), 2, "{cfg:?}");
             assert!(v.iter().all(|v| v.level == Level::Error), "{cfg:?}");
         }
+    }
+
+    #[test]
+    fn short_reasons_are_flagged_by_default() {
+        for src in [
+            "x = 1  # noqa: A  # ab\n",
+            "x = 1  # noqa: A  # #123\n",
+            "x = 1  # noqa: A  # 4 2\n",
+            "x = 1  # noqa  # äö\n",
+        ] {
+            let v = check(src);
+            assert_eq!(v.len(), 1, "{src:?}");
+            assert!(v[0].message.contains("too short"), "{src:?}");
+        }
+        for src in [
+            "x = 1  # noqa: A  # why\n",
+            "x = 1  # noqa: A  # PR-12 too\n",
+            "x = 1  # noqa: A  # äöü\n",
+        ] {
+            assert!(check(src).is_empty(), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn repeated_character_reasons_are_flagged_by_default() {
+        for src in [
+            "x = 1  # noqa: A  # xxxx\n",
+            "x = 1  # noqa: A  # AaAa\n",
+            "x = 1  # noqa: A  # 1111\n",
+            "x = 1  # noqa: A  # a a a a\n",
+            "x = 1  # noqa  # ************\n",
+            "x = 1  # noqa: ************\n",
+        ] {
+            assert_eq!(check(src).len(), 1, "{src:?}");
+        }
+        let v = check("x = 1  # noqa: A  # xxxx\n");
+        assert!(v[0].message.contains("repeated character"));
+        assert_eq!((v[0].line, v[0].col, v[0].end_col), (1, 20, 24));
+        assert!(check("x = 1  # noqa: A  # xxyy\n").is_empty());
+    }
+
+    #[test]
+    fn minimum_letters_and_repeat_check_are_configurable() {
+        let src = "x = 1  # noqa: A  # why\ny = 2  # noqa: A  # aaaa\n";
+        let lines = |cfg: &str| {
+            check_cfg(src, cfg)
+                .iter()
+                .map(|v| v.line)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lines(""), [2]);
+        assert_eq!(lines("min-reason-letters = 4"), [1, 2]);
+        assert_eq!(lines("min-reason-letters = 0"), [2]);
+        assert!(lines("reject-repeated-characters = false").is_empty());
+        assert!(lines("min-reason-letters = 0\nreject-repeated-characters = false").is_empty());
+        // `ab` is fine once the minimum is lowered.
+        let ab = "x = 1  # noqa: A  # ab\n";
+        assert!(check_cfg(ab, "min-reason-letters = 2").is_empty());
     }
 
     #[test]

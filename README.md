@@ -165,6 +165,16 @@ extend-placeholder-reasons = ["legacy", "needed"]  # add to the defaults
 # placeholder-reasons = ["ok", "todo"]  # ... or replace them ([] = off)
 ```
 
+**Minimum length.** A reason needs at least 3 letters (`ab` or `#123` alone
+are flagged), and a reason that is one repeated character (`xxxx`, `1111`,
+`a a a`) is rejected. Both are configurable:
+
+```toml
+[tool.konform.lint.noqa-justification]
+min-reason-letters = 5               # default 3; 0 = no minimum
+reject-repeated-characters = false   # default true
+```
+
 **Exempt codes.** Some suppressions explain themselves, such as `F401` on a
 re-export or `E501` on a long URL. List those codes (prefixes, like
 `# noqa`) and their comments need no reason:
@@ -439,6 +449,8 @@ level = "error"   # "error" (default) | "warning"
 # extend-placeholder-reasons = ["legacy"]  # reasons that say nothing, on top of the defaults
 # placeholder-reasons = ["ok", "todo"]     # replace the defaults ([] = no placeholder check)
 # exempt-codes = ["F401", "E501"]          # these codes need no reason (prefix match)
+# min-reason-letters = 3                   # letters a reason needs (0 = no minimum)
+# reject-repeated-characters = true        # reject reasons like "xxxx"
 
 # ── KNQ002 — noqa style (opt-in: add "KNQ002" to extend-select) ─────────────────
 [tool.konform.lint.noqa-style]

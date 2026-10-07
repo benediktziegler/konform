@@ -233,6 +233,15 @@ pub trait Rule: Send + Sync {
         vec![RuleDoc::of(self)]
     }
 
+    /// Hash of everything besides the checked file that decides this rule's
+    /// output and is not part of `cfg` itself -- e.g. patterns loaded from an
+    /// external file. Folded into the cache key so editing such inputs
+    /// invalidates cached results. The default `0` suits rules driven only
+    /// by `cfg` (which is hashed separately).
+    fn fingerprint(&self, _cfg: &toml::Value) -> u64 {
+        0
+    }
+
     /// Multi-line human-readable explanation with a bad/good code example.
     ///
     /// Printed by `konform rule --explain <CODE>`.

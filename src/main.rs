@@ -424,6 +424,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
         &config.lint.select,
         &config.lint.ignore,
         probe.env_fingerprint(),
+        cache::rules_fingerprint(&config, &active_rules),
     );
 
     let changed_files = get_changed_files();

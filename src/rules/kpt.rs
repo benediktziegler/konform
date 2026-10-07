@@ -467,6 +467,20 @@ impl Rule for KptRule {
         }
     }
 
+    fn fingerprint(&self, cfg: &toml::Value) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = seahash::SeaHasher::new();
+        for p in self.patterns(cfg).iter() {
+            (&p.id, &p.message, &p.help, &p.raw_regexes, &p.raw_files).hash(&mut h);
+            (p.level.to_string(), p.multiline, &p.replacement).hash(&mut h);
+            for sr in &p.sub_rules {
+                let regexes: Vec<&str> = sr.patterns.iter().map(Regex::as_str).collect();
+                (regexes, &sr.message, &sr.help).hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
     fn catalog(&self, cfg: &toml::Value) -> Vec<RuleDoc> {
         let patterns = self.patterns(cfg);
         if patterns.is_empty() {

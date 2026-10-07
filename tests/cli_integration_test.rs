@@ -242,3 +242,65 @@ fn rule_list_without_config_shows_builtin_rules() {
         .stdout(contains("KIS002"))
         .stdout(contains("KPT001"));
 }
+
+fn run_check_cached(dir: &std::path::Path) -> String {
+    let out = Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir)
+        .args(["check", "--cache-dir", ".kcache", "b.py"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// Editing a rule config table must not replay results cached under the old
+/// settings.
+#[test]
+fn editing_rule_config_table_invalidates_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let pyproject = dir.path().join("pyproject.toml");
+    std::fs::write(
+        &pyproject,
+        "[tool.konform.lint.module-only-imports]\nlevel = \"error\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("b.py"), "from os.path import join\n").unwrap();
+
+    assert!(run_check_cached(dir.path()).contains("error[KIS001]"));
+    // Second run: served from cache, same output.
+    assert!(run_check_cached(dir.path()).contains("error[KIS001]"));
+
+    std::fs::write(
+        &pyproject,
+        "[tool.konform.lint.module-only-imports]\nlevel = \"warning\"\n",
+    )
+    .unwrap();
+    let after = run_check_cached(dir.path());
+    assert!(after.contains("warning[KIS001]"), "stale cache: {after}");
+}
+
+/// Editing a pattern file must not replay results cached under the old
+/// pattern, even though the checked `.py` file is unchanged.
+#[test]
+fn editing_pattern_file_invalidates_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();
+    std::fs::write(dir.path().join("b.py"), "x = 1\n").unwrap();
+    let patterns = dir.path().join("konform_patterns.toml");
+    let write = |msg: &str| {
+        std::fs::write(
+            &patterns,
+            format!("[[rules]]\nid = \"KPT050\"\nmessage = \"{msg}\"\npattern = \"^x\"\n"),
+        )
+        .unwrap();
+    };
+
+    write("old message");
+    assert!(run_check_cached(dir.path()).contains("old message"));
+    assert!(run_check_cached(dir.path()).contains("old message"));
+
+    write("new message");
+    let after = run_check_cached(dir.path());
+    assert!(after.contains("new message"), "stale cache: {after}");
+    assert!(!after.contains("old message"));
+}

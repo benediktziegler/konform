@@ -143,6 +143,10 @@ files   = ["src/**/*.py"]
 level   = "warning"
 ```
 
+Each pattern is addressable by its own `id` in `select`, `ignore`,
+`per-file-ignores` and `# noqa`. `ignore = ["KPT001"]` silences only that
+pattern; `ignore = ["KPT"]` silences every pattern.
+
 ## Installation
 
 ```bash

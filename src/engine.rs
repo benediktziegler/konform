@@ -85,9 +85,10 @@ pub fn run_check(
         ctx.ignore_noqa = true;
     }
     ctx.noqa_aliases = config.lint.noqa_aliases.clone();
+    ctx.selection = config.selection();
     let mut violations: Vec<Violation> = rules
         .iter()
-        .filter(|r| config.is_enabled(r.code()))
+        .filter(|r| r.gates_per_violation() || config.is_enabled(r.code()))
         .flat_map(|r| r.check(&ctx, config.rule_config(r.config_name())))
         .collect();
 
@@ -181,13 +182,14 @@ pub fn run_fix(
         // `fixable()` can't see inline `pyproject.toml` patterns. Rules whose
         // fix is unsafe (`Rule::is_unsafe_fix`) are skipped unless the caller
         // opted in via `unsafe_fixes` -- Ruff's `--unsafe-fixes` separation.
-        for rule in rules
-            .iter()
-            .filter(|r| config.is_enabled(r.code()) && (unsafe_fixes || !r.is_unsafe_fix()))
-        {
+        for rule in rules.iter().filter(|r| {
+            (r.gates_per_violation() || config.is_enabled(r.code()))
+                && (unsafe_fixes || !r.is_unsafe_fix())
+        }) {
             let mut ctx = FileContext::from_source(input.path.to_path_buf(), src.clone());
             ctx.ignore_noqa = input.ignore_noqa || config.ignore_noqa;
             ctx.noqa_aliases = config.lint.noqa_aliases.clone();
+            ctx.selection = config.selection();
             ctx.fix_target = input.fix_target.clone();
             if let Some(fixed) = rule.fix(&ctx, config.rule_config(rule.config_name()))? {
                 if fixed == src {
@@ -758,5 +760,101 @@ mod tests {
         let result = run_fix(&input, &rules, &Config::default(), true).unwrap();
         let fixed = result.expect("unsafe fix should be applied when opted in");
         assert!(fixed.contains("# fixed by UnsafeFixRule"), "got: {fixed:?}");
+    }
+
+    // ── per-pattern select / ignore (KPT) ─────────────────────────────────
+
+    /// Two inline patterns: KPT001 (`print(`, fixable) and KPT002
+    /// (`breakpoint(`, fixable), both matching `a.py` below.
+    fn kpt_config(select: &[&str], ignore: &[&str]) -> Config {
+        let mut config = Config::default();
+        config.lint.select = select.iter().map(|s| (*s).to_owned()).collect();
+        config.lint.ignore = ignore.iter().map(|s| (*s).to_owned()).collect();
+        config.lint.rules.insert(
+            "user-defined-patterns".into(),
+            toml::from_str(
+                r#"
+[[rules]]
+id          = "KPT001"
+message     = "no print"
+pattern     = '^print\('
+replacement = "log("
+
+[[rules]]
+id          = "KPT002"
+message     = "no breakpoint"
+pattern     = '^breakpoint\('
+replacement = "pass  #("
+"#,
+            )
+            .unwrap(),
+        );
+        config
+    }
+
+    const KPT_SRC: &str = "print(1)\nbreakpoint()\n";
+
+    fn kpt_ids(config: &Config) -> Vec<String> {
+        let rules = all_rules(probe(), None);
+        let p = path();
+        let input = CheckInput::new(&p, KPT_SRC);
+        let mut ids: Vec<String> = run_check(&input, &rules, config)
+            .into_iter()
+            .map(|v| v.rule)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn ignore_single_pattern_id_keeps_other_patterns() {
+        assert_eq!(kpt_ids(&kpt_config(&[], &["KPT001"])), ["KPT002"]);
+    }
+
+    #[test]
+    fn select_single_pattern_id_reports_only_that_pattern() {
+        assert_eq!(kpt_ids(&kpt_config(&["KPT002"], &[])), ["KPT002"]);
+    }
+
+    #[test]
+    fn ignore_category_silences_all_patterns() {
+        assert!(kpt_ids(&kpt_config(&[], &["KPT"])).is_empty());
+    }
+
+    #[test]
+    fn select_other_category_silences_all_patterns() {
+        assert!(kpt_ids(&kpt_config(&["KIS"], &[])).is_empty());
+    }
+
+    #[test]
+    fn no_selection_reports_all_patterns() {
+        assert_eq!(kpt_ids(&kpt_config(&[], &[])), ["KPT001", "KPT002"]);
+    }
+
+    #[test]
+    fn run_fix_honours_per_pattern_ignore() {
+        let rules = all_rules(probe(), None);
+        let p = path();
+        let input = CheckInput::new(&p, KPT_SRC);
+        let fixed = run_fix(&input, &rules, &kpt_config(&[], &["KPT001"]), false)
+            .unwrap()
+            .expect("KPT002 should still be fixed");
+        assert!(fixed.contains("print(1)"), "KPT001 is ignored: {fixed:?}");
+        assert!(!fixed.contains("breakpoint()"), "got: {fixed:?}");
+    }
+
+    #[test]
+    fn run_fix_honours_per_pattern_select() {
+        let rules = all_rules(probe(), None);
+        let p = path();
+        let input = CheckInput::new(&p, KPT_SRC);
+        let fixed = run_fix(&input, &rules, &kpt_config(&["KPT001"], &[]), false)
+            .unwrap()
+            .expect("KPT001 should be fixed");
+        assert!(fixed.contains("log(1)"), "got: {fixed:?}");
+        assert!(
+            fixed.contains("breakpoint()"),
+            "KPT002 not selected: {fixed:?}"
+        );
     }
 }

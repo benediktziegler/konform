@@ -8,8 +8,6 @@ copyright: Copyright &copy; Benedikt Ziegler
 
 theme:
   name: material
-  logo: assets/favicon.svg
-  favicon: assets/favicon.svg
   features:
     - navigation.instant
     - navigation.tracking

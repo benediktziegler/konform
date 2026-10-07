@@ -25,10 +25,11 @@
 //! rule that polices it.
 
 use super::scope::{build_line_starts, offset_to_line_col};
-use super::{noqa_comments, FileContext, NoqaComment, Rule};
+use super::{noqa_comments, rule_settings, FileContext, NoqaComment, Rule};
 use crate::types::{Level, Violation};
 use anyhow::Result;
 use serde::Deserialize;
+use std::sync::Once;
 
 // ---------------------------------------------------------------------------
 // Rule struct
@@ -125,9 +126,8 @@ impl Rule for Knq002Rule {
     }
 
     fn check(&self, ctx: &FileContext, cfg: &toml::Value) -> Vec<Violation> {
-        let level = Knq002Settings::deserialize(cfg.clone())
-            .unwrap_or_default()
-            .level;
+        static WARNED: Once = Once::new();
+        let level = rule_settings::<Knq002Settings>(cfg, "noqa-style", &WARNED).level;
         findings(ctx)
             .into_iter()
             .map(|f| Violation {
@@ -205,7 +205,7 @@ KNQ002 — noqa style [fixable]
 
 /// `[tool.konform.lint.noqa-style]` settings for KNQ002.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 struct Knq002Settings {
     level: Level,
 }
@@ -366,5 +366,14 @@ mod tests {
         let cfg: toml::Value = toml::from_str("level = \"warning\"").unwrap();
         let v = Knq002Rule::new().check(&ctx("x = 1  # noqa: A why\n"), &cfg);
         assert_eq!(v[0].level, Level::Warning);
+    }
+
+    #[test]
+    fn invalid_settings_fall_back_to_defaults() {
+        for cfg in ["levle = \"warning\"", "level = 3"] {
+            let cfg: toml::Value = toml::from_str(cfg).unwrap();
+            let v = Knq002Rule::new().check(&ctx("x = 1  # noqa: A why\n"), &cfg);
+            assert_eq!(v[0].level, Level::Error);
+        }
     }
 }

@@ -804,3 +804,64 @@ exempt-codes = ["KIS001"]
     run("x = 1  # noqa: E501  # Legacy\n").failure();
     run("x = 1  # noqa: E501  # legacy api\n").success();
 }
+
+/// `placeholder-reasons` replaces the default list, read from `pyproject.toml`.
+#[test]
+fn knq001_placeholder_reasons_replace_the_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        r#"
+[tool.konform.lint]
+extend-select = ["KNQ001"]
+
+[tool.konform.lint.noqa-justification]
+placeholder-reasons = ["legacy"]
+"#,
+    )
+    .unwrap();
+    let run = |src: &str| {
+        std::fs::write(dir.path().join("mod.py"), src).unwrap();
+        Command::cargo_bin("konform")
+            .unwrap()
+            .current_dir(dir.path())
+            .args(["check", "--no-cache", "mod.py"])
+            .assert()
+    };
+
+    run("x = 1  # noqa: E501  # legacy\n")
+        .failure()
+        .stderr(contains("says nothing"));
+    // The built-in `ok` is gone.
+    run("x = 1  # noqa: E501  # ok\n").success();
+}
+
+/// A config table that doesn't parse is reported, not silently ignored.
+#[test]
+fn knq_invalid_settings_are_reported_on_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        r#"
+[tool.konform.lint]
+extend-select = ["KNQ001", "KNQ002"]
+
+[tool.konform.lint.noqa-justification]
+exempt-code = ["F401"]
+
+[tool.konform.lint.noqa-style]
+level = 3
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("mod.py"), "x = 1  # noqa: F401\n").unwrap();
+
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["check", "--no-cache", "mod.py"])
+        .assert()
+        .failure()
+        .stderr(contains("invalid [tool.konform.lint.noqa-justification]"))
+        .stderr(contains("invalid [tool.konform.lint.noqa-style]"));
+}

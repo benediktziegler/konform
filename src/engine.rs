@@ -195,7 +195,7 @@ pub fn run_fix(
                 if fixed == src {
                     continue; // no-op fix; nothing to apply or loop on
                 }
-                let src_was_valid = parse_module(&src).is_ok();
+                let src_was_valid = ctx.has_valid_syntax();
                 if src_was_valid && parse_module(&fixed).is_err() {
                     eprintln!(
                         "warning: {}'s fix for {} would produce invalid Python; skipping this \

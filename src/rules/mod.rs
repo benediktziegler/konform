@@ -12,10 +12,11 @@ use crate::types::Violation;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use ruff_python_ast::token::TokenKind;
-use ruff_python_ast::PySourceType;
+use ruff_python_ast::token::{TokenKind, Tokens};
+use ruff_python_ast::{ModModule, PySourceType, Stmt};
+use ruff_python_parser::Parsed;
 use ruff_text_size::Ranged;
 
 // ---------------------------------------------------------------------------
@@ -55,6 +56,9 @@ pub struct FileContext {
     /// [`Rule::gates_per_violation`]) use [`FileContext::is_enabled`] to skip
     /// the codes the user turned off.
     pub selection: RuleSelection,
+    /// Lazily parsed AST, shared by every rule and by clones of this context.
+    /// Always derived from `source`; see [`FileContext::parsed`].
+    parsed: Arc<OnceLock<Parsed<ModModule>>>,
 }
 
 /// Identifies one violation by its rule code and 1-based line / 0-based
@@ -87,6 +91,33 @@ impl FileContext {
             noqa_aliases: HashMap::new(),
             fix_target: None,
             selection: RuleSelection::default(),
+            parsed: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// The parsed module, computed on first use and then shared by all rules.
+    ///
+    /// Uses the error-tolerant parser, so tokens (and comments) are available
+    /// even for broken files; check [`FileContext::has_valid_syntax`] before
+    /// trusting the tree. Must not be called after mutating `source`.
+    pub fn parsed(&self) -> &Parsed<ModModule> {
+        self.parsed.get_or_init(|| {
+            ruff_python_parser::parse_unchecked_source(&self.source, PySourceType::Python)
+        })
+    }
+
+    /// `true` when `source` parses without syntax errors.
+    pub fn has_valid_syntax(&self) -> bool {
+        self.parsed().errors().is_empty()
+    }
+
+    /// Top-level statements, or an empty slice when the source has syntax
+    /// errors (AST rules skip files they cannot parse).
+    pub fn stmts(&self) -> &[Stmt] {
+        if self.has_valid_syntax() {
+            &self.parsed().syntax().body
+        } else {
+            &[]
         }
     }
 
@@ -105,8 +136,10 @@ impl FileContext {
             .path
             .extension()
             .is_some_and(|e| e == "py" || e == "pyi");
-        if is_python {
-            noqa_lines(&self.source)
+        if is_python && self.source.contains("noqa") {
+            comment_lines(&self.source, self.parsed().tokens())
+        } else if is_python {
+            vec![""; self.lines.len()]
         } else {
             self.lines.iter().map(String::as_str).collect()
         }
@@ -292,17 +325,12 @@ pub fn has_noqa(line: &str, code: &str, aliases: &HashMap<String, String>) -> bo
 /// Per-line text in which `# noqa` may appear: one entry per source line,
 /// holding that line's comment token (or `""` if it has none).
 ///
-/// Tokenizing keeps `# noqa` inside string literals from suppressing
-/// anything. Works on syntactically broken files too (unchecked parse).
-pub fn noqa_lines(source: &str) -> Vec<&str> {
-    let n_lines = source.lines().count();
-    let mut out = vec![""; n_lines];
-    if !source.contains("noqa") {
-        return out;
-    }
-    let parsed = ruff_python_parser::parse_unchecked_source(source, PySourceType::Python);
+/// Going through tokens keeps `# noqa` inside string literals from
+/// suppressing anything. Works on syntactically broken files too.
+fn comment_lines<'a>(source: &'a str, tokens: &Tokens) -> Vec<&'a str> {
+    let mut out = vec![""; source.lines().count()];
     let starts = scope::build_line_starts(source);
-    for tok in parsed.tokens().iter() {
+    for tok in tokens.iter() {
         if tok.kind() != TokenKind::Comment {
             continue;
         }
@@ -384,6 +412,14 @@ mod noqa_matching_tests {
         assert!(has_noqa("x  # noqa:", "KPT020", &none()));
     }
 
+    fn noqa_lines(src: &str) -> Vec<String> {
+        FileContext::from_source(PathBuf::from("a.py"), src.to_owned())
+            .noqa_lines()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
     #[test]
     fn noqa_lines_keeps_only_comment_text() {
         let src = "a = 1  # noqa: KIS001\nb = '# noqa'\nc = 3\n";
@@ -404,7 +440,7 @@ mod noqa_matching_tests {
     #[test]
     fn noqa_lines_handles_no_trailing_newline_and_empty_source() {
         let lines = noqa_lines("x = 1  # noqa");
-        assert_eq!(lines.first().copied(), Some("# noqa"));
+        assert_eq!(lines.first().map(String::as_str), Some("# noqa"));
         assert!(noqa_lines("").iter().all(|l| l.is_empty()));
     }
 
@@ -420,5 +456,36 @@ mod noqa_matching_tests {
         assert_eq!(yaml.noqa_lines()[0], "key: 1  # noqa");
         let py = FileContext::from_source(PathBuf::from("a.py"), "s = '# noqa'\n".into());
         assert_eq!(py.noqa_lines()[0], "");
+    }
+
+    // ── shared lazy parse ──────────────────────────────────────────────────
+
+    fn py(src: &str) -> FileContext {
+        FileContext::from_source(PathBuf::from("a.py"), src.to_owned())
+    }
+
+    #[test]
+    fn parse_happens_once_and_is_shared_with_clones() {
+        let ctx = py("import os\n");
+        let clone = ctx.clone();
+        // Parsed through the clone first; the original must see the same tree.
+        let via_clone: *const _ = clone.parsed();
+        assert!(std::ptr::eq(via_clone, ctx.parsed()));
+        assert!(std::ptr::eq(ctx.parsed(), ctx.parsed()));
+    }
+
+    #[test]
+    fn stmts_are_available_for_valid_source() {
+        let ctx = py("import os\nx = 1\n");
+        assert!(ctx.has_valid_syntax());
+        assert_eq!(ctx.stmts().len(), 2);
+    }
+
+    #[test]
+    fn stmts_are_empty_for_syntax_errors_but_comments_survive() {
+        let ctx = py("def (:\nx = 1  # noqa\n");
+        assert!(!ctx.has_valid_syntax());
+        assert!(ctx.stmts().is_empty());
+        assert_eq!(ctx.noqa_lines()[1], "# noqa");
     }
 }

@@ -46,10 +46,10 @@
 
 use super::scope::{
     bucket_for_offset, build_line_starts, build_scope_index, collect_all_exports,
-    collect_load_names, is_name_shadowed, offset_to_line_col, parse_module_stmts,
-    shadowed_at_occurrences_of, NamedSpan, ScopeIndex,
+    collect_load_names, is_name_shadowed, offset_to_line_col, shadowed_at_occurrences_of,
+    NamedSpan, ScopeIndex,
 };
-use super::{has_noqa, noqa_lines, FileContext, Rule};
+use super::{has_noqa, FileContext, Rule};
 use crate::types::{Level, Violation};
 use anyhow::Result;
 use ruff_python_ast::Stmt;
@@ -111,7 +111,7 @@ impl Rule for Kis002Rule {
 
     fn check(&self, ctx: &FileContext, cfg: &toml::Value) -> Vec<Violation> {
         let settings = parse_kis002_config(cfg);
-        check_aliases(&ctx.source, &settings, ctx.ignore_noqa, &ctx.noqa_aliases)
+        check_aliases(ctx, &settings)
     }
 
     fn fix(&self, ctx: &FileContext, cfg: &toml::Value) -> Result<Option<String>> {
@@ -458,19 +458,18 @@ struct AliasAnalysis {
 }
 
 impl AliasAnalysis {
-    /// `None` when the source has no parseable statements.
-    fn new(source: &str, template: Option<&AliasTemplate>) -> Option<Self> {
-        let stmts = parse_module_stmts(source);
+    /// `None` when there are no parseable statements.
+    fn new(stmts: &[Stmt], template: Option<&AliasTemplate>) -> Option<Self> {
         if stmts.is_empty() {
             return None;
         }
-        let scope_index = build_scope_index(&stmts);
-        let cands = collect_alias_candidates(&stmts);
+        let scope_index = build_scope_index(stmts);
+        let cands = collect_alias_candidates(stmts);
         let allowed_by_convention = collect_allowed_by_convention(&cands, &scope_index, template);
         let mut analysis = Self {
-            load_names: collect_load_names(&stmts),
-            bound_targets: collect_import_bindings(&stmts),
-            all_exports: collect_all_exports(&stmts),
+            load_names: collect_load_names(stmts),
+            bound_targets: collect_import_bindings(stmts),
+            all_exports: collect_all_exports(stmts),
             cands,
             scope_index,
             allowed_by_convention,
@@ -585,17 +584,15 @@ impl AliasAnalysis {
 // Check
 // ---------------------------------------------------------------------------
 
-fn check_aliases(
-    source: &str,
-    settings: &Kis002Settings,
-    ignore_noqa: bool,
-    noqa_aliases: &HashMap<String, String>,
-) -> Vec<Violation> {
-    let Some(analysis) = AliasAnalysis::new(source, settings.template().as_ref()) else {
+fn check_aliases(ctx: &FileContext, settings: &Kis002Settings) -> Vec<Violation> {
+    let source = ctx.source.as_str();
+    let ignore_noqa = ctx.ignore_noqa;
+    let noqa_aliases = &ctx.noqa_aliases;
+    let Some(analysis) = AliasAnalysis::new(ctx.stmts(), settings.template().as_ref()) else {
         return Vec::new();
     };
     let line_starts = build_line_starts(source);
-    let lines = noqa_lines(source);
+    let lines = ctx.noqa_lines();
 
     let mut violations = Vec::new();
     for (cand, fixable) in analysis.flagged() {
@@ -650,9 +647,9 @@ fn check_aliases(
 
 fn apply_fixes(ctx: &FileContext, settings: &Kis002Settings) -> Option<String> {
     let source = ctx.source.as_str();
-    let analysis = AliasAnalysis::new(source, settings.template().as_ref())?;
+    let analysis = AliasAnalysis::new(ctx.stmts(), settings.template().as_ref())?;
     let line_starts = build_line_starts(source);
-    let lines = noqa_lines(source);
+    let lines = ctx.noqa_lines();
 
     let mut renames: HashMap<&str, &str> = HashMap::new();
     let mut splices: Vec<(u32, u32, String)> = Vec::new();

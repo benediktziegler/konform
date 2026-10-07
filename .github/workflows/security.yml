@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, "feat/**"]
   schedule:
     # Run security audit daily at 00:00 UTC
     - cron: "0 0 * * *"

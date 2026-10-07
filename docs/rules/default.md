@@ -12,3 +12,7 @@ konform enables the following rules by default (when no `select` is configured).
 ## User-defined patterns (KPT)
 
 - [`user-defined-patterns`](kpt.md) (`KPT*`)
+
+## User-defined structural rules (KST)
+
+- [`structural-rules`](kst.md) (`KST*`)

@@ -949,7 +949,7 @@ fn run_version() {
 // ---------------------------------------------------------------------------
 
 /// Rule category prefixes registered with external linters (e.g. ruff `external`).
-const RULE_CATEGORIES: &[&str] = &["KIS", "KPT"];
+const RULE_CATEGORIES: &[&str] = &["KIS", "KPT", "KST"];
 
 /// Default content written to a new `konform.toml`.
 /// Only non-default settings are included; everything else is left as a comment.
@@ -1201,7 +1201,7 @@ fn init_ruff_compat(dir: &std::path::Path, dry_run: bool) {
     // No ruff config found — nothing to do.
 }
 
-/// Attempt to add `external = ["KIS", "KPT"]` to a ruff config file.
+/// Attempt to add `external = ["KIS", "KPT", "KST"]` to a ruff config file.
 ///
 /// Strategy:
 /// * If `external` is already present → skip (already configured).

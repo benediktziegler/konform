@@ -15,5 +15,6 @@ konform supports an increasing list of opinionated rules not supported by Ruff. 
 | `KIS001` | [`module-only-imports`](kis001.md)<br>Checks that `from X import Y` imports only sub-modules, not objects. | Import style (KIS) | ✅ 🛠️ |
 | `KIS002` | [`import-alias-policy`](kis002.md)<br>Checks that `from X import Y as Z` only renames when needed to avoid a collision. | Import style (KIS) | ✅ 🛠️ ⚠️ |
 | `KPT*` | [`user-defined-patterns`](kpt.md)<br>Checks files against user-defined regex patterns from konform_patterns.toml. | User-defined patterns (KPT) | ✅ |
+| `KST*` | [`structural-rules`](kst.md)<br>Checks Python code structure against user-defined AST rules from konform_rules.toml. | User-defined structural rules (KST) | ✅ |
 
 Codes are prefix-matched in `select`, `ignore`, `per-file-ignores` and `# noqa`: `KIS` means every `KIS*` rule.

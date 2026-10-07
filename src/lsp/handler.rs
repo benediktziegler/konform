@@ -690,23 +690,26 @@ fn watch_globs(config: &crate::config::Config) -> Vec<String> {
         "**/konform.toml",
         "**/konform_patterns.toml",
         "**/konform_patterns.yaml",
+        "**/konform_rules.toml",
     ]
     .map(String::from)
     .to_vec();
 
-    let rules_file = config
-        .rule_config("user-defined-patterns")
-        .get("rules_file")
-        .and_then(|v| v.as_str());
-    if let Some(file) = rules_file {
-        let rel = file.trim_start_matches("./");
-        let glob = if std::path::Path::new(rel).is_absolute() {
-            rel.to_owned()
-        } else {
-            format!("**/{rel}")
-        };
-        if !globs.contains(&glob) {
-            globs.push(glob);
+    for rule in ["user-defined-patterns", "structural-rules"] {
+        let rules_file = config
+            .rule_config(rule)
+            .get("rules_file")
+            .and_then(|v| v.as_str());
+        if let Some(file) = rules_file {
+            let rel = file.trim_start_matches("./");
+            let glob = if std::path::Path::new(rel).is_absolute() {
+                rel.to_owned()
+            } else {
+                format!("**/{rel}")
+            };
+            if !globs.contains(&glob) {
+                globs.push(glob);
+            }
         }
     }
     globs

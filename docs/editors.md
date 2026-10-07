@@ -17,7 +17,8 @@ KIS002 — editing one open document is an explicit, reviewable action), plus:
   only offered when it changes something beyond the safe pass.
 
 The server reloads rules when `pyproject.toml`, `konform.toml`,
-`konform_patterns.toml`/`.yaml` or the configured `rules_file` changes. If you
+`konform_patterns.toml`/`.yaml`, `konform_rules.toml` or the configured `rules_file`
+(of either rule) changes. If you
 point `rules_file` at a new path, restart the server.
 
 ## Neovim

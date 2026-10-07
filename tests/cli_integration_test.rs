@@ -426,7 +426,7 @@ fn init_inserts_after_all_ruff_blocks() {
     assert!(pos("[tool.ruff.lint]") < pos("[tool.konform]"));
     assert!(pos("[tool.konform]") < pos("[tool.pytest.ini_options]"));
     assert!(
-        out.contains("quote-style = \"double\"\n\n[tool.ruff.lint]\nexternal = [\"KIS\", \"KPT\"]\n\n[tool.konform]\n"),
+        out.contains("quote-style = \"double\"\n\n[tool.ruff.lint]\nexternal = [\"KIS\", \"KPT\", \"KST\"]\n\n[tool.konform]\n"),
         "{out}"
     );
     assert!(
@@ -501,7 +501,7 @@ fn init_patches_standalone_ruff_toml() {
     init_cmd(dir.path(), &["--no-patterns"]);
     assert_eq!(
         std::fs::read_to_string(&ruff).unwrap(),
-        "line-length = 100\n\n[lint]\nexternal = [\"KIS\", \"KPT\"]\n"
+        "line-length = 100\n\n[lint]\nexternal = [\"KIS\", \"KPT\", \"KST\"]\n"
     );
     assert!(dir.path().join("konform.toml").is_file());
 }
@@ -717,4 +717,160 @@ fn explain_output_fits_the_terminal_width() {
             );
         }
     }
+}
+
+const FIXTURE_SRC: &str = "import pytest
+
+
+@pytest.fixture
+def my_fixture():
+    # do some setup
+    a = 1  # dummy
+    assert a == 3  # <- rule: no asserts in fixtures
+";
+
+const NO_ASSERT_RULE: &str = "[[rules]]
+id = \"KST001\"
+message = \"no assert in pytest fixtures\"
+level = \"error\"
+match = { kind = \"assert\", inside = { kind = \"function\", decorated_with = \"pytest.fixture\" } }
+";
+
+/// The motivating KST example, end to end: a rule from `konform_rules.toml`
+/// flags `assert` inside a `@pytest.fixture` and fails the run.
+#[test]
+fn kst_flags_assert_in_pytest_fixture() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();
+    std::fs::write(dir.path().join("konform_rules.toml"), NO_ASSERT_RULE).unwrap();
+    std::fs::write(dir.path().join("conftest.py"), FIXTURE_SRC).unwrap();
+    std::fs::write(dir.path().join("ok.py"), "def helper():\n    assert True\n").unwrap();
+
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["check", "--no-cache", "."])
+        .assert()
+        .failure()
+        .stderr(contains("error[KST001]"))
+        .stderr(contains("conftest.py"))
+        .stderr(contains("ok.py").not());
+}
+
+/// Inline config works too, and `--ignore KST001` / `# noqa` silence it.
+#[test]
+fn kst_inline_rule_respects_ignore_and_noqa() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[[tool.konform.lint.structural-rules.rules]]
+id = \"KST001\"
+message = \"no assert in pytest fixtures\"
+match = { kind = \"assert\", inside = { decorated_with = \"pytest.fixture\" } }
+",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("a.py"), FIXTURE_SRC).unwrap();
+    std::fs::write(
+        dir.path().join("b.py"),
+        "import pytest\n\n@pytest.fixture\ndef f():\n    assert 1  # noqa: KST001\n",
+    )
+    .unwrap();
+
+    let run = |extra: &[&str]| {
+        let out = Command::cargo_bin("konform")
+            .unwrap()
+            .current_dir(dir.path())
+            .args(["check", "--no-cache"])
+            .args(extra)
+            .arg(".")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let stderr = run(&[]);
+    assert!(stderr.contains("warning[KST001]"), "{stderr}");
+    assert!(
+        stderr.contains("a.py") && !stderr.contains("b.py"),
+        "{stderr}"
+    );
+    assert!(!run(&["--ignore", "KST001"]).contains("warning[KST001]"));
+    assert!(!run(&["--select", "KIS"]).contains("warning[KST001]"));
+}
+
+/// A broken rule is reported on stderr and skipped instead of aborting.
+#[test]
+fn kst_invalid_rule_is_reported_and_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();
+    std::fs::write(
+        dir.path().join("konform_rules.toml"),
+        format!(
+            "{NO_ASSERT_RULE}\n[[rules]]\nid = \"KST002\"\nmessage = \"m\"\nmatch = {{ kind = \"banana\" }}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("a.py"), FIXTURE_SRC).unwrap();
+
+    let out = Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["check", "--no-cache", "a.py"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("skipping structural rule 'KST002'"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("unknown kind 'banana'"), "{stderr}");
+    assert!(stderr.contains("error[KST001]"), "{stderr}");
+}
+
+#[test]
+fn kst_rules_are_listed_and_explainable() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();
+    std::fs::write(dir.path().join("konform_rules.toml"), NO_ASSERT_RULE).unwrap();
+
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["rule", "--list"])
+        .assert()
+        .success()
+        .stdout(contains("KST001"))
+        .stdout(contains("no assert in pytest fixtures"));
+
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["rule", "--explain", "KST001"])
+        .assert()
+        .success()
+        .stdout(contains("konform_rules.toml"))
+        .stdout(contains("pytest.fixture"))
+        .stdout(contains("decorated_with"));
+}
+
+/// Editing `konform_rules.toml` must not replay results cached under the old
+/// rule, even though the checked `.py` file is unchanged.
+#[test]
+fn editing_kst_rules_file_invalidates_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();
+    std::fs::write(dir.path().join("b.py"), FIXTURE_SRC).unwrap();
+    let rules = dir.path().join("konform_rules.toml");
+    std::fs::write(&rules, NO_ASSERT_RULE).unwrap();
+
+    assert!(run_check_cached(dir.path()).contains("error[KST001]"));
+    assert!(run_check_cached(dir.path()).contains("error[KST001]"));
+
+    std::fs::write(
+        &rules,
+        NO_ASSERT_RULE.replace("level = \"error\"", "level = \"warning\""),
+    )
+    .unwrap();
+    let after = run_check_cached(dir.path());
+    assert!(after.contains("warning[KST001]"), "stale cache: {after}");
 }

@@ -121,6 +121,7 @@ konform rule [OPTIONS]
 | ------ | ----------- |
 | `--list` | List all available rules and exit |
 | `--explain <EXPLAIN>` | Print full documentation for a rule code and exit.<br><br>Example: `konform rule --explain KIS001` |
+| `--test` | Run the `test.valid` / `test.invalid` snippets embedded in user rules.<br><br>Exits 1 if any snippet fails, 2 if a rule definition is invalid. |
 
 ## ast
 

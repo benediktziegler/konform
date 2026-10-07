@@ -182,6 +182,16 @@ impl RuleDoc {
 // Rule trait
 // ---------------------------------------------------------------------------
 
+/// Outcome of the embedded self-tests of one user-defined rule.
+#[derive(Debug)]
+pub struct SelfTestReport {
+    /// The user rule's id.
+    pub code: String,
+    pub passed: usize,
+    /// One `valid[i]: …` / `invalid[i]: …` line per failed case.
+    pub failures: Vec<String>,
+}
+
 /// A single linting or formatting rule.
 ///
 /// Implementations must be `Send + Sync` so the engine can run them in
@@ -249,6 +259,12 @@ pub trait Rule: Send + Sync {
     /// contents of `[tool.konform.lint.module-only-imports]`. Rules that
     /// need no configuration can ignore it.
     fn check(&self, ctx: &FileContext, cfg: &toml::Value) -> Vec<Violation>;
+
+    /// Run the self-tests embedded in user rule definitions (`konform rule
+    /// --test`). One report per user rule; empty for built-in rules.
+    fn self_tests(&self, _cfg: &toml::Value) -> Vec<SelfTestReport> {
+        vec![]
+    }
 
     /// Rewrite the source in `ctx` to fix all violations (or only the one
     /// named by `ctx.fix_target`, see [`FileContext::wants_fix`]), returning

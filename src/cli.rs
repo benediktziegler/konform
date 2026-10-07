@@ -386,4 +386,10 @@ pub struct RuleArgs {
     /// Example: `konform rule --explain KIS001`
     #[arg(long)]
     pub explain: Option<String>,
+
+    /// Run the `test.valid` / `test.invalid` snippets embedded in user rules.
+    ///
+    /// Exits 1 if any snippet fails, 2 if a rule definition is invalid.
+    #[arg(long, default_value_t = false)]
+    pub test: bool,
 }

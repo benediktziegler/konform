@@ -86,6 +86,21 @@ function 5:5  name=my_fixture  decorators=[pytest.fixture]
   assert 8:5
 ```
 
+## Testing rules
+
+Add `valid` / `invalid` snippets to a rule and run `konform rule --test`. Each `valid` snippet must produce no violation of that rule, each `invalid` one at least one (the rule's `files` glob is ignored for snippets). Exit code 1 if a snippet fails, 2 if a rule is invalid; handy in CI next to `konform check`.
+
+```toml
+[[rules]]
+id      = "KST001"
+message = "No `assert` in pytest fixtures"
+match   = { kind = "assert", inside = { kind = "function", decorated_with = "pytest.fixture" } }
+
+[rules.test]
+valid   = ["import pytest\n@pytest.fixture\ndef f():\n    return 1\n"]
+invalid = ["import pytest\n@pytest.fixture\ndef f():\n    assert 1\n"]
+```
+
 ## Stopping the search
 
 `inside` and `has` accept `stop_by`, a matcher that ends the search: the node matching it is still tried first, nothing beyond it is. To ignore helper functions nested in a fixture:

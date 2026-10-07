@@ -505,6 +505,49 @@ mod tests {
         assert!(rule_ids("x = 1  # noqa\n", &config).is_empty());
     }
 
+    // ── KNQ002: noqa style ──────────────────────────────────────────────
+
+    #[test]
+    fn knq002_is_opt_in_and_enabled_with_knq_category() {
+        let src = "x = 1  # noqa: E501 legacy\n";
+        assert!(rule_ids(src, &Config::default()).is_empty());
+
+        let mut config = Config::default();
+        config.lint.extend_select = vec!["KNQ002".into()];
+        assert_eq!(rule_ids(src, &config), ["KNQ002"]);
+
+        let mut config = Config::default();
+        config.lint.select = vec!["KNQ".into()];
+        assert_eq!(rule_ids(src, &config), ["KNQ002"]);
+    }
+
+    #[test]
+    fn knq002_cannot_be_suppressed_by_a_blanket_noqa() {
+        let mut config = Config::default();
+        config.lint.extend_select = vec!["KNQ002".into()];
+        assert_eq!(
+            rule_ids("x = 1  # noqa generated code\n", &config),
+            ["KNQ002"]
+        );
+    }
+
+    #[test]
+    fn run_fix_moves_the_reason_into_its_own_comment() {
+        let rules = all_rules(probe(), None);
+        let p = path();
+        let src = "from os.path import join  # noqa: KIS001 re-exported\n";
+        let mut config = Config::default();
+        config.lint.extend_select = vec!["KNQ002".into()];
+        let fixed = run_fix(&CheckInput::new(&p, src), &rules, &config, false).unwrap();
+        assert_eq!(
+            fixed.as_deref(),
+            Some("from os.path import join  # noqa: KIS001  # re-exported\n")
+        );
+        // Off by default: nothing to fix.
+        let none = run_fix(&CheckInput::new(&p, src), &rules, &Config::default(), false).unwrap();
+        assert!(none.is_none());
+    }
+
     // ── AST-validity safety net: a rule's fix must not corrupt syntax ───────
 
     /// A fake rule whose `fix` always "succeeds" but emits syntactically

@@ -57,7 +57,7 @@ Rules are loaded from the first available source:
 2. `rules_file = "path"` in `[tool.konform.lint.structural-rules]` (`.toml` or `.yaml`).
 3. `konform_rules.toml` next to the config file (use `[[rules]]` tables).
 
-An invalid rule is reported on stderr and skipped; the others still run. Violations are reported at the matched node: the name for functions and classes, the first line for other blocks.
+An invalid rule is a hard error: `konform check` prints every problem (`error: <source>: rule 'KST002': <why>`) and exits 2 without linting, so a typo cannot produce a false green in CI. The language server instead shows one warning and keeps running the valid rules. Violations are reported at the matched node: the name for functions and classes, the first line for other blocks.
 
 ## Matchers
 

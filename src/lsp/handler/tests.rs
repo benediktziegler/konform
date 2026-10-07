@@ -80,6 +80,21 @@ impl TestServer {
             }),
         );
         self.notify("initialized", serde_json::json!({}));
+        // Right after the handshake the server registers its file watchers;
+        // answer that now so the reply cannot interleave with `shutdown`.
+        loop {
+            match self.client.receiver.recv_timeout(TIMEOUT) {
+                Ok(Message::Request(req)) => {
+                    let done = req.method == "client/registerCapability";
+                    self.answer_server_request(req);
+                    if done {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => panic!("server did not register its watchers"),
+            }
+        }
         serde_json::from_value(result["capabilities"].clone())
             .expect("capabilities should deserialize")
     }
@@ -826,6 +841,54 @@ files       = ["*.py"]
     assert_eq!(
         apply_action(source, find_action(&actions, FIX_ALL_TITLE), &uri),
         "logger.info(1)\nlogger.info(2)\n"
+    );
+
+    server.shutdown();
+}
+
+#[test]
+fn invalid_structural_rule_shows_a_warning_and_valid_rules_still_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut config = Config::default();
+    config.lint.rules.insert(
+        "structural-rules".to_owned(),
+        toml::from_str(
+            r#"
+[[rules]]
+id = "KST901"
+message = "no assert"
+match = { kind = "assert" }
+
+[[rules]]
+id = "KST902"
+message = "broken"
+match = { kind = "banana" }
+"#,
+        )
+        .unwrap(),
+    );
+    let mut server = TestServer::new(dir.path().to_path_buf(), config);
+    server.initialize();
+
+    let message = loop {
+        let notif = server.next_notification();
+        if notif.method == "window/showMessage" {
+            break notif.params;
+        }
+    };
+    assert_eq!(message["type"], 2, "{message}");
+    let text = message["message"].as_str().unwrap();
+    assert!(text.contains("KST902") && text.contains("banana"), "{text}");
+
+    server.open(&uri, "assert 1\n");
+    let diags = server.next_diagnostics(&uri);
+    assert!(
+        diags.diagnostics.iter().any(|d| matches!(
+            &d.code,
+            Some(NumberOrString::String(c)) if c == "KST901"
+        )),
+        "{diags:?}"
     );
 
     server.shutdown();

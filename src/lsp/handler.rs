@@ -94,6 +94,12 @@ pub fn main_loop(connection: Connection, session: Arc<RwLock<Session>>) {
     // are managed by the client.
     let mut next_id: u32 = 1;
 
+    // `Connection::initialize` already consumed the client's `initialized`
+    // notification, so the post-handshake work happens here.
+    let config = Arc::clone(&session.read().unwrap().config);
+    register_watchers(&connection, &config);
+    show_config_errors(&connection, &session);
+
     for msg in &connection.receiver {
         match msg {
             Message::Request(req) => {
@@ -511,11 +517,6 @@ fn handle_notification(
     next_id: &mut u32,
 ) {
     match notif.method.as_str() {
-        "initialized" => {
-            // Register file watchers for config and pattern files so we can reload on change.
-            let config = Arc::clone(&session.read().unwrap().config);
-            register_watchers(connection, &config);
-        }
         "textDocument/didOpen" => {
             if let Ok(p) = serde_json::from_value::<DidOpenTextDocumentParams>(notif.params) {
                 let uri = p.text_document.uri.clone();
@@ -557,6 +558,7 @@ fn handle_notification(
                 // Collect open document URIs (can't borrow sess while pushing diags).
                 sess.documents.keys().cloned().collect()
             };
+            show_config_errors(connection, session);
             for uri in uris {
                 push_diagnostics(connection, session, &uri);
             }
@@ -664,6 +666,26 @@ fn push_diagnostics(connection: &Connection, session: &Arc<RwLock<Session>>, uri
         version: None,
     };
     let notif = Notification::new("textDocument/publishDiagnostics".to_owned(), params);
+    connection.sender.send(Message::Notification(notif)).ok();
+}
+
+/// Tell the user about invalid rule configuration with a single
+/// `window/showMessage`. The valid rules keep running, so this is a warning,
+/// not a fatal error as on the CLI.
+fn show_config_errors(connection: &Connection, session: &Arc<RwLock<Session>>) {
+    let errors = session.read().unwrap().config_errors();
+    if errors.is_empty() {
+        return;
+    }
+    let params = ShowMessageParams {
+        typ: MessageType::WARNING,
+        message: format!(
+            "konform: {} invalid rule configuration(s), skipped:\n{}",
+            errors.len(),
+            errors.join("\n")
+        ),
+    };
+    let notif = Notification::new("window/showMessage".to_owned(), params);
     connection.sender.send(Message::Notification(notif)).ok();
 }
 

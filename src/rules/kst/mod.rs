@@ -92,6 +92,21 @@ impl CompiledRule {
 // Loading
 // ---------------------------------------------------------------------------
 
+/// Rules that compiled, plus a message for every one that did not.
+struct Loaded {
+    rules: Arc<Vec<CompiledRule>>,
+    errors: Vec<String>,
+}
+
+impl Loaded {
+    fn new(rules: Vec<CompiledRule>, errors: Vec<String>) -> Self {
+        Self {
+            rules: Arc::new(rules),
+            errors,
+        }
+    }
+}
+
 const INLINE_SOURCE: &str = "inline config";
 
 fn parse_default_level(cfg: &toml::Value) -> Level {
@@ -101,8 +116,9 @@ fn parse_default_level(cfg: &toml::Value) -> Level {
         .unwrap_or(Level::Warning)
 }
 
-fn load_rules(cfg: &toml::Value, config_dir: Option<&Path>) -> Vec<CompiledRule> {
+fn load_rules(cfg: &toml::Value, config_dir: Option<&Path>) -> Loaded {
     let default_level = parse_default_level(cfg);
+    let mut errors = Vec::new();
 
     if let Some(arr) = cfg
         .get("rules")
@@ -111,30 +127,34 @@ fn load_rules(cfg: &toml::Value, config_dir: Option<&Path>) -> Vec<CompiledRule>
     {
         let raws = arr
             .iter()
-            .filter_map(|v| match RawRule::deserialize(v.clone()) {
+            .enumerate()
+            .filter_map(|(i, v)| match RawRule::deserialize(v.clone()) {
                 Ok(raw) => Some(raw),
                 Err(e) => {
-                    eprintln!("konform: skipping structural rule — {e}");
+                    errors.push(format!("{INLINE_SOURCE}: rules[{i}]: {e}"));
                     None
                 }
             })
             .collect();
-        return compile_rules(raws, default_level, INLINE_SOURCE);
+        let rules = compile_rules(raws, default_level, INLINE_SOURCE, &mut errors);
+        return Loaded::new(rules, errors);
     }
 
     if let Some(file) = cfg.get("rules_file").and_then(|v| v.as_str()) {
-        return load_file(&resolve_path(file, config_dir), default_level);
+        let rules = load_file(&resolve_path(file, config_dir), default_level, &mut errors);
+        return Loaded::new(rules, errors);
     }
 
     if let Some(candidate) = config_dir.map(|d| d.join("konform_rules.toml")) {
         if candidate.is_file() {
-            return load_file(&candidate, default_level);
+            let rules = load_file(&candidate, default_level, &mut errors);
+            return Loaded::new(rules, errors);
         }
     }
-    vec![]
+    Loaded::new(vec![], errors)
 }
 
-fn load_file(path: &Path, default_level: Level) -> Vec<CompiledRule> {
+fn load_file(path: &Path, default_level: Level, errors: &mut Vec<String>) -> Vec<CompiledRule> {
     let parsed = std::fs::read_to_string(path)
         .map_err(|e| e.to_string())
         .and_then(|content| {
@@ -145,18 +165,28 @@ fn load_file(path: &Path, default_level: Level) -> Vec<CompiledRule> {
             }
         });
     match parsed {
-        Ok(file) => compile_rules(file.rules, default_level, &path.display().to_string()),
+        Ok(file) => compile_rules(
+            file.rules,
+            default_level,
+            &path.display().to_string(),
+            errors,
+        ),
         Err(e) => {
-            eprintln!(
-                "konform: cannot load structural rules from {}: {e}",
+            errors.push(format!(
+                "cannot load structural rules from {}: {e}",
                 path.display()
-            );
+            ));
             vec![]
         }
     }
 }
 
-fn compile_rules(raws: Vec<RawRule>, default_level: Level, source: &str) -> Vec<CompiledRule> {
+fn compile_rules(
+    raws: Vec<RawRule>,
+    default_level: Level,
+    source: &str,
+    errors: &mut Vec<String>,
+) -> Vec<CompiledRule> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for raw in raws {
@@ -168,7 +198,7 @@ fn compile_rules(raws: Vec<RawRule>, default_level: Level, source: &str) -> Vec<
             level,
             help,
         } = raw;
-        let skip = |why: &str| eprintln!("konform: skipping structural rule '{id}' — {why}");
+        let mut skip = |why: &str| errors.push(format!("{source}: rule '{id}': {why}"));
 
         if !id.starts_with("KST") {
             skip("id must start with 'KST' so select/ignore/noqa can address it");
@@ -235,7 +265,7 @@ pub struct KstRule {
     /// `konform_rules.toml`.
     config_dir: Option<PathBuf>,
     /// Compiled rules for the config last seen; see `KptRule::compiled`.
-    compiled: Mutex<Option<(toml::Value, Arc<Vec<CompiledRule>>)>>,
+    compiled: Mutex<Option<(toml::Value, Arc<Loaded>)>>,
 }
 
 impl KstRule {
@@ -246,16 +276,20 @@ impl KstRule {
         }
     }
 
-    fn rules(&self, cfg: &toml::Value) -> Arc<Vec<CompiledRule>> {
+    fn loaded(&self, cfg: &toml::Value) -> Arc<Loaded> {
         let mut slot = self.compiled.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((key, rules)) = slot.as_ref() {
+        if let Some((key, loaded)) = slot.as_ref() {
             if key == cfg {
-                return Arc::clone(rules);
+                return Arc::clone(loaded);
             }
         }
-        let rules = Arc::new(load_rules(cfg, self.config_dir.as_deref()));
-        *slot = Some((cfg.clone(), Arc::clone(&rules)));
-        rules
+        let loaded = Arc::new(load_rules(cfg, self.config_dir.as_deref()));
+        *slot = Some((cfg.clone(), Arc::clone(&loaded)));
+        loaded
+    }
+
+    fn rules(&self, cfg: &toml::Value) -> Arc<Vec<CompiledRule>> {
+        Arc::clone(&self.loaded(cfg).rules)
     }
 }
 
@@ -372,6 +406,10 @@ impl Rule for KstRule {
         walker.out
     }
 
+    fn config_errors(&self, cfg: &toml::Value) -> Vec<String> {
+        self.loaded(cfg).errors.clone()
+    }
+
     fn fingerprint(&self, cfg: &toml::Value) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = seahash::SeaHasher::new();
@@ -430,8 +468,10 @@ impl Rule for KstRule {
                         1. Inline `[[tool.konform.lint.structural-rules.rules]]` in the config file.\n\
                         2. `rules_file = \"path\"` in `[tool.konform.lint.structural-rules]` (`.toml` or `.yaml`).\n\
                         3. `konform_rules.toml` next to the config file (use `[[rules]]` tables).\n\n\
-                        An invalid rule is reported on stderr and skipped; the others still run. \
-                        Violations are reported at the matched node: the name for functions and \
+                        An invalid rule is a hard error: `konform check` prints every problem \
+                        (`error: <source>: rule 'KST002': <why>`) and exits 2 without linting, so \
+                        a typo cannot produce a false green in CI. The language server instead \
+                        shows one warning and keeps running the valid rules. Violations are reported at the matched node: the name for functions and \
                         classes, the first line for other blocks.",
                 },
                 DocSection {
@@ -899,6 +939,21 @@ match = { all = [{ kind = "function" }, { name = "^_" }] }
         ] {
             assert!(loaded(&one(extra)).is_empty(), "{why} must be rejected");
         }
+    }
+
+    #[test]
+    fn config_errors_name_source_rule_and_reason() {
+        let toml = format!(
+            "{}\n[[rules]]\nid = \"KST901\"\nmessage = \"m\"\nmatch = {{ kind = \"nope\" }}\n",
+            one("match = { kind = \"assert\" }")
+        );
+        let errors = rule().config_errors(&cfg(&toml));
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("rule 'KST901'"), "{errors:?}");
+        assert!(errors[0].contains("unknown kind 'nope'"), "{errors:?}");
+        assert!(rule()
+            .config_errors(&cfg(&one("match = { kind = \"assert\" }")))
+            .is_empty());
     }
 
     #[test]

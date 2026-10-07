@@ -907,6 +907,41 @@ fn run_ast(args: cli::AstArgs) {
     }
 }
 
+fn run_rule_tests(config: &config::Config, all: &[Box<dyn rules::Rule>]) -> ! {
+    let reports: Vec<_> = all
+        .iter()
+        .flat_map(|r| r.self_tests(config.rule_config(r.config_name())))
+        .collect();
+    let mut failed = 0;
+    for r in &reports {
+        let total = r.passed + r.failures.len();
+        if !r.failures.is_empty() {
+            failed += r.failures.len();
+            println!(
+                "{:8}  {}  {}/{total} passed",
+                r.code,
+                "FAIL".red().bold(),
+                r.passed
+            );
+            for f in &r.failures {
+                println!("          {f}");
+            }
+        } else if total == 0 {
+            println!(
+                "{:8}  {}  no test.valid / test.invalid snippets",
+                r.code,
+                "skip".yellow()
+            );
+        } else {
+            println!("{:8}  {}    {total} passed", r.code, "ok".green());
+        }
+    }
+    if reports.is_empty() {
+        println!("No user-defined rules found.");
+    }
+    std::process::exit(i32::from(failed > 0));
+}
+
 fn run_rule(args: RuleArgs, isolated: bool) {
     // Same config discovery as `check`, so user-defined rules show up.
     let config = if isolated {
@@ -932,6 +967,11 @@ fn run_rule(args: RuleArgs, isolated: bool) {
         std::process::exit(0);
     }
 
+    if args.test {
+        exit_on_config_errors(&config, &all);
+        run_rule_tests(&config, &all);
+    }
+
     if let Some(code) = &args.explain {
         match docs.iter().find(|d| d.code == code.as_str()) {
             Some(doc) => {
@@ -949,7 +989,7 @@ fn run_rule(args: RuleArgs, isolated: bool) {
         }
     }
 
-    eprintln!("Use --list to list all rules or --explain <CODE> to explain one.");
+    eprintln!("Use --list, --explain <CODE> or --test.");
     std::process::exit(1);
 }
 

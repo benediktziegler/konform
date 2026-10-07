@@ -12,11 +12,14 @@
 //!
 //! See [`KstRule::explain`] for the rule format and matcher vocabulary.
 
+mod dump;
 mod matcher;
 mod node;
 mod resolve;
 
 use super::docs::{DocSection, Example, RuleDocs, RuleOption};
+pub use dump::dump as dump_ast;
+
 use super::kpt::{glob_matches, resolve_path};
 use super::scope::{build_line_starts, offset_to_line_col};
 use super::{has_noqa, FileContext, Rule, RuleDoc};
@@ -488,6 +491,19 @@ impl Rule for KstRule {
                         | `has` | some descendant matches |\n\
                         | `not` | the node does not match |\n\
                         | `all` / `any` | lists of matchers; all / at least one must match |",
+                },
+                DocSection {
+                    title: "Writing rules",
+                    body: "`konform ast FILE` prints the tree exactly as KST sees it. Each line is a \
+                        node you can match with `kind`, with its position and the values the \
+                        conditions compare against (`name`, import-resolved `qualname` / `callee`, \
+                        `decorators`):\n\n\
+                        ```text\n\
+                        $ konform ast tests/conftest.py\n\
+                        import 1:1\n\
+                        function 5:5  name=my_fixture  decorators=[pytest.fixture]\n\
+                        \x20 assert 8:5\n\
+                        ```",
                 },
                 DocSection {
                     title: "Stopping the search",

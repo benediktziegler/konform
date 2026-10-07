@@ -126,11 +126,19 @@ KIS002 — Import alias policy [sometimes fixable, unsafe]
   rename is actually needed to avoid a naming collision. If `Y` isn't bound
   anywhere else the alias's uses can see, the rename buys nothing.
 
+  Why: an unneeded alias gives one thing two names. Readers must learn that
+  `bar_baz` is really `foo.bar.baz`, grepping for `baz` misses its uses, and
+  the same import can end up aliased differently from file to file.
+
   Bad:
     from foo.bar import baz as bar_baz    # `baz` isn't used anywhere else
 
   Good:
     from foo.bar import baz
+
+  Fix (with --unsafe-fixes) drops the alias and renames its uses:
+    from foo.bar import baz as bar_baz   ->   from foo.bar import baz
+    bar_baz()                            ->   baz()
 
   Not flagged:
     from foo.bar import baz as baz        # explicit re-export idiom;
@@ -156,7 +164,10 @@ KIS002 — Import alias policy [sometimes fixable, unsafe]
 
   With `alias-template`, an alias equal to the rendered template is always
   allowed -- even when the rename isn't needed -- so a project can use one
-  aliasing convention everywhere. Placeholders:
+  aliasing convention everywhere. With the template above:
+    from foo.bar import baz as bar_baz    # allowed: matches the template
+    from foo.bar import baz as other      # flagged: no match, not needed
+  Placeholders:
     {name}          the imported name           (baz)
     {module}        dotted module, dots -> `_`   (foo_bar)
     {module_first}  first module component       (foo)

@@ -25,6 +25,7 @@ use ruff_text_size::Ranged;
 pub mod kis001;
 pub mod kis002;
 pub mod kpt;
+pub mod kst;
 mod scope;
 
 // ---------------------------------------------------------------------------
@@ -355,7 +356,8 @@ pub fn all_rules(
     vec![
         Box::new(kis001::Kis001Rule::new(probe)),
         Box::new(kis002::Kis002Rule::new()),
-        Box::new(kpt::KptRule::new(config_dir)),
+        Box::new(kpt::KptRule::new(config_dir.clone())),
+        Box::new(kst::KstRule::new(config_dir)),
     ]
 }
 

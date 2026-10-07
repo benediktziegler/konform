@@ -1003,6 +1003,7 @@ fn watch_globs_cover_config_pattern_and_rules_files() {
         "**/konform.toml",
         "**/konform_patterns.toml",
         "**/konform_patterns.yaml",
+        "**/konform_rules.toml",
     ] {
         assert!(globs.iter().any(|x| x == g), "missing {g}: {globs:?}");
     }
@@ -1012,10 +1013,18 @@ fn watch_globs_cover_config_pattern_and_rules_files() {
         "user-defined-patterns".into(),
         toml::from_str("rules_file = \"./rules/custom.yaml\"").unwrap(),
     );
+    config.lint.rules.insert(
+        "structural-rules".into(),
+        toml::from_str("rules_file = \"./rules/structural.toml\"").unwrap(),
+    );
     let globs = watch_globs(&config);
     assert!(
         globs.iter().any(|g| g == "**/rules/custom.yaml"),
         "missing rules_file glob: {globs:?}"
+    );
+    assert!(
+        globs.iter().any(|g| g == "**/rules/structural.toml"),
+        "missing structural rules_file glob: {globs:?}"
     );
 }
 

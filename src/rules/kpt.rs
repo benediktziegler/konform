@@ -197,28 +197,39 @@ impl CompiledPattern {
     /// * absolute with a CWD prefix (same thing reached via a different root)
     /// * a bare filename (`*.py` style)
     fn matches_file(&self, path: &Path, config_dir: Option<&Path>, cwd: Option<&Path>) -> bool {
-        let Some(gs) = &self.files else {
-            return true;
-        };
-        // 1. Path as supplied (works when already relative to the project root).
-        if gs.is_match(path) {
-            return true;
-        }
-        // 2. Strip config_dir prefix (LSP / absolute-path CLI invocations).
-        if let Some(rel) = config_dir.and_then(|d| path.strip_prefix(d).ok()) {
-            if gs.is_match(rel) {
-                return true;
-            }
-        }
-        // 3. Strip CWD prefix (absolute CLI paths when CWD != config_dir).
-        if let Some(rel) = cwd.and_then(|d| path.strip_prefix(d).ok()) {
-            if gs.is_match(rel) {
-                return true;
-            }
-        }
-        // 4. Bare filename fallback so `*.py` works without any path prefix.
-        path.file_name().is_some_and(|n| gs.is_match(n))
+        self.files
+            .as_ref()
+            .is_none_or(|gs| glob_matches(gs, path, config_dir, cwd))
     }
+}
+
+/// Does `gs` match `path`, trying the path as supplied, relative to
+/// `config_dir`, relative to `cwd`, and finally just the file name?
+/// Shared with KST's `files` filter.
+pub(super) fn glob_matches(
+    gs: &GlobSet,
+    path: &Path,
+    config_dir: Option<&Path>,
+    cwd: Option<&Path>,
+) -> bool {
+    // 1. Path as supplied (works when already relative to the project root).
+    if gs.is_match(path) {
+        return true;
+    }
+    // 2. Strip config_dir prefix (LSP / absolute-path CLI invocations).
+    if let Some(rel) = config_dir.and_then(|d| path.strip_prefix(d).ok()) {
+        if gs.is_match(rel) {
+            return true;
+        }
+    }
+    // 3. Strip CWD prefix (absolute CLI paths when CWD != config_dir).
+    if let Some(rel) = cwd.and_then(|d| path.strip_prefix(d).ok()) {
+        if gs.is_match(rel) {
+            return true;
+        }
+    }
+    // 4. Bare filename fallback so `*.py` works without any path prefix.
+    path.file_name().is_some_and(|n| gs.is_match(n))
 }
 
 // ---------------------------------------------------------------------------
@@ -631,7 +642,7 @@ fn load_patterns(
     vec![]
 }
 
-fn resolve_path(file_path: &str, config_dir: Option<&Path>) -> PathBuf {
+pub(super) fn resolve_path(file_path: &str, config_dir: Option<&Path>) -> PathBuf {
     let p = PathBuf::from(file_path);
     if p.is_absolute() {
         p

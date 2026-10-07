@@ -147,6 +147,68 @@ Each pattern is addressable by its own `id` in `select`, `ignore`,
 `per-file-ignores` and `# noqa`. `ignore = ["KPT001"]` silences only that
 pattern; `ignore = ["KPT"]` silences every pattern.
 
+### KST — User-defined structural rules
+
+KPT matches text; KST matches **code structure** (the syntax tree), so a rule
+keeps working whatever the formatting, comments or import aliases. For
+example, forbid `assert` inside pytest fixtures:
+
+```toml
+[[tool.konform.lint.structural-rules.rules]]
+id      = "KST001"
+message = "Do not use assert inside a pytest fixture."
+help    = "Raise an explicit exception instead."
+level   = "error"
+files   = ["tests/**"]
+match   = { kind = "assert", inside = { decorated_with = "pytest.fixture" } }
+```
+
+```python
+import pytest
+
+
+@pytest.fixture
+def my_fixture():
+    a = 1
+    assert a == 3  # error[KST001]
+```
+
+Rules can also live in `konform_rules.toml` next to `pyproject.toml`
+(auto-discovered, `[[rules]]` tables) or in a file named by
+`rules_file = "…"` (`.toml` or `.yaml`). Ids must start with `KST`; each id
+is addressable in `select`, `ignore`, `per-file-ignores` and `# noqa`.
+
+A `match` is a table whose conditions must **all** hold:
+
+| Key              | Meaning                                                              |
+| ---------------- | -------------------------------------------------------------------- |
+| `kind`           | node kind, or a list (any of): `function` `class` `lambda` `assert` `assign` `import` `return` `raise` `yield` `try` `with` `for` `while` `if` `call` `await` `name` `attribute` |
+| `name`           | regex searched in the node's identifier (anchor it with `^…$`)       |
+| `qualname`       | import-resolved dotted name of a `name` / `attribute` node           |
+| `callee`         | import-resolved dotted name of a call's function                     |
+| `decorated_with` | import-resolved decorator name(s) on a function or class             |
+| `inside`         | some ancestor matches                                                |
+| `has`            | some descendant matches                                              |
+| `not`            | the node does not match                                              |
+| `all` / `any`    | lists of matchers; all / at least one must match                     |
+
+`inside` and `has` take an extra `stop_by` matcher that ends the search. The
+node matching it is still tried first, nothing beyond it is. To ignore
+helper functions nested in a fixture:
+
+```toml
+match = { kind = "assert", inside = { decorated_with = "pytest.fixture", stop_by = { kind = "function" } } }
+```
+
+Names resolve through the file's imports: `@fixture` after
+`from pytest import fixture`, `@pt.fixture` after `import pytest as pt` and
+`@pytest.fixture(scope="session")` all count as `pytest.fixture`. Resolution
+is file-wide and ignores local rebinding. Violations are reported at the
+matched node (the name for functions and classes, the first line for other
+blocks). An invalid rule is reported on stderr and skipped; the others still
+run. KST rules are not auto-fixable. `konform rule --explain KST000` documents
+the format.
+
 ## Installation
 
 ```bash
@@ -258,6 +320,17 @@ sub_rules = [
     help = "Use redaction helpers before logging.",
   },
 ]
+
+# ── KST — user-defined structural rules ────────────────────────────────────
+# Rules match the syntax tree; see "KST — User-defined structural rules" above.
+[tool.konform.lint.structural-rules]
+level = "warning"
+# rules_file = "konform_rules.toml"
+
+[[tool.konform.lint.structural-rules.rules]]
+id      = "KST001"
+message = "Do not use assert inside a pytest fixture."
+match   = { kind = "assert", inside = { decorated_with = "pytest.fixture" } }
 ```
 
 Each rule's settings live in its own table, keyed by a stable config name
@@ -313,8 +386,9 @@ src = ["lib"]
 Results are cached per file (keyed by mtime and permissions) in `cache-dir`.
 The cache is also keyed by the settings that affect results — `select`,
 `ignore`, the Python environment, rule config tables, `per-file-ignores`,
-`noqa-aliases` and the content of user-defined patterns (including
-`konform_patterns.toml`) — so editing any of them re-lints unchanged files.
+`noqa-aliases` and the content of user-defined patterns and structural rules
+(including `konform_patterns.toml` and `konform_rules.toml`) — so editing any
+of them re-lints unchanged files.
 Use `--no-cache` to bypass it, or `konform clean` to delete it.
 
 ## Suppressing violations
@@ -375,9 +449,10 @@ unsafe fixes)** (`source.fixAll.konform.unsafe`), the latter only offered
 when it would change something beyond the safe-only pass.
 
 The server builds its rules once and reloads them when `pyproject.toml`,
-`konform.toml`, `konform_patterns.toml` / `.yaml`, or the configured
-`rules_file` changes (it asks the editor to watch those files). If you point
-`rules_file` at a different path, restart the server so the new file is watched.
+`konform.toml`, `konform_patterns.toml` / `.yaml`, `konform_rules.toml`, or the
+configured `rules_file` (of either rule) changes (it asks the editor to watch
+those files). If you point `rules_file` at a different path, restart the server
+so the new file is watched.
 
 ### Neovim (nvim-lspconfig)
 

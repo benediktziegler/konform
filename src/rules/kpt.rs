@@ -249,6 +249,7 @@ impl Rule for KptRule {
         }
 
         let lines: Vec<&str> = ctx.source.lines().collect();
+        let noqa = ctx.noqa_lines();
         let mut violations = Vec::new();
         let cwd = std::env::current_dir().ok();
 
@@ -275,7 +276,7 @@ impl Rule for KptRule {
                         let end_col = m.end() - end_prefix.rfind('\n').map(|p| p + 1).unwrap_or(0);
 
                         // noqa is checked against the first line of the match.
-                        let first_line = ctx.lines.get(line_0).map(String::as_str).unwrap_or("");
+                        let first_line = noqa.get(line_0).copied().unwrap_or("");
                         if ctx.ignore_noqa || !has_noqa(first_line, &pattern.id, &ctx.noqa_aliases)
                         {
                             let matched_str = m.as_str();
@@ -309,7 +310,8 @@ impl Rule for KptRule {
                         .filter_map(|re| re.find(line))
                         .max_by_key(|m| m.end() - m.start())
                     {
-                        if ctx.ignore_noqa || !has_noqa(line, &pattern.id, &ctx.noqa_aliases) {
+                        let noqa_text = noqa.get(i).copied().unwrap_or("");
+                        if ctx.ignore_noqa || !has_noqa(noqa_text, &pattern.id, &ctx.noqa_aliases) {
                             // Apply sub-rules in declaration order; first match wins
                             // and overrides the parent message and help for this line.
                             let (message, help) = pattern
@@ -878,6 +880,48 @@ pattern = 'print\('
         );
         let v = rule().check(&ctx("print('x')  # noqa\n"), &cfg);
         assert!(v.is_empty());
+    }
+
+    #[test]
+    fn noqa_text_inside_string_literal_does_not_suppress() {
+        let cfg = cfg_with_rules(
+            r#"
+[[rules]]
+id      = "KPT020"
+message = "x assign"
+pattern = '^x'
+"#,
+        );
+        let v = rule().check(&ctx("x = \"# noqa\"\n"), &cfg);
+        assert_eq!(v.len(), 1, "a string is not a comment: {v:?}");
+    }
+
+    #[test]
+    fn noqa_in_non_python_file_still_uses_raw_line() {
+        let cfg = cfg_with_rules(
+            r#"
+[[rules]]
+id      = "KPT020"
+message = "key"
+pattern = '^key'
+"#,
+        );
+        let v = rule().check(&ctx_path("data.yaml", "key: 1  # noqa\n"), &cfg);
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn noqa_with_trailing_comma_only_suppresses_listed_codes() {
+        let cfg = cfg_with_rules(
+            r#"
+[[rules]]
+id      = "KPT020"
+message = "x assign"
+pattern = '^x'
+"#,
+        );
+        let v = rule().check(&ctx("x = 1  # noqa: KIS001,\n"), &cfg);
+        assert_eq!(v.len(), 1, "KIS001 noqa must not silence KPT020: {v:?}");
     }
 
     // ── per-pattern level ─────────────────────────────────────────────────

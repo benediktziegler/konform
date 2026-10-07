@@ -49,7 +49,7 @@ use super::scope::{
     collect_load_names, is_name_shadowed, offset_to_line_col, parse_module_stmts,
     shadowed_at_occurrences_of, NamedSpan, ScopeIndex,
 };
-use super::{has_noqa, FileContext, Rule};
+use super::{has_noqa, noqa_lines, FileContext, Rule};
 use crate::types::{Level, Violation};
 use anyhow::Result;
 use ruff_python_ast::Stmt;
@@ -595,7 +595,7 @@ fn check_aliases(
         return Vec::new();
     };
     let line_starts = build_line_starts(source);
-    let lines: Vec<&str> = source.lines().collect();
+    let lines = noqa_lines(source);
 
     let mut violations = Vec::new();
     for (cand, fixable) in analysis.flagged() {
@@ -652,7 +652,7 @@ fn apply_fixes(ctx: &FileContext, settings: &Kis002Settings) -> Option<String> {
     let source = ctx.source.as_str();
     let analysis = AliasAnalysis::new(source, settings.template().as_ref())?;
     let line_starts = build_line_starts(source);
-    let lines: Vec<&str> = source.lines().collect();
+    let lines = noqa_lines(source);
 
     let mut renames: HashMap<&str, &str> = HashMap::new();
     let mut splices: Vec<(u32, u32, String)> = Vec::new();
@@ -846,6 +846,20 @@ mod tests {
         let src = "from foo.bar import baz as bar_baz  # noqa: KIS002\n";
         let viols = rule().check(&ctx(src), &empty_cfg());
         assert!(viols.is_empty());
+    }
+
+    #[test]
+    fn noqa_with_trailing_comma_only_suppresses_listed_codes() {
+        let src = "from foo.bar import baz as bar_baz  # noqa: KIS001,\n";
+        assert_eq!(rule().check(&ctx(src), &empty_cfg()).len(), 1);
+        let src = "from foo.bar import baz as bar_baz  # noqa: KIS002,\n";
+        assert!(rule().check(&ctx(src), &empty_cfg()).is_empty());
+    }
+
+    #[test]
+    fn noqa_text_inside_string_literal_does_not_suppress() {
+        let src = "from foo.bar import baz as bar_baz; s = \"# noqa\"\n";
+        assert_eq!(rule().check(&ctx(src), &empty_cfg()).len(), 1);
     }
 
     #[test]

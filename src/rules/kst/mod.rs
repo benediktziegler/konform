@@ -16,9 +16,11 @@ mod dump;
 mod matcher;
 mod node;
 mod resolve;
+mod schema;
 
 use super::docs::{DocSection, Example, RuleDocs, RuleOption};
 pub use dump::dump as dump_ast;
+pub use schema::rules_schema;
 
 use super::kpt::{glob_matches, resolve_path};
 use super::scope::{build_line_starts, offset_to_line_col};
@@ -590,6 +592,13 @@ impl Rule for KstRule {
                         valid   = [\"import pytest\\n@pytest.fixture\\ndef f():\\n    return 1\\n\"]\n\
                         invalid = [\"import pytest\\n@pytest.fixture\\ndef f():\\n    assert 1\\n\"]\n\
                         ```",
+                },
+                DocSection {
+                    title: "Editor support",
+                    body: "`konform rule --schema > konform-rules.schema.json` writes a JSON Schema of \
+                        the rules file (the `kind` list is generated from the vocabulary). \
+                        Reference it for completion and validation, e.g. with taplo put \
+                        `#:schema ./konform-rules.schema.json` at the top of `konform_rules.toml`.",
                 },
                 DocSection {
                     title: "Stopping the search",

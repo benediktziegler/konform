@@ -387,6 +387,13 @@ pub struct RuleArgs {
     #[arg(long)]
     pub explain: Option<String>,
 
+    /// Print the JSON Schema of the structural rules file and exit.
+    ///
+    /// Save it and point your editor at it for completion, e.g. with taplo:
+    /// `#:schema ./konform-rules.schema.json` at the top of konform_rules.toml.
+    #[arg(long, default_value_t = false)]
+    pub schema: bool,
+
     /// Run the `test.valid` / `test.invalid` snippets embedded in user rules.
     ///
     /// Exits 1 if any snippet fails, 2 if a rule definition is invalid.

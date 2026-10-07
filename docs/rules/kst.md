@@ -101,6 +101,10 @@ valid   = ["import pytest\n@pytest.fixture\ndef f():\n    return 1\n"]
 invalid = ["import pytest\n@pytest.fixture\ndef f():\n    assert 1\n"]
 ```
 
+## Editor support
+
+`konform rule --schema > konform-rules.schema.json` writes a JSON Schema of the rules file (the `kind` list is generated from the vocabulary). Reference it for completion and validation, e.g. with taplo put `#:schema ./konform-rules.schema.json` at the top of `konform_rules.toml`.
+
 ## Stopping the search
 
 `inside` and `has` accept `stop_by`, a matcher that ends the search: the node matching it is still tried first, nothing beyond it is. To ignore helper functions nested in a fixture:

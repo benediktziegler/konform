@@ -943,6 +943,13 @@ fn run_rule_tests(config: &config::Config, all: &[Box<dyn rules::Rule>]) -> ! {
 }
 
 fn run_rule(args: RuleArgs, isolated: bool) {
+    if args.schema {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rules::kst::rules_schema()).unwrap_or_default()
+        );
+        std::process::exit(0);
+    }
     // Same config discovery as `check`, so user-defined rules show up.
     let config = if isolated {
         config::Config::default()
@@ -989,7 +996,7 @@ fn run_rule(args: RuleArgs, isolated: bool) {
         }
     }
 
-    eprintln!("Use --list, --explain <CODE> or --test.");
+    eprintln!("Use --list, --explain <CODE>, --test or --schema.");
     std::process::exit(1);
 }
 

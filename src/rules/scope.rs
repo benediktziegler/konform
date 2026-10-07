@@ -7,7 +7,6 @@
 //! re-implementing the same delicate AST-walking logic.
 
 use ruff_python_ast::{Expr, Pattern, Stmt};
-use ruff_python_parser::parse_module;
 use ruff_text_size::Ranged;
 use std::collections::{HashMap, HashSet};
 
@@ -39,9 +38,10 @@ pub(crate) fn offset_to_line_col(line_starts: &[u32], offset: u32) -> (usize, us
 
 /// Parse `source` and return its top-level statement list, or an empty
 /// list on a parse error. A small shared helper for the several places that
-/// need the raw AST.
+/// need the raw AST in tests; rules use [`super::FileContext::stmts`].
+#[cfg(test)]
 pub(crate) fn parse_module_stmts(source: &str) -> Vec<Stmt> {
-    match parse_module(source) {
+    match ruff_python_parser::parse_module(source) {
         Ok(parsed) => parsed.into_suite().into_iter().collect(),
         Err(_) => Vec::new(),
     }

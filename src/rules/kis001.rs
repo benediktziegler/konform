@@ -15,9 +15,9 @@
 
 use super::scope::{
     build_line_starts, build_scope_index, collect_all_exports, collect_load_names,
-    offset_to_line_col, parse_module_stmts, shadowed_at_occurrences_of,
+    offset_to_line_col, shadowed_at_occurrences_of,
 };
-use super::{has_noqa, noqa_lines, FileContext, Rule};
+use super::{has_noqa, FileContext, Rule};
 use crate::module_probe::{ModuleCheck, ModuleProbe};
 use crate::types::{Level, Violation};
 use anyhow::Result;
@@ -74,15 +74,7 @@ impl Rule for Kis001Rule {
 
     fn check(&self, ctx: &FileContext, cfg: &toml::Value) -> Vec<Violation> {
         let (exceptions, level, unresolved_level) = parse_kis_config(cfg);
-        check_imports(
-            &ctx.source,
-            &self.probe,
-            &exceptions,
-            level,
-            unresolved_level,
-            ctx.ignore_noqa,
-            &ctx.noqa_aliases,
-        )
+        check_imports(ctx, &self.probe, &exceptions, level, unresolved_level)
     }
 
     fn fix(&self, ctx: &FileContext, cfg: &toml::Value) -> Result<Option<String>> {
@@ -237,20 +229,19 @@ struct FixInfo {
 // AST-based import collection
 // ---------------------------------------------------------------------------
 
-/// Parse `source` once and extract all absolute `from X import Y` statements
+/// Extract from the already-parsed `stmts` all absolute `from X import Y` statements
 /// together with the module's `__all__` exports.
 ///
 /// Returns `(imports, all_exports)`.  On parse error both collections are
 /// empty so the caller silently skips the file.
-fn parse_ast(source: &str) -> (Vec<ParsedImport>, HashSet<String>) {
-    let stmts = parse_module_stmts(source);
+fn parse_ast(stmts: &[Stmt], source: &str) -> (Vec<ParsedImport>, HashSet<String>) {
     if stmts.is_empty() {
         return (vec![], HashSet::new());
     }
     let line_starts = build_line_starts(source);
     let mut imports = Vec::new();
-    collect_imports(&stmts, false, false, &line_starts, &mut imports);
-    let exports = collect_all_exports(&stmts);
+    collect_imports(stmts, false, false, &line_starts, &mut imports);
+    let exports = collect_all_exports(stmts);
     (imports, exports)
 }
 
@@ -557,19 +548,20 @@ fn make_unknown_violation(
 // ---------------------------------------------------------------------------
 
 fn check_imports(
-    source: &str,
+    ctx: &FileContext,
     probe: &ModuleProbe,
     exceptions: &[String],
     level: Level,
     unresolved_level: Option<Level>,
-    ignore_noqa: bool,
-    noqa_aliases: &HashMap<String, String>,
 ) -> Vec<Violation> {
-    let lines = noqa_lines(source);
-    let (imports, all_exports) = parse_ast(source);
-    let stmts = parse_module_stmts(source);
-    let scope_index = build_scope_index(&stmts);
-    let load_names = collect_load_names(&stmts);
+    let source = ctx.source.as_str();
+    let ignore_noqa = ctx.ignore_noqa;
+    let noqa_aliases = &ctx.noqa_aliases;
+    let stmts = ctx.stmts();
+    let lines = ctx.noqa_lines();
+    let (imports, all_exports) = parse_ast(stmts, source);
+    let scope_index = build_scope_index(stmts);
+    let load_names = collect_load_names(stmts);
     let mut violations = Vec::new();
 
     let exception_set: HashSet<&str> = exceptions.iter().map(String::as_str).collect();
@@ -756,11 +748,11 @@ fn apply_fixes(ctx: &FileContext, probe: &ModuleProbe, exceptions: &[String]) ->
     let ignore_noqa = ctx.ignore_noqa;
     let noqa_aliases = &ctx.noqa_aliases;
     let lines: Vec<&str> = source.lines().collect();
-    let noqa = noqa_lines(source);
-    let (imports, all_exports) = parse_ast(source);
-    let stmts = parse_module_stmts(source);
-    let scope_index = build_scope_index(&stmts);
-    let load_names = collect_load_names(&stmts);
+    let noqa = ctx.noqa_lines();
+    let stmts = ctx.stmts();
+    let (imports, all_exports) = parse_ast(stmts, source);
+    let scope_index = build_scope_index(stmts);
+    let load_names = collect_load_names(stmts);
     let exception_set: HashSet<&str> = exceptions.iter().map(String::as_str).collect();
     let bound_targets = bound_import_targets(&imports, probe);
 
@@ -1172,7 +1164,7 @@ fn apply_fixes(ctx: &FileContext, probe: &ModuleProbe, exceptions: &[String]) ->
     let line_starts = build_line_starts(source);
     let mut replacements: Vec<(usize, usize, usize, String)> = Vec::new();
 
-    for occ in collect_load_names(&stmts) {
+    for occ in collect_load_names(stmts) {
         let Some(new_qualified) = renames.get(&occ.name) else {
             continue;
         };
@@ -1251,6 +1243,7 @@ fn apply_fixes(ctx: &FileContext, probe: &ModuleProbe, exceptions: &[String]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::scope::parse_module_stmts;
     use std::path::PathBuf;
 
     fn rule() -> Kis001Rule {

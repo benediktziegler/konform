@@ -125,7 +125,9 @@ fn add_noqa_to_source(source: &str, violations: &[serde_json::Value]) -> Option<
     for v in violations {
         let line_no = v.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
         let rule = v.get("rule").and_then(|r| r.as_str()).unwrap_or("");
-        if line_no > 0 && !rule.is_empty() {
+        // KNQ001 flags the noqa comments themselves; "suppressing" it would
+        // only pile junk onto the comment it complains about.
+        if line_no > 0 && !rule.is_empty() && rule != "KNQ001" {
             by_line.entry(line_no).or_default().insert(rule.to_owned());
         }
     }
@@ -160,9 +162,8 @@ fn add_noqa_to_source(source: &str, violations: &[serde_json::Value]) -> Option<
 ///
 /// Three cases:
 /// 1. Bare `# noqa` (no code list) — suppresses everything; left unchanged.
-/// 2. `# noqa: CODES` — codes from `new_codes` absent from `CODES` are appended
-///    in sorted order.  Any trailing content after the code list is dropped (it
-///    is uncommon and hard to preserve correctly when the list grows).
+/// 2. `# noqa: CODES` — codes from `new_codes` absent from `CODES` are merged
+///    in, sorted.  Any trailing reason after the code list is preserved.
 /// 3. No `# noqa` at all — `  # noqa: CODES` is appended to the line.
 fn merge_noqa(
     line: &str,
@@ -171,28 +172,18 @@ fn merge_noqa(
 ) -> String {
     use std::collections::BTreeSet;
 
-    let Some(noqa_pos) = line.find("# noqa") else {
+    let Some(noqa) = rules::parse_noqa(line) else {
         // No existing noqa — append one.
         let codes_str = new_codes.iter().cloned().collect::<Vec<_>>().join(", ");
         *changed = true;
         return format!("{line}  # noqa: {codes_str}");
     };
 
-    let after = line[noqa_pos + 6..].trim_start();
-    if !after.starts_with(':') {
+    let Some(existing_codes) = noqa.codes else {
         // Bare `# noqa` — suppresses everything; leave unchanged.
         return line.to_owned();
-    }
-
-    // Parse existing codes.  Take only the first whitespace-delimited token of
-    // each comma-separated field so that trailing comments ("# noqa: E501  # why")
-    // do not end up being treated as a code.
-    let existing: BTreeSet<String> = after[1..]
-        .split(',')
-        .filter_map(|s| s.split_whitespace().next())
-        .filter(|s| !s.starts_with('#') && !s.is_empty())
-        .map(str::to_owned)
-        .collect();
+    };
+    let existing: BTreeSet<String> = existing_codes.into_iter().map(str::to_owned).collect();
 
     let missing: Vec<&str> = new_codes
         .iter()
@@ -209,7 +200,12 @@ fn merge_noqa(
     all.extend(missing.iter().map(|s| s.to_string()));
     let codes_str = all.into_iter().collect::<Vec<_>>().join(", ");
     *changed = true;
-    format!("{}# noqa: {}", &line[..noqa_pos], codes_str)
+    format!(
+        "{}# noqa: {}{}",
+        &line[..noqa.start],
+        codes_str,
+        &line[noqa.end..]
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1524,12 +1520,18 @@ mod noqa_tests {
 
     #[test]
     fn merge_noqa_trailing_comment_after_codes_preserved_prefix() {
-        // Trailing commentary after the code list is dropped when merging.
+        // A reason after the code list survives the merge.
         let mut changed = false;
         let codes = ["KIS001".to_owned()].into_iter().collect();
         let result = merge_noqa("code()  # noqa: E501  # intentional", &codes, &mut changed);
-        assert_eq!(result, "code()  # noqa: E501, KIS001");
+        assert_eq!(result, "code()  # noqa: E501, KIS001  # intentional");
         assert!(changed);
+    }
+
+    #[test]
+    fn add_noqa_source_skips_knq001() {
+        let src = "x = 1  # noqa: E501\n";
+        assert!(add_noqa_to_source(src, &[viol("KNQ001", 1)]).is_none());
     }
 
     // add_noqa_to_source -------------------------------------------------------

@@ -12,6 +12,9 @@ from os.path import join   # noqa           everything on this line
 - Empty entries are ignored; `# noqa:` with no codes behaves like a bare `# noqa`.
 - Only real comments count — `# noqa` inside a string literal suppresses nothing.
 - `--ignore-noqa` reports every violation regardless.
+Text after the codes is a free-form explanation and never changes what is suppressed:
+`# noqa: KIS001  # re-exported for plugins` suppresses `KIS001` only.
+[KNQ001](rules/knq001.md) can require that explanation.
 
 ## Adding `noqa` automatically
 

@@ -172,3 +172,27 @@ pattern = '^\s*breakpoint\('
         .stderr(contains("warning[KPT002]"))
         .stderr(contains("warning[KPT001]").not());
 }
+
+/// An invalid pattern regex is reported once per run, not once per file.
+#[test]
+fn invalid_kpt_regex_is_reported_once_for_many_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("konform_patterns.toml"),
+        "[[rules]]\nid = \"KPT030\"\nmessage = \"m\"\npattern = \"(unclosed\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();
+    for i in 1..=5 {
+        std::fs::write(dir.path().join(format!("f{i}.py")), format!("x = {i}\n")).unwrap();
+    }
+
+    let mut cmd = Command::cargo_bin("konform").unwrap();
+    let out = cmd
+        .current_dir(dir.path())
+        .args(["check", "--no-cache", "."])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.matches("invalid regex").count(), 1, "{stderr}");
+}

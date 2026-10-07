@@ -31,6 +31,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use regex::Regex;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -198,11 +199,41 @@ pub struct KptRule {
     /// Used to resolve relative `rules_file` paths and to auto-discover
     /// `konform_patterns.toml` / `konform_patterns.yaml`.
     config_dir: Option<PathBuf>,
+    /// Compiled patterns for the rule config last seen by `check` / `fix`.
+    ///
+    /// Loading reads pattern files and compiles every regex and glob, so it
+    /// must happen once per run, not once per file. The key is the rule
+    /// config the set was built from; a different config rebuilds it.
+    compiled: Mutex<Option<(toml::Value, Arc<Vec<CompiledPattern>>)>>,
 }
 
 impl KptRule {
     pub fn new(config_dir: Option<PathBuf>) -> Self {
-        Self { config_dir }
+        Self {
+            config_dir,
+            compiled: Mutex::new(None),
+        }
+    }
+
+    /// Patterns for `cfg`, loaded and compiled on first use.
+    ///
+    /// The lock is held while compiling so that parallel workers wait for
+    /// one load instead of each repeating it (and each printing the same
+    /// invalid-regex diagnostics).
+    fn patterns(&self, cfg: &toml::Value) -> Arc<Vec<CompiledPattern>> {
+        let mut slot = self.compiled.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((key, patterns)) = slot.as_ref() {
+            if key == cfg {
+                return Arc::clone(patterns);
+            }
+        }
+        let patterns = Arc::new(load_patterns(
+            cfg,
+            self.config_dir.as_deref(),
+            parse_default_level(cfg),
+        ));
+        *slot = Some((cfg.clone(), Arc::clone(&patterns)));
+        patterns
     }
 }
 
@@ -246,8 +277,7 @@ impl Rule for KptRule {
     }
 
     fn check(&self, ctx: &FileContext, cfg: &toml::Value) -> Vec<Violation> {
-        let default_level = parse_default_level(cfg);
-        let patterns = load_patterns(cfg, self.config_dir.as_deref(), default_level);
+        let patterns = self.patterns(cfg);
         if patterns.is_empty() {
             return vec![];
         }
@@ -257,7 +287,7 @@ impl Rule for KptRule {
         let mut violations = Vec::new();
         let cwd = std::env::current_dir().ok();
 
-        for pattern in &patterns {
+        for pattern in patterns.iter() {
             if !ctx.is_enabled(&pattern.id)
                 || !pattern.matches_file(&ctx.path, self.config_dir.as_deref(), cwd.as_deref())
             {
@@ -348,8 +378,7 @@ impl Rule for KptRule {
     }
 
     fn fix(&self, ctx: &FileContext, cfg: &toml::Value) -> Result<Option<String>> {
-        let default_level = parse_default_level(cfg);
-        let patterns = load_patterns(cfg, self.config_dir.as_deref(), default_level);
+        let patterns = self.patterns(cfg);
         let cwd = std::env::current_dir().ok();
         let eol = if ctx.source.contains("\r\n") {
             "\r\n"
@@ -360,7 +389,7 @@ impl Rule for KptRule {
         let mut current = ctx.source.clone();
         let target = ctx.fix_target.as_ref();
 
-        for pattern in &patterns {
+        for pattern in patterns.iter() {
             let Some(replacement) = &pattern.replacement else {
                 continue;
             };
@@ -706,6 +735,29 @@ mod tests {
 
     fn cfg_with_rules(rules_toml: &str) -> toml::Value {
         toml::from_str(rules_toml).unwrap()
+    }
+
+    // ── compile once ───────────────────────────────────────────────────────
+
+    #[test]
+    fn patterns_are_compiled_once_per_config() {
+        let cfg = cfg_with_rules("[[rules]]\nid = \"KPT001\"\nmessage = \"m\"\npattern = 'x'\n");
+        let r = rule();
+        let first = r.patterns(&cfg);
+        let second = r.patterns(&cfg);
+        assert!(Arc::ptr_eq(&first, &second), "same cfg must reuse the set");
+        // check() must go through the same cached set.
+        r.check(&ctx("x = 1\n"), &cfg);
+        assert!(Arc::ptr_eq(&first, &r.patterns(&cfg)));
+    }
+
+    #[test]
+    fn patterns_are_rebuilt_when_config_changes() {
+        let a = cfg_with_rules("[[rules]]\nid = \"KPT001\"\nmessage = \"m\"\npattern = 'x'\n");
+        let b = cfg_with_rules("[[rules]]\nid = \"KPT002\"\nmessage = \"m\"\npattern = 'y'\n");
+        let r = rule();
+        assert_eq!(r.patterns(&a)[0].id, "KPT001");
+        assert_eq!(r.patterns(&b)[0].id, "KPT002");
     }
 
     // ── no patterns ────────────────────────────────────────────────────────

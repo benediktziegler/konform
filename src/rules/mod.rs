@@ -24,6 +24,7 @@ use ruff_text_size::Ranged;
 // ---------------------------------------------------------------------------
 pub mod kis001;
 pub mod kis002;
+pub mod knq001;
 pub mod kpt;
 pub mod kst;
 mod scope;
@@ -127,16 +128,20 @@ impl FileContext {
         self.selection.is_enabled(code)
     }
 
+    /// `true` for `.py` / `.pyi` files (KPT can also target other file types).
+    pub fn is_python(&self) -> bool {
+        self.path
+            .extension()
+            .is_some_and(|e| e == "py" || e == "pyi")
+    }
+
     /// Per-line text to scan for `# noqa` (see [`has_noqa`]).
     ///
     /// For Python files this is only the real comment tokens, so `# noqa`
     /// inside a string literal is ignored. Other file types (KPT can target
     /// them) fall back to the raw line text.
     pub fn noqa_lines(&self) -> Vec<&str> {
-        let is_python = self
-            .path
-            .extension()
-            .is_some_and(|e| e == "py" || e == "pyi");
+        let is_python = self.is_python();
         if is_python && self.source.contains("noqa") {
             comment_lines(&self.source, self.parsed().tokens())
         } else if is_python {
@@ -310,6 +315,97 @@ pub trait Rule: Send + Sync {
 // noqa suppression (prefix-aware)
 // ---------------------------------------------------------------------------
 
+/// A parsed `# noqa` directive, see [`parse_noqa`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Noqa<'a> {
+    /// Byte offset of `# noqa` in the parsed text.
+    pub start: usize,
+    /// Byte offset just past the directive (`# noqa` or `# noqa: A, B`);
+    /// whatever follows is the [`Noqa::reason`].
+    pub end: usize,
+    /// The listed codes / category prefixes. `None` for a blanket `# noqa`
+    /// (bare, or `# noqa:` with nothing after the colon). `Some(vec![])`
+    /// means the colon is followed only by text that is not a code
+    /// (`# noqa: because`), which suppresses nothing.
+    pub codes: Option<Vec<&'a str>>,
+    /// Free text after the directive with surrounding separators (`#`, `-`,
+    /// `:`, `,`, whitespace) trimmed, e.g. `why` for `# noqa: A  # why`.
+    pub reason: &'a str,
+}
+
+impl Noqa<'_> {
+    /// Does the comment explain itself? Separators alone (`# noqa: A  # -`)
+    /// do not count; the reason needs at least one letter or digit.
+    pub fn has_reason(&self) -> bool {
+        self.reason.chars().any(char::is_alphanumeric)
+    }
+}
+
+/// `A`, `KIS`, `KIS001`, `E501`: uppercase letters then optional digits.
+fn is_noqa_code(token: &str) -> bool {
+    let letters = token.bytes().take_while(u8::is_ascii_uppercase).count();
+    letters > 0 && token[letters..].bytes().all(|b| b.is_ascii_digit())
+}
+
+fn is_noqa_separator(c: char) -> bool {
+    c.is_whitespace() || c == ','
+}
+
+/// Trim list separators and comment punctuation off both ends of a reason.
+fn trim_reason(s: &str) -> &str {
+    s.trim_matches(|c: char| is_noqa_separator(c) || "#-–—:".contains(c))
+}
+
+/// Parse the first `# noqa` directive in `text` (a line or a comment token).
+///
+/// Codes are separated by commas and/or whitespace and end at the first
+/// token that is not a code, so trailing explanations neither break nor
+/// widen the suppression: `# noqa: KIS001  # legacy API` lists `KIS001` and
+/// carries the reason `legacy API`.
+pub fn parse_noqa(text: &str) -> Option<Noqa<'_>> {
+    const MARKER: &str = "# noqa";
+    let start = text.find(MARKER)?;
+    let after_marker = start + MARKER.len();
+    let rest = text[after_marker..].trim_start();
+
+    if !rest.starts_with(':') {
+        return Some(Noqa {
+            start,
+            end: after_marker,
+            codes: None,
+            reason: trim_reason(&text[after_marker..]),
+        });
+    }
+
+    // Byte offset just past the colon.
+    let mut end = text.len() - rest.len() + 1;
+    let mut codes = Vec::new();
+    loop {
+        let tail = text[end..].trim_start_matches(is_noqa_separator);
+        let token_start = text.len() - tail.len();
+        let token_len = tail
+            .find(|c: char| !c.is_ascii_alphanumeric())
+            .unwrap_or(tail.len());
+        let token = &tail[..token_len];
+        if !is_noqa_code(token) {
+            break;
+        }
+        codes.push(token);
+        end = token_start + token_len;
+    }
+
+    // `# noqa:` / `# noqa: ,` with no codes and no text stays a blanket
+    // suppression, like Ruff. Empty entries (`A,,B`) are skipped above: an
+    // empty prefix would otherwise match every code.
+    let blanket = codes.is_empty() && text[end..].chars().all(is_noqa_separator);
+    Some(Noqa {
+        start,
+        end,
+        codes: if blanket { None } else { Some(codes) },
+        reason: trim_reason(&text[end..]),
+    })
+}
+
 /// Return `true` if the violation with code `code` is suppressed on `line`
 /// by a `# noqa` comment.
 ///
@@ -318,28 +414,13 @@ pub trait Rule: Send + Sync {
 /// `# noqa: IS001` suppresses `KIS001` violations during a rule-rename
 /// migration. Aliasing an entire category also works, e.g. `"IS" -> "KIS"`.
 pub fn has_noqa(line: &str, code: &str, aliases: &HashMap<String, String>) -> bool {
-    let Some(noqa_pos) = line.find("# noqa") else {
+    let Some(noqa) = parse_noqa(line) else {
         return false;
     };
-    let rest = line[noqa_pos + 6..].trim_start();
-
-    if rest.is_empty() || !rest.starts_with(':') {
+    let Some(codes) = noqa.codes else {
         return true;
-    }
-
-    // Empty entries (`# noqa: A,` / `# noqa: A,,B`) are ignored: an empty
-    // prefix would otherwise match every code. A list with no codes at all
-    // (`# noqa:`) stays a blanket suppression, like Ruff.
-    let mut codes = rest
-        .trim_start_matches(':')
-        .split(',')
-        .map(str::trim)
-        .filter(|c| !c.is_empty())
-        .peekable();
-    if codes.peek().is_none() {
-        return true;
-    }
-    codes.any(|c| {
+    };
+    codes.into_iter().any(|c| {
         code.starts_with(c)
             || aliases
                 .get(c)
@@ -380,6 +461,7 @@ pub fn all_rules(
     vec![
         Box::new(kis001::Kis001Rule::new(probe)),
         Box::new(kis002::Kis002Rule::new()),
+        Box::new(knq001::Knq001Rule::new()),
         Box::new(kpt::KptRule::new(config_dir.clone())),
         Box::new(kst::KstRule::new(config_dir)),
     ]
@@ -436,6 +518,57 @@ mod noqa_matching_tests {
     fn bare_noqa_and_empty_code_list_stay_blanket() {
         assert!(has_noqa("x  # noqa", "KPT020", &none()));
         assert!(has_noqa("x  # noqa:", "KPT020", &none()));
+    }
+
+    #[test]
+    fn reason_after_codes_does_not_break_suppression() {
+        for line in [
+            "x  # noqa: KIS001  # legacy api",
+            "x  # noqa: KIS001 - legacy api",
+            "x  # noqa: KIS001, KPT020 because legacy",
+            "x  # noqa:KIS001#why",
+        ] {
+            assert!(has_noqa(line, "KIS001", &none()), "{line}");
+        }
+        assert!(!has_noqa("x  # noqa: KIS001  # reason", "KPT020", &none()));
+    }
+
+    #[test]
+    fn reason_after_blanket_noqa_stays_blanket() {
+        assert!(has_noqa("x  # noqa  # generated", "KPT020", &none()));
+    }
+
+    #[test]
+    fn non_code_text_after_colon_suppresses_nothing() {
+        assert!(!has_noqa("x  # noqa: because", "KIS001", &none()));
+        assert!(!has_noqa("x  # noqa: kis001", "KIS001", &none()));
+    }
+
+    #[test]
+    fn parse_noqa_splits_directive_from_reason() {
+        let line = "x  # noqa: KIS001, E501  # legacy api";
+        let n = parse_noqa(line).unwrap();
+        assert_eq!(n.codes.as_deref(), Some(["KIS001", "E501"].as_slice()));
+        assert_eq!(&line[n.start..n.end], "# noqa: KIS001, E501");
+        assert_eq!(n.reason, "legacy api");
+        assert!(n.has_reason());
+    }
+
+    #[test]
+    fn parse_noqa_without_reason() {
+        for line in [
+            "# noqa",
+            "# noqa:",
+            "# noqa: A,",
+            "# noqa: A  #",
+            "# noqa: A - ",
+        ] {
+            let n = parse_noqa(line).unwrap();
+            assert!(!n.has_reason(), "{line}: {n:?}");
+        }
+        assert_eq!(parse_noqa("# noqa").unwrap().codes, None);
+        assert_eq!(parse_noqa("# noqa:").unwrap().codes, None);
+        assert!(parse_noqa("# just a comment").is_none());
     }
 
     fn noqa_lines(src: &str) -> Vec<String> {

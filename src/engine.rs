@@ -391,7 +391,7 @@ mod tests {
     fn noqa_alias_suppresses_violation() {
         let rules = all_rules(probe(), None);
         let p = path();
-        let input = CheckInput::new(&p, "from os.path import join  # noqa: IS001\n");
+        let input = CheckInput::new(&p, "from os.path import join  # noqa: IS001  # old code\n");
         let mut config = Config::default();
         config
             .lint
@@ -408,7 +408,7 @@ mod tests {
     fn noqa_alias_category_suppresses_violation() {
         let rules = all_rules(probe(), None);
         let p = path();
-        let input = CheckInput::new(&p, "from os.path import join  # noqa: IS\n");
+        let input = CheckInput::new(&p, "from os.path import join  # noqa: IS  # old category\n");
         let mut config = Config::default();
         config.lint.noqa_aliases.insert("IS".into(), "KIS".into());
         let violations = run_check(&input, &rules, &config);
@@ -433,6 +433,47 @@ mod tests {
             !violations.is_empty(),
             "unrelated alias should not suppress KIS001"
         );
+    }
+
+    // ── KNQ001: noqa justification ──────────────────────────────────────
+
+    fn rule_ids(source: &str, config: &Config) -> Vec<String> {
+        let rules = all_rules(probe(), None);
+        let p = path();
+        run_check(&CheckInput::new(&p, source), &rules, config)
+            .into_iter()
+            .map(|v| v.rule)
+            .collect()
+    }
+
+    #[test]
+    fn knq001_flags_reasonless_noqa_even_when_it_suppresses_another_rule() {
+        let src = "from os.path import join  # noqa: KIS001\n";
+        assert_eq!(rule_ids(src, &Config::default()), ["KNQ001"]);
+    }
+
+    #[test]
+    fn knq001_cannot_be_suppressed_by_noqa() {
+        for src in [
+            "x = 1  # noqa\n",
+            "x = 1  # noqa: KNQ001\n",
+            "x = 1  # noqa: KNQ\n",
+        ] {
+            assert_eq!(rule_ids(src, &Config::default()), ["KNQ001"], "{src:?}");
+        }
+    }
+
+    #[test]
+    fn knq001_accepts_noqa_with_reason_and_still_suppresses() {
+        let src = "from os.path import join  # noqa: KIS001  # re-exported\n";
+        assert!(rule_ids(src, &Config::default()).is_empty());
+    }
+
+    #[test]
+    fn knq001_can_be_ignored_via_config() {
+        let mut config = Config::default();
+        config.lint.ignore = vec!["KNQ001".into()];
+        assert!(rule_ids("x = 1  # noqa\n", &config).is_empty());
     }
 
     // ── AST-validity safety net: a rule's fix must not corrupt syntax ───────

@@ -128,6 +128,54 @@ fn noqa_with_trailing_comma_does_not_suppress_other_codes() {
         .stderr(contains("KIS001"));
 }
 
+/// KNQ001: a suppression needs a reason. The reason must not break the
+/// suppression itself, and the rule cannot be silenced with `# noqa`.
+#[test]
+fn knq001_requires_a_reason_on_noqa() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |src: &str| {
+        let file = dir.path().join("mod.py");
+        std::fs::write(&file, src).unwrap();
+        Command::cargo_bin("konform")
+            .unwrap()
+            .args(["check", "--isolated", "--no-cache"])
+            .arg(&file)
+            .assert()
+    };
+
+    run("from os.path import join  # noqa: KIS001\n")
+        .failure()
+        .stderr(contains("KNQ001"));
+    run("from os.path import join  # noqa: KIS001, KNQ001\n")
+        .failure()
+        .stderr(contains("KNQ001"));
+    run("from os.path import join  # noqa: KIS001  # re-exported for plugins\n").success();
+}
+
+/// `--add-noqa` must not try to "suppress" KNQ001 by piling it onto the
+/// comment it flags.
+#[test]
+fn add_noqa_ignores_knq001() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    std::fs::write(&file, "from os.path import join\n").unwrap();
+    let add = || {
+        Command::cargo_bin("konform")
+            .unwrap()
+            .args(["check", "--isolated", "--no-cache", "--add-noqa"])
+            .arg(&file)
+            .assert()
+            .success();
+    };
+
+    add();
+    add();
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "from os.path import join  # noqa: KIS001\n"
+    );
+}
+
 /// `# noqa` text inside a string literal is not a suppression comment.
 #[test]
 fn noqa_inside_string_literal_does_not_suppress() {
@@ -359,7 +407,7 @@ match = { kind = \"assert\", inside = { decorated_with = \"pytest.fixture\" } }
     std::fs::write(dir.path().join("a.py"), FIXTURE_SRC).unwrap();
     std::fs::write(
         dir.path().join("b.py"),
-        "import pytest\n\n@pytest.fixture\ndef f():\n    assert 1  # noqa: KST001\n",
+        "import pytest\n\n@pytest.fixture\ndef f():\n    assert 1  # noqa: KST001  # legacy fixture\n",
     )
     .unwrap();
 

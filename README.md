@@ -129,6 +129,33 @@ The fix is marked **unsafe** -- konform can't rule out other, dynamic
 references to the alias by name, so it's only applied with `--unsafe-fixes`
 (see [Usage](#usage) below).
 
+### KNQ001 — noqa justification
+
+Every `# noqa` comment must say why. A suppression without a reason hides a
+violation without recording that it is fine, so nobody can tell later whether
+it is still needed.
+
+```python
+# Bad — KNQ001
+from os.path import join   # noqa: KIS001
+value = compute()          # noqa
+
+# Good
+from os.path import join   # noqa: KIS001  # re-exported for plugins
+value = compute()          # noqa: KPT010 - generated code
+```
+
+The reason is any text after the directive in the same comment (leading `#`,
+`-` and `:` are ignored, but it needs at least one letter or digit). The
+`# noqa: CODE  # reason` form is recommended because it reads the same to
+every tool that parses the comment.
+
+This rule can't be suppressed with `# noqa` (not even `# noqa: KNQ001`) and
+`--ignore-noqa` doesn't affect it; turn it off with `ignore` or
+`per-file-ignores`. It is not fixable, and `--add-noqa` never targets it.
+The default level is `error`; set `level = "warning"` to roll it out
+gradually.
+
 ### KPT — User-defined pattern rules
 
 Load regex patterns from `konform_patterns.toml` (auto-discovered next to
@@ -347,6 +374,10 @@ level = "warning"
 # braces. An invalid template is reported on stderr and ignored.
 # alias-template = "{module_last}_{name}"   # foo.bar -> baz as bar_baz
 
+# ── KNQ001 — noqa justification ───────────────────────────────────────────
+[tool.konform.lint.noqa-justification]
+level = "error"   # "error" (default) | "warning"
+
 # ── KPT001 — user-defined patterns ─────────────────────────────────────────
 [tool.konform.lint.user-defined-patterns]
 level = "warning"
@@ -452,6 +483,10 @@ Multiple codes are comma-separated (`# noqa: KIS001, KPT010`); empty entries
 (e.g. a trailing comma) are ignored, and `# noqa:` with no codes behaves like
 a bare `# noqa`. In Python files, only real comments count: the text `# noqa`
 inside a string literal does not suppress anything.
+
+Text after the codes is a free-form explanation and never changes what is
+suppressed: `# noqa: KIS001  # re-exported for plugins` suppresses `KIS001`
+only. [KNQ001](#knq001--noqa-justification) requires that explanation.
 
 ### Aliasing noqa codes
 

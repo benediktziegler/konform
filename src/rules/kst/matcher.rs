@@ -9,10 +9,9 @@
 //! ast-grep. `not` / `all` / `any` combine matchers, and `inside` / `has`
 //! relate a node to its ancestors / descendants.
 
+use super::node::{walk, Flow, Kind, Node, Visitor};
 use super::resolve::Imports;
 use regex::Regex;
-use ruff_python_ast::visitor::source_order::{SourceOrderVisitor, TraversalSignal};
-use ruff_python_ast::{AnyNodeRef, Expr};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -76,92 +75,6 @@ pub(super) struct RawMatcher {
     /// against the relation first).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_by: Option<Box<RawMatcher>>,
-}
-
-// ---------------------------------------------------------------------------
-// Node kinds
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Function,
-    Class,
-    Lambda,
-    Assert,
-    Assign,
-    Import,
-    Return,
-    Raise,
-    Yield,
-    Try,
-    With,
-    For,
-    While,
-    If,
-    Call,
-    Await,
-    Name,
-    Attribute,
-}
-
-impl Kind {
-    const NAMES: &'static [(&'static str, Kind)] = &[
-        ("function", Kind::Function),
-        ("class", Kind::Class),
-        ("lambda", Kind::Lambda),
-        ("assert", Kind::Assert),
-        ("assign", Kind::Assign),
-        ("import", Kind::Import),
-        ("return", Kind::Return),
-        ("raise", Kind::Raise),
-        ("yield", Kind::Yield),
-        ("try", Kind::Try),
-        ("with", Kind::With),
-        ("for", Kind::For),
-        ("while", Kind::While),
-        ("if", Kind::If),
-        ("call", Kind::Call),
-        ("await", Kind::Await),
-        ("name", Kind::Name),
-        ("attribute", Kind::Attribute),
-    ];
-
-    fn parse(s: &str) -> Result<Self, String> {
-        Self::NAMES
-            .iter()
-            .find(|(n, _)| *n == s)
-            .map(|(_, k)| *k)
-            .ok_or_else(|| {
-                let valid: Vec<&str> = Self::NAMES.iter().map(|(n, _)| *n).collect();
-                format!("unknown kind '{s}' (valid: {})", valid.join(", "))
-            })
-    }
-
-    fn of(node: AnyNodeRef<'_>) -> Option<Self> {
-        Some(match node {
-            AnyNodeRef::StmtFunctionDef(_) => Self::Function,
-            AnyNodeRef::StmtClassDef(_) => Self::Class,
-            AnyNodeRef::ExprLambda(_) => Self::Lambda,
-            AnyNodeRef::StmtAssert(_) => Self::Assert,
-            AnyNodeRef::StmtAssign(_)
-            | AnyNodeRef::StmtAnnAssign(_)
-            | AnyNodeRef::StmtAugAssign(_) => Self::Assign,
-            AnyNodeRef::StmtImport(_) | AnyNodeRef::StmtImportFrom(_) => Self::Import,
-            AnyNodeRef::StmtReturn(_) => Self::Return,
-            AnyNodeRef::StmtRaise(_) => Self::Raise,
-            AnyNodeRef::ExprYield(_) | AnyNodeRef::ExprYieldFrom(_) => Self::Yield,
-            AnyNodeRef::StmtTry(_) => Self::Try,
-            AnyNodeRef::StmtWith(_) => Self::With,
-            AnyNodeRef::StmtFor(_) => Self::For,
-            AnyNodeRef::StmtWhile(_) => Self::While,
-            AnyNodeRef::StmtIf(_) => Self::If,
-            AnyNodeRef::ExprCall(_) => Self::Call,
-            AnyNodeRef::ExprAwait(_) => Self::Await,
-            AnyNodeRef::ExprName(_) => Self::Name,
-            AnyNodeRef::ExprAttribute(_) => Self::Attribute,
-            _ => return None,
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -320,51 +233,39 @@ impl Matcher {
     /// relational ones.
     pub(super) fn matches<'a>(
         &self,
-        node: AnyNodeRef<'a>,
-        ancestors: &[AnyNodeRef<'a>],
+        node: Node<'a>,
+        ancestors: &[Node<'a>],
         imports: &Imports,
     ) -> bool {
-        if !self.kinds.is_empty() && !Kind::of(node).is_some_and(|k| self.kinds.contains(&k)) {
+        if !self.kinds.is_empty() && !node.kind().is_some_and(|k| self.kinds.contains(&k)) {
             return false;
         }
         if let Some(re) = &self.name {
-            if !node_name(node).is_some_and(|n| re.is_match(n)) {
+            if !node.name().is_some_and(|n| re.is_match(n)) {
                 return false;
             }
         }
-        if !self.qualnames.is_empty() {
-            let resolved = match node {
-                AnyNodeRef::ExprName(n) => Some(imports.name(n)),
-                AnyNodeRef::ExprAttribute(a) => imports.attribute(a),
-                _ => None,
-            };
-            if !resolved.is_some_and(|q| self.qualnames.contains(&q)) {
-                return false;
-            }
+        if !self.qualnames.is_empty()
+            && !imports
+                .node_qualname(node)
+                .is_some_and(|q| self.qualnames.contains(&q))
+        {
+            return false;
         }
-        if !self.callees.is_empty() {
-            let resolved = match node {
-                AnyNodeRef::ExprCall(c) => imports.qualname(&c.func),
-                _ => None,
-            };
-            if !resolved.is_some_and(|q| self.callees.contains(&q)) {
-                return false;
-            }
+        if !self.callees.is_empty()
+            && !imports
+                .callee_qualname(node)
+                .is_some_and(|q| self.callees.contains(&q))
+        {
+            return false;
         }
-        if !self.decorators.is_empty() {
-            let decorators = match node {
-                AnyNodeRef::StmtFunctionDef(f) => &f.decorator_list[..],
-                AnyNodeRef::StmtClassDef(c) => &c.decorator_list[..],
-                _ => &[],
-            };
-            let hit = decorators.iter().any(|d| {
-                imports
-                    .callable_qualname(&d.expression)
-                    .is_some_and(|q| self.decorators.contains(&q))
-            });
-            if !hit {
-                return false;
-            }
+        if !self.decorators.is_empty()
+            && !imports
+                .decorator_qualnames(node)
+                .iter()
+                .any(|q| self.decorators.contains(q))
+        {
+            return false;
         }
         if let Some(not) = &self.not {
             if not.matches(node, ancestors, imports) {
@@ -391,24 +292,8 @@ impl Matcher {
     }
 }
 
-/// Identifier a node introduces or refers to, if it has a single obvious one.
-fn node_name<'a>(node: AnyNodeRef<'a>) -> Option<&'a str> {
-    match node {
-        AnyNodeRef::StmtFunctionDef(f) => Some(f.name.as_str()),
-        AnyNodeRef::StmtClassDef(c) => Some(c.name.as_str()),
-        AnyNodeRef::ExprName(n) => Some(n.id.as_str()),
-        AnyNodeRef::ExprAttribute(a) => Some(a.attr.as_str()),
-        AnyNodeRef::ExprCall(c) => match &*c.func {
-            Expr::Name(n) => Some(n.id.as_str()),
-            Expr::Attribute(a) => Some(a.attr.as_str()),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 /// Walk the ancestors from the nearest outwards.
-fn inside<'a>(rel: &Relation, ancestors: &[AnyNodeRef<'a>], imports: &Imports) -> bool {
+fn inside<'a>(rel: &Relation, ancestors: &[Node<'a>], imports: &Imports) -> bool {
     for (i, &ancestor) in ancestors.iter().enumerate().rev() {
         let above = &ancestors[..i];
         if rel.matcher.matches(ancestor, above, imports) {
@@ -430,42 +315,37 @@ struct HasFinder<'m, 'a> {
     imports: &'m Imports,
     /// Ancestors of the node being visited; kept balanced with
     /// `leave_node`, which the traversal calls even for skipped nodes.
-    path: Vec<AnyNodeRef<'a>>,
+    path: Vec<Node<'a>>,
     found: bool,
 }
 
-impl<'a> SourceOrderVisitor<'a> for HasFinder<'_, 'a> {
-    fn enter_node(&mut self, node: AnyNodeRef<'a>) -> TraversalSignal {
+impl<'a> Visitor<'a> for HasFinder<'_, 'a> {
+    fn enter(&mut self, node: Node<'a>) -> Flow {
         let signal = if self.found {
-            TraversalSignal::Skip
+            Flow::Skip
         } else if self.rel.matcher.matches(node, &self.path, self.imports) {
             self.found = true;
-            TraversalSignal::Skip
+            Flow::Skip
         } else if self
             .rel
             .stop_by
             .as_ref()
             .is_some_and(|s| s.matches(node, &self.path, self.imports))
         {
-            TraversalSignal::Skip
+            Flow::Skip
         } else {
-            TraversalSignal::Traverse
+            Flow::Descend
         };
         self.path.push(node);
         signal
     }
 
-    fn leave_node(&mut self, _node: AnyNodeRef<'a>) {
+    fn leave(&mut self, _node: Node<'a>) {
         self.path.pop();
     }
 }
 
-fn has<'a>(
-    rel: &Relation,
-    node: AnyNodeRef<'a>,
-    ancestors: &[AnyNodeRef<'a>],
-    imports: &Imports,
-) -> bool {
+fn has<'a>(rel: &Relation, node: Node<'a>, ancestors: &[Node<'a>], imports: &Imports) -> bool {
     let mut path = ancestors.to_vec();
     path.push(node);
     let mut finder = HasFinder {
@@ -474,6 +354,6 @@ fn has<'a>(
         path,
         found: false,
     };
-    node.visit_source_order(&mut finder);
+    walk(node, &mut finder);
     finder.found
 }

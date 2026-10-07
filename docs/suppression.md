@@ -29,11 +29,11 @@ Appends `# noqa: CODE` to each violating line. Codes merge into an existing list
 ### Baselining with `--add-noqa`
 
 `konform check --add-noqa` appends `# noqa: CODE` to every line with a violation (merging
-into an existing `# noqa: ...`; a blanket `# noqa` is left as is). Pass `--reason` to
+into an existing `# noqa: ...`; a blanket `# noqa` is left as is). Pass `--noqa-reason` to
 record why, once, for the whole baseline:
 
 ```console
-$ konform check --add-noqa --reason "legacy, tracked in ABC-123" src/
+$ konform check --add-noqa --noqa-reason "legacy, tracked in ABC-123" src/
 # from os.path import join  # noqa: KIS001  # legacy, tracked in ABC-123
 ```
 

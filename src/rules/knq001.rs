@@ -192,7 +192,7 @@ impl Rule for Knq001Rule {
                 title: "Suppressing and fixing",
                 body: "This rule cannot be suppressed with `# noqa` (not even `# noqa: KNQ001`), and \
                     `--ignore-noqa` does not affect it. Turn it off with `ignore` or \
-                    `per-file-ignores` instead. It is not fixable. `konform check --add-noqa --reason \"...\"` fills in a \
+                    `per-file-ignores` instead. It is not fixable. `konform check --add-noqa --noqa-reason \"...\"` fills in a \
                     missing reason on the comments it flags (see \
                     [Baselining](../suppression.md#baselining-with---add-noqa)).",
                 },

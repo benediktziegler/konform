@@ -93,6 +93,14 @@ Keyed by config name under `[tool.konform.lint]`.
 | `rules_file` | `str`                  | unset       |
 | `rules`      | array of tables        | `[]`        |
 
+### `structural-rules` ([KST](../rules/kst.md))
+
+| Option       | Type                   | Default     |
+| ------------ | ---------------------- | ----------- |
+| `level`      | `"warning" \| "error"` | `"warning"` |
+| `rules_file` | `str`                  | unset       |
+| `rules`      | array of tables        | `[]`        |
+
 ## Full example
 
 ```toml

@@ -1,4 +1,4 @@
-//! KIS002 — Konform Import Style: unnecessary import aliases.
+//! KIS002 — Konform Import Style: import alias policy (unnecessary aliases).
 //!
 //! Flags `from X import Y as Z` when the rename to `Z` isn't needed to avoid
 //! a naming collision -- i.e. `Y` itself is never bound anywhere else that
@@ -31,6 +31,15 @@
 //!   deliberate re-export under that name, and dropping the alias would
 //!   silently remove it from the namespace.
 //!
+//! Two situations make an alias legitimate and exempt it from the rule:
+//! - Several aliased imports of the same name from different modules in one
+//!   scope (`from a.b import baz as b_baz` / `from c.d import baz as d_baz`):
+//!   the aliases are what keeps the names apart.
+//! - The alias matches the configured `alias-template` (see [`AliasTemplate`]),
+//!   so a project can enforce one aliasing convention even where the rename
+//!   isn't strictly needed. The template only exempts aliases; it never
+//!   flags any.
+//!
 //! The fix is marked **unsafe** (see [`super::Rule::is_unsafe_fix`]): it can
 //! only see uses of the alias within the file being fixed, so it's applied
 //! only when `--unsafe-fixes` is passed alongside `--fix`.
@@ -47,6 +56,7 @@ use ruff_python_ast::Stmt;
 use ruff_text_size::Ranged;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::sync::Once;
 
 // ---------------------------------------------------------------------------
 // Rule struct
@@ -75,11 +85,11 @@ impl Rule for Kis002Rule {
     }
 
     fn config_name(&self) -> &str {
-        "unnecessary-import-alias"
+        "import-alias-policy"
     }
 
     fn name(&self) -> &str {
-        "Unnecessary import alias"
+        "Import alias policy"
     }
 
     fn description(&self) -> &str {
@@ -100,17 +110,17 @@ impl Rule for Kis002Rule {
     }
 
     fn check(&self, ctx: &FileContext, cfg: &toml::Value) -> Vec<Violation> {
-        let level = parse_kis002_config(cfg);
-        check_aliases(&ctx.source, level, ctx.ignore_noqa, &ctx.noqa_aliases)
+        let settings = parse_kis002_config(cfg);
+        check_aliases(&ctx.source, &settings, ctx.ignore_noqa, &ctx.noqa_aliases)
     }
 
-    fn fix(&self, ctx: &FileContext, _cfg: &toml::Value) -> Result<Option<String>> {
-        Ok(apply_fixes(ctx))
+    fn fix(&self, ctx: &FileContext, cfg: &toml::Value) -> Result<Option<String>> {
+        Ok(apply_fixes(ctx, &parse_kis002_config(cfg)))
     }
 
     fn explain(&self) -> String {
         "\
-KIS002 — Unnecessary import alias [sometimes fixable, unsafe]
+KIS002 — Import alias policy [sometimes fixable, unsafe]
 
   Checks that `from X import Y as Z` only renames the import when the
   rename is actually needed to avoid a naming collision. If `Y` isn't bound
@@ -135,8 +145,25 @@ KIS002 — Unnecessary import alias [sometimes fixable, unsafe]
     from foo.bar import baz as bar_baz    # `bar_baz` is part of this
                                            # module's public API
 
-  Configure the severity in [tool.konform.lint.unnecessary-import-alias]:
+  Also not flagged: several aliased imports of the same name from different
+  modules, since the aliases keep them apart:
+    from foo.bar import baz as bar_baz
+    from nor.kind import baz as kind_baz
+
+  Configure in [tool.konform.lint.import-alias-policy]:
     level = \"warning\"   # default: \"warning\" | \"error\"
+    alias-template = \"{module_last}_{name}\"   # optional
+
+  With `alias-template`, an alias equal to the rendered template is always
+  allowed -- even when the rename isn't needed -- so a project can use one
+  aliasing convention everywhere. Placeholders:
+    {name}          the imported name           (baz)
+    {module}        dotted module, dots -> `_`   (foo_bar)
+    {module_first}  first module component       (foo)
+    {module_last}   last module component        (bar)
+  The template only ever allows aliases; it never flags any. Placeholders
+  must be written exactly (no spaces) and no other braces are allowed. An
+  invalid template is reported on stderr and ignored.
 
   Not every violation can be auto-fixed: if the alias is also bound
   elsewhere (shadowed by a local variable, or ambiguous with a different
@@ -161,25 +188,118 @@ KIS002 — Unnecessary import alias [sometimes fixable, unsafe]
 // Config helper
 // ---------------------------------------------------------------------------
 
-/// `[tool.konform.lint.unnecessary-import-alias]` settings for KIS002.
+/// `[tool.konform.lint.import-alias-policy]` settings for KIS002.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 struct Kis002Settings {
     level: Level,
+    /// Optional template; aliases equal to its rendering are always allowed.
+    alias_template: Option<String>,
 }
 
 impl Default for Kis002Settings {
     fn default() -> Self {
         Self {
             level: Level::Warning,
+            alias_template: None,
         }
     }
 }
 
-fn parse_kis002_config(cfg: &toml::Value) -> Level {
-    Kis002Settings::deserialize(cfg.clone())
-        .unwrap_or_default()
-        .level
+fn parse_kis002_config(cfg: &toml::Value) -> Kis002Settings {
+    Kis002Settings::deserialize(cfg.clone()).unwrap_or_default()
+}
+
+impl Kis002Settings {
+    /// The parsed `alias-template`, if one is configured and valid. An
+    /// invalid template is reported on stderr (once per process) and
+    /// otherwise ignored.
+    fn template(&self) -> Option<AliasTemplate> {
+        static WARNED: Once = Once::new();
+        let src = self.alias_template.as_deref()?;
+        match AliasTemplate::parse(src) {
+            Ok(t) => Some(t),
+            Err(err) => {
+                WARNED.call_once(|| {
+                    eprintln!(
+                        "konform: ignoring invalid import-alias-policy.alias-template \
+                         {src:?}: {err}"
+                    );
+                });
+                None
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Alias template
+// ---------------------------------------------------------------------------
+
+const PLACEHOLDERS: [&str; 4] = ["{name}", "{module}", "{module_first}", "{module_last}"];
+
+/// A validated `alias-template`, e.g. `{module_last}_{name}`.
+///
+/// Placeholders: `{name}`, `{module}` (dots become `_`), `{module_first}`,
+/// `{module_last}`. Python identifiers can't contain braces, so any other
+/// `{` or `}` makes the template invalid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AliasTemplate(String);
+
+impl AliasTemplate {
+    fn parse(src: &str) -> Result<Self, String> {
+        let rest = PLACEHOLDERS
+            .iter()
+            .fold(src.to_owned(), |acc, p| acc.replace(p, ""));
+        if rest.contains(['{', '}']) {
+            return Err(format!(
+                "unknown placeholder or unbalanced brace (supported: {})",
+                PLACEHOLDERS.join(", ")
+            ));
+        }
+        Ok(Self(src.to_owned()))
+    }
+
+    fn render(&self, module: &str, name: &str) -> String {
+        self.0
+            .replace("{module_first}", module.split('.').next().unwrap_or(module))
+            .replace("{module_last}", module.rsplit('.').next().unwrap_or(module))
+            .replace("{module}", &module.replace('.', "_"))
+            .replace("{name}", name)
+    }
+}
+
+/// Aliases that are legitimate even if dropping them wouldn't collide, keyed
+/// by `alias_start`: (a) several aliased imports of one name from different
+/// modules in the same scope, (b) aliases equal to the rendered template.
+fn collect_allowed_by_convention(
+    cands: &[AliasCandidate],
+    scope_index: &ScopeIndex,
+    template: Option<&AliasTemplate>,
+) -> HashSet<u32> {
+    let slot_of = |cand: &'_ AliasCandidate| {
+        (
+            bucket_for_offset(scope_index, cand.alias_start),
+            cand.name.clone(),
+        )
+    };
+    let mut modules_by_slot: HashMap<(Option<u32>, String), HashSet<&str>> = HashMap::new();
+    for cand in cands {
+        modules_by_slot
+            .entry(slot_of(cand))
+            .or_default()
+            .insert(cand.module.as_str());
+    }
+    cands
+        .iter()
+        .filter(|cand| {
+            modules_by_slot
+                .get(&slot_of(cand))
+                .is_some_and(|m| m.len() > 1)
+                || template.is_some_and(|t| t.render(&cand.module, &cand.name) == cand.asname)
+        })
+        .map(|cand| cand.alias_start)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -307,102 +427,147 @@ fn collect_import_bindings_rec(stmts: &[Stmt], out: &mut HashMap<String, HashSet
 }
 
 // ---------------------------------------------------------------------------
-// Necessity / fixability checks
+// Analysis
 // ---------------------------------------------------------------------------
 
-/// Is the rename in `cand` actually needed to avoid a collision -- or is it
-/// otherwise not a genuine "unnecessary alias"? If so, KIS002 must not flag
-/// it at all. Checks both the import's own declaration site (an unused
-/// alias whose original name collides with something is still a real
-/// collision) and every place the alias is actually read.
-///
-/// Also treats the alias as necessary when `asname` is listed in the
-/// module's `__all__`: that's a deliberate re-export under that name, not
-/// an accidental rename, and rewriting it would remove the exported name
-/// from the namespace entirely.
-fn is_necessary(
-    cand: &AliasCandidate,
-    load_names: &[NamedSpan],
-    scope_index: &ScopeIndex,
-    bound_targets: &HashMap<String, HashSet<String>>,
-    all_exports: &HashSet<String>,
-) -> bool {
-    all_exports.contains(&cand.asname)
-        || bound_targets.contains_key(&cand.name)
-        || is_name_shadowed(
-            &cand.name,
-            bucket_for_offset(scope_index, cand.alias_start),
-            scope_index,
-        )
-        || shadowed_at_occurrences_of(&cand.name, &cand.asname, load_names, scope_index)
+/// Everything `check` and `fix` need to decide which aliases are flagged and
+/// which of those can be fixed, computed once per file.
+struct AliasAnalysis {
+    cands: Vec<AliasCandidate>,
+    load_names: Vec<NamedSpan>,
+    scope_index: ScopeIndex,
+    bound_targets: HashMap<String, HashSet<String>>,
+    all_exports: HashSet<String>,
+    /// `alias_start` of aliases that are legitimate by convention (several
+    /// modules sharing a name, or matching the `alias-template`).
+    allowed_by_convention: HashSet<u32>,
+    /// `alias_start` of candidates whose fix would land on the same name as
+    /// an earlier candidate's fix (see [`Self::collect_fix_collisions`]).
+    fix_collisions: HashSet<u32>,
 }
 
-/// Would rewriting `cand` (dropping the alias and renaming every use of
-/// `asname` to `name`) be safe, i.e. does `asname` resolve unambiguously to
-/// this exact import everywhere it's read?
-fn is_fixable(
-    cand: &AliasCandidate,
-    load_names: &[NamedSpan],
-    scope_index: &ScopeIndex,
-    bound_targets: &HashMap<String, HashSet<String>>,
-) -> bool {
-    let no_local_shadow =
-        !shadowed_at_occurrences_of(&cand.asname, &cand.asname, load_names, scope_index);
-    let unambiguous_target = bound_targets
-        .get(&cand.asname)
-        .is_none_or(|set| set.len() <= 1);
-    no_local_shadow && unambiguous_target
-}
-
-/// Of every individually-eligible candidate in `cands`, which ones must be
-/// rejected because an *earlier* one already claims the same `(scope bucket,
-/// post-fix name)` slot?
-///
-/// `is_necessary`/`is_fixable` only check each candidate against imports and
-/// names that already exist in the source -- they can't see that *another*
-/// alias from a different module, dropped in the very same pass, would land
-/// on the identical name. E.g.:
-///
-/// ```python
-/// from a.plugin import plugin as a_plugin    # unnecessary alias
-/// from b.plugin import plugin as b_plugin    # unnecessary alias
-/// ```
-///
-/// Naively fixing both independently rewrites them to two `from ... import
-/// plugin` statements bound in the same scope -- a silent collision. Only
-/// one of them can safely drop its alias, so we apply fixes in source order
-/// and let the first candidate to reach a given slot claim it; later
-/// candidates for that same slot are returned here as unfixable (equivalent
-/// to fixing the first, then re-running the check and finding the rest now
-/// genuinely necessary).
-fn collect_rename_collisions(
-    cands: &[AliasCandidate],
-    load_names: &[NamedSpan],
-    scope_index: &ScopeIndex,
-    bound_targets: &HashMap<String, HashSet<String>>,
-    all_exports: &HashSet<String>,
-) -> HashSet<u32> {
-    let mut eligible: Vec<&AliasCandidate> = cands
-        .iter()
-        .filter(|cand| {
-            !is_necessary(cand, load_names, scope_index, bound_targets, all_exports)
-                && is_fixable(cand, load_names, scope_index, bound_targets)
-        })
-        .collect();
-    eligible.sort_by_key(|cand| cand.alias_start);
-
-    let mut claimed: HashSet<(Option<u32>, String)> = HashSet::new();
-    let mut rejected: HashSet<u32> = HashSet::new();
-    for cand in eligible {
-        let key = (
-            bucket_for_offset(scope_index, cand.alias_start),
-            cand.name.clone(),
-        );
-        if !claimed.insert(key) {
-            rejected.insert(cand.alias_start);
+impl AliasAnalysis {
+    /// `None` when the source has no parseable statements.
+    fn new(source: &str, template: Option<&AliasTemplate>) -> Option<Self> {
+        let stmts = parse_module_stmts(source);
+        if stmts.is_empty() {
+            return None;
         }
+        let scope_index = build_scope_index(&stmts);
+        let cands = collect_alias_candidates(&stmts);
+        let allowed_by_convention = collect_allowed_by_convention(&cands, &scope_index, template);
+        let mut analysis = Self {
+            load_names: collect_load_names(&stmts),
+            bound_targets: collect_import_bindings(&stmts),
+            all_exports: collect_all_exports(&stmts),
+            cands,
+            scope_index,
+            allowed_by_convention,
+            fix_collisions: HashSet::new(),
+        };
+        analysis.fix_collisions = analysis.collect_fix_collisions();
+        Some(analysis)
     }
-    rejected
+
+    /// Every candidate KIS002 reports, paired with whether it can be fixed.
+    fn flagged(&self) -> impl Iterator<Item = (&AliasCandidate, bool)> {
+        self.cands
+            .iter()
+            .filter(|cand| !self.is_necessary(cand))
+            .map(|cand| {
+                let fixable =
+                    self.is_safe_rename(cand) && !self.fix_collisions.contains(&cand.alias_start);
+                (cand, fixable)
+            })
+    }
+
+    /// Is the rename in `cand` actually needed to avoid a collision -- or is
+    /// it otherwise not a genuine "unnecessary alias"? If so, KIS002 must not
+    /// flag it at all. Checks both the import's own declaration site (an
+    /// unused alias whose original name collides with something is still a
+    /// real collision) and every place the alias is actually read.
+    ///
+    /// Also treats the alias as necessary when `asname` is listed in the
+    /// module's `__all__`: that's a deliberate re-export under that name, not
+    /// an accidental rename, and rewriting it would remove the exported name
+    /// from the namespace entirely.
+    fn is_necessary(&self, cand: &AliasCandidate) -> bool {
+        self.allowed_by_convention.contains(&cand.alias_start)
+            || self.all_exports.contains(&cand.asname)
+            || self.bound_targets.contains_key(&cand.name)
+            || is_name_shadowed(
+                &cand.name,
+                bucket_for_offset(&self.scope_index, cand.alias_start),
+                &self.scope_index,
+            )
+            || shadowed_at_occurrences_of(
+                &cand.name,
+                &cand.asname,
+                &self.load_names,
+                &self.scope_index,
+            )
+    }
+
+    /// Would rewriting `cand` (dropping the alias and renaming every use of
+    /// `asname` to `name`) be safe, i.e. does `asname` resolve unambiguously
+    /// to this exact import everywhere it's read?
+    fn is_safe_rename(&self, cand: &AliasCandidate) -> bool {
+        let no_local_shadow = !shadowed_at_occurrences_of(
+            &cand.asname,
+            &cand.asname,
+            &self.load_names,
+            &self.scope_index,
+        );
+        let unambiguous_target = self
+            .bound_targets
+            .get(&cand.asname)
+            .is_none_or(|set| set.len() <= 1);
+        no_local_shadow && unambiguous_target
+    }
+
+    /// Of every individually-eligible candidate, which ones must be rejected
+    /// because an *earlier* one already claims the same `(scope bucket,
+    /// post-fix name)` slot?
+    ///
+    /// `is_necessary`/`is_safe_rename` only check each candidate against
+    /// imports and names that already exist in the source -- they can't see
+    /// that *another* alias from a different module, dropped in the very same
+    /// pass, would land on the identical name. E.g. (when both aliases are
+    /// from the same module, so the multi-module exemption doesn't apply):
+    ///
+    /// ```python
+    /// from a.plugin import plugin as p1    # unnecessary alias
+    /// from a.plugin import plugin as p2    # unnecessary alias
+    /// ```
+    ///
+    /// Naively fixing both independently rewrites them to two `from ...
+    /// import plugin` statements bound in the same scope -- a silent
+    /// collision. Only one of them can safely drop its alias, so we apply
+    /// fixes in source order and let the first candidate to reach a given
+    /// slot claim it; later candidates for that same slot are returned here
+    /// as unfixable (equivalent to fixing the first, then re-running the
+    /// check and finding the rest now genuinely necessary).
+    fn collect_fix_collisions(&self) -> HashSet<u32> {
+        let mut eligible: Vec<&AliasCandidate> = self
+            .cands
+            .iter()
+            .filter(|cand| !self.is_necessary(cand) && self.is_safe_rename(cand))
+            .collect();
+        eligible.sort_by_key(|cand| cand.alias_start);
+
+        let mut claimed: HashSet<(Option<u32>, &str)> = HashSet::new();
+        let mut rejected: HashSet<u32> = HashSet::new();
+        for cand in eligible {
+            let key = (
+                bucket_for_offset(&self.scope_index, cand.alias_start),
+                cand.name.as_str(),
+            );
+            if !claimed.insert(key) {
+                rejected.insert(cand.alias_start);
+            }
+        }
+        rejected
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -411,41 +576,18 @@ fn collect_rename_collisions(
 
 fn check_aliases(
     source: &str,
-    level: Level,
+    settings: &Kis002Settings,
     ignore_noqa: bool,
     noqa_aliases: &HashMap<String, String>,
 ) -> Vec<Violation> {
-    let stmts = parse_module_stmts(source);
-    if stmts.is_empty() {
+    let Some(analysis) = AliasAnalysis::new(source, settings.template().as_ref()) else {
         return Vec::new();
-    }
+    };
     let line_starts = build_line_starts(source);
     let lines: Vec<&str> = source.lines().collect();
-    let scope_index = build_scope_index(&stmts);
-    let load_names = collect_load_names(&stmts);
-    let bound_targets = collect_import_bindings(&stmts);
-    let all_exports = collect_all_exports(&stmts);
-    let cands = collect_alias_candidates(&stmts);
-    let collisions = collect_rename_collisions(
-        &cands,
-        &load_names,
-        &scope_index,
-        &bound_targets,
-        &all_exports,
-    );
 
     let mut violations = Vec::new();
-    for cand in cands {
-        if is_necessary(
-            &cand,
-            &load_names,
-            &scope_index,
-            &bound_targets,
-            &all_exports,
-        ) {
-            continue;
-        }
-
+    for (cand, fixable) in analysis.flagged() {
         let (start_line, col) = offset_to_line_col(&line_starts, cand.alias_start);
         let (end_line, end_col_inclusive) =
             offset_to_line_col(&line_starts, cand.alias_end.saturating_sub(1));
@@ -459,8 +601,6 @@ fn check_aliases(
             }
         }
 
-        let fixable = is_fixable(&cand, &load_names, &scope_index, &bound_targets)
-            && !collisions.contains(&cand.alias_start);
         let help = Some(if fixable {
             format!(
                 "Remove the alias: `from {} import {}`.",
@@ -486,7 +626,7 @@ fn check_aliases(
                 cand.name, cand.asname, cand.name
             ),
             help,
-            level,
+            level: settings.level,
             fixable,
         });
     }
@@ -497,44 +637,17 @@ fn check_aliases(
 // Fix
 // ---------------------------------------------------------------------------
 
-fn apply_fixes(ctx: &FileContext) -> Option<String> {
+fn apply_fixes(ctx: &FileContext, settings: &Kis002Settings) -> Option<String> {
     let source = ctx.source.as_str();
-    let stmts = parse_module_stmts(source);
-    if stmts.is_empty() {
-        return None;
-    }
+    let analysis = AliasAnalysis::new(source, settings.template().as_ref())?;
     let line_starts = build_line_starts(source);
     let lines: Vec<&str> = source.lines().collect();
-    let scope_index = build_scope_index(&stmts);
-    let load_names = collect_load_names(&stmts);
-    let bound_targets = collect_import_bindings(&stmts);
-    let all_exports = collect_all_exports(&stmts);
-    let cands = collect_alias_candidates(&stmts);
-    let collisions = collect_rename_collisions(
-        &cands,
-        &load_names,
-        &scope_index,
-        &bound_targets,
-        &all_exports,
-    );
 
-    let mut renames: HashMap<String, String> = HashMap::new();
+    let mut renames: HashMap<&str, &str> = HashMap::new();
     let mut splices: Vec<(u32, u32, String)> = Vec::new();
 
-    for cand in cands {
-        if is_necessary(
-            &cand,
-            &load_names,
-            &scope_index,
-            &bound_targets,
-            &all_exports,
-        ) {
-            continue;
-        }
-        if !is_fixable(&cand, &load_names, &scope_index, &bound_targets) {
-            continue;
-        }
-        if collisions.contains(&cand.alias_start) {
+    for (cand, fixable) in analysis.flagged() {
+        if !fixable {
             continue;
         }
 
@@ -551,16 +664,16 @@ fn apply_fixes(ctx: &FileContext) -> Option<String> {
         }
 
         splices.push((cand.alias_start, cand.alias_end, cand.name.clone()));
-        renames.insert(cand.asname, cand.name);
+        renames.insert(cand.asname.as_str(), cand.name.as_str());
     }
 
     if splices.is_empty() {
         return None;
     }
 
-    for occ in &load_names {
-        if let Some(new_name) = renames.get(&occ.name) {
-            splices.push((occ.start, occ.end, new_name.clone()));
+    for occ in &analysis.load_names {
+        if let Some(new_name) = renames.get(occ.name.as_str()) {
+            splices.push((occ.start, occ.end, (*new_name).to_owned()));
         }
     }
 
@@ -739,27 +852,79 @@ mod tests {
     }
 
     #[test]
-    fn first_of_two_colliding_aliases_is_fixed_second_is_not() {
-        // Regression: `plugin` isn't bound anywhere else in the file, so
-        // each alias looks independently fixable -- but dropping *both*
-        // would bind `plugin` twice in the same (module) scope. The first
-        // declared alias can still be fixed safely; only the later one(s)
-        // sharing its slot must stay aliased.
-        let src = "from a.plugin import plugin as a_plugin\n\
-                   from b.plugin import plugin as b_plugin\n\n\
-                   a_plugin()\nb_plugin()\n";
+    fn several_aliases_of_same_name_from_different_modules_not_flagged() {
+        // The aliases are what keeps the two `baz` imports apart.
+        let src = "from foo.bar import baz as bar_baz\n\
+                   from nor.kind import baz as kind_baz\n\n\
+                   bar_baz()\nkind_baz()\n";
+        let viols = rule().check(&ctx(src), &empty_cfg());
+        assert!(viols.is_empty(), "got: {viols:?}");
+        assert!(rule().fix(&ctx(src), &empty_cfg()).unwrap().is_none());
+    }
+
+    #[test]
+    fn same_name_aliases_in_different_scopes_still_flagged() {
+        let src = "from a.plugin import plugin as a_plugin\n\n\
+                   def f():\n    from b.plugin import plugin as b_plugin\n    return b_plugin()\n\n\
+                   a_plugin()\n";
+        assert_eq!(rule().check(&ctx(src), &empty_cfg()).len(), 2);
+    }
+
+    fn template_cfg(t: &str) -> toml::Value {
+        let mut table = toml::map::Map::new();
+        table.insert(
+            "alias-template".to_owned(),
+            toml::Value::String(t.to_owned()),
+        );
+        toml::Value::Table(table)
+    }
+
+    #[test]
+    fn alias_matching_template_allowed_even_if_unneeded() {
+        let src = "from foo.bar import baz as bar_baz\n\nbar_baz()\n";
+        let cfg = template_cfg("{module_last}_{name}");
+        assert!(rule().check(&ctx(src), &cfg).is_empty());
+        assert!(rule().fix(&ctx(src), &cfg).unwrap().is_none());
+    }
+
+    #[test]
+    fn alias_not_matching_template_still_flagged() {
+        let src = "from foo.bar import baz as other\n\nother()\n";
+        let cfg = template_cfg("{module_last}_{name}");
+        assert_eq!(rule().check(&ctx(src), &cfg).len(), 1);
+    }
+
+    #[test]
+    fn invalid_template_falls_back_to_flagging() {
+        let src = "from foo.bar import baz as bar_baz\n";
+        let cfg = template_cfg("{bogus}_{name}");
+        assert_eq!(rule().check(&ctx(src), &cfg).len(), 1);
+    }
+
+    #[test]
+    fn template_renders_placeholders() {
+        let t = AliasTemplate::parse("{module_first}__{module}__{module_last}_{name}").unwrap();
+        assert_eq!(t.render("foo.bar.qux", "baz"), "foo__foo_bar_qux__qux_baz");
+    }
+
+    #[test]
+    fn template_rejects_invalid() {
+        for bad in ["{name", "name}", "{nope}", "{ name }", "{{name}}"] {
+            assert!(
+                AliasTemplate::parse(bad).is_err(),
+                "{bad} should be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn same_module_duplicate_names_still_collide_on_fix() {
+        let src =
+            "from a.plugin import plugin as p1\nfrom a.plugin import plugin as p2\n\np1()\np2()\n";
         let viols = rule().check(&ctx(src), &empty_cfg());
         assert_eq!(viols.len(), 2);
-        assert!(viols[0].fixable, "first alias should still be fixable");
-        assert!(
-            !viols[1].fixable,
-            "second alias collides with the first's fix"
-        );
-
-        let fixed = rule().fix(&ctx(src), &empty_cfg()).unwrap().unwrap();
-        assert!(fixed.contains("from a.plugin import plugin\n"));
-        assert!(fixed.contains("from b.plugin import plugin as b_plugin\n"));
-        assert!(fixed.contains("plugin()\nb_plugin()\n"));
+        assert!(viols[0].fixable);
+        assert!(!viols[1].fixable);
     }
 
     #[test]

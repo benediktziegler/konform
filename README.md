@@ -30,7 +30,7 @@ local variable, or by a different import that would then overlap with it
 (two `from X import Y` statements silently bound to the same name but
 pointing at different modules).
 
-### KIS002 — Unnecessary import alias
+### KIS002 — Import alias policy
 
 Flags `from X import Y as Z` when the alias `Z` buys nothing -- `Y` isn't
 bound to anything else in the module, so the alias only adds a layer of
@@ -152,9 +152,16 @@ unresolved-level = "warning"   # "warning" (default) | "error" | "off"
                                 # environment, so KIS001 can't tell whether the
                                 # imported name is a module or not.
 
-# ── KIS002 — unnecessary import alias ──────────────────────────────────────
-[tool.konform.lint.unnecessary-import-alias]
+# ── KIS002 — import alias policy ──────────────────────────────────────────
+[tool.konform.lint.import-alias-policy]
 level = "warning"
+# Aliased imports of the same name from different modules in one scope are
+# never flagged (the aliases keep them apart).
+# Optional: also always allow aliases that match this template, even when the
+# rename isn't needed (it only exempts aliases, never flags them).
+# Placeholders: {name}, {module}, {module_first}, {module_last}; no other
+# braces. An invalid template is reported on stderr and ignored.
+# alias-template = "{module_last}_{name}"   # foo.bar -> baz as bar_baz
 
 # ── KPT001 — user-defined patterns ─────────────────────────────────────────
 [tool.konform.lint.user-defined-patterns]

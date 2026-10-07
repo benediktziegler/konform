@@ -13,6 +13,7 @@
 //! (once) for every project still on the old shape.
 
 mod lint_section;
+mod rule_table_rename;
 
 use std::path::Path;
 use toml_edit::{DocumentMut, TableLike};
@@ -42,7 +43,10 @@ pub trait ConfigMigration: Send + Sync {
 
 /// Registry of all known migrations, run in order by [`run_migrations`].
 pub fn all_migrations() -> Vec<Box<dyn ConfigMigration>> {
-    vec![Box::new(lint_section::LintSectionMigration)]
+    vec![
+        Box::new(lint_section::LintSectionMigration),
+        Box::new(rule_table_rename::RuleTableRenameMigration),
+    ]
 }
 
 /// Report of a single migration that was applied.

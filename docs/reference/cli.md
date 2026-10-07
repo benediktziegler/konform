@@ -121,6 +121,7 @@ konform rule [OPTIONS]
 | ------ | ----------- |
 | `--list` | List all available rules and exit |
 | `--explain <EXPLAIN>` | Print full documentation for a rule code and exit.<br><br>Example: `konform rule --explain KIS001` |
+| `--schema` | Print the JSON Schema of the structural rules file and exit.<br><br>Save it and point your editor at it for completion, e.g. with taplo: `#:schema ./konform-rules.schema.json` at the top of konform_rules.toml. |
 | `--test` | Run the `test.valid` / `test.invalid` snippets embedded in user rules.<br><br>Exits 1 if any snippet fails, 2 if a rule definition is invalid. |
 
 ## ast

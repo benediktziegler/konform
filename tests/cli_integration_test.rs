@@ -867,6 +867,19 @@ fn rule_test_runs_embedded_snippets() {
 }
 
 #[test]
+fn rule_schema_prints_json_schema() {
+    let out = Command::cargo_bin("konform")
+        .unwrap()
+        .args(["rule", "--schema"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let schema: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(schema["properties"]["rules"]["type"], "array");
+    assert!(schema["$defs"]["matcher"]["properties"]["decorated_with"].is_object());
+}
+
+#[test]
 fn ast_prints_kinds_and_resolved_names() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.py"), FIXTURE_SRC).unwrap();

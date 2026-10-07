@@ -138,6 +138,15 @@ impl Session {
         eprintln!("konform server: config reloaded");
     }
 
+    /// Configuration problems reported by the rules (e.g. invalid KST
+    /// rules). The valid remainder keeps running.
+    pub fn config_errors(&self) -> Vec<String> {
+        self.rules
+            .iter()
+            .flat_map(|r| r.config_errors(self.config.rule_config(r.config_name())))
+            .collect()
+    }
+
     /// Merge editor-supplied workspace settings into the active [`Config`].
     ///
     /// Called when the `workspace/configuration` response arrives after a

@@ -798,9 +798,9 @@ match = { kind = \"assert\", inside = { decorated_with = \"pytest.fixture\" } }
     assert!(!run(&["--select", "KIS"]).contains("warning[KST001]"));
 }
 
-/// A broken rule is reported on stderr and skipped instead of aborting.
+/// A broken rule is a hard error (exit 2): skipping it would be a false green.
 #[test]
-fn kst_invalid_rule_is_reported_and_skipped() {
+fn kst_invalid_rule_is_a_hard_error() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();
     std::fs::write(
@@ -812,19 +812,22 @@ fn kst_invalid_rule_is_reported_and_skipped() {
     .unwrap();
     std::fs::write(dir.path().join("a.py"), FIXTURE_SRC).unwrap();
 
-    let out = Command::cargo_bin("konform")
-        .unwrap()
-        .current_dir(dir.path())
-        .args(["check", "--no-cache", "a.py"])
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("skipping structural rule 'KST002'"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("unknown kind 'banana'"), "{stderr}");
-    assert!(stderr.contains("error[KST001]"), "{stderr}");
+    for args in [
+        &["check", "--no-cache", "a.py"][..],
+        &["check", "--fix", "a.py"],
+    ] {
+        let out = Command::cargo_bin("konform")
+            .unwrap()
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(stderr.contains("rule 'KST002'"), "{stderr}");
+        assert!(stderr.contains("unknown kind 'banana'"), "{stderr}");
+        assert!(!stderr.contains("KST001]"), "nothing must run: {stderr}");
+    }
 }
 
 #[test]

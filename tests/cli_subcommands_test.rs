@@ -211,8 +211,7 @@ fn add_noqa_annotates_violating_lines_and_merges_existing_codes() {
     )
     .unwrap();
 
-    // NOTE: documents existing behaviour — `--help` says lines that already
-    // carry `# noqa` are left untouched, but codes are merged (sorted).
+    // Codes are merged into an existing `# noqa:` list, sorted.
     check(dir.path(), &["--add-noqa", "mod.py"])
         .assert()
         .success();
@@ -346,9 +345,7 @@ fn concise_output_is_one_line_per_violation() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("bad.py"), BAD).unwrap();
 
-    // NOTE: documents existing behaviour — `--help` advertises
-    // `file:line:col: [RULE] message`, actual lines carry the level and fix
-    // marker: `file:line:col: error[RULE][*] message`.
+    // Shape: `file:line:col: level[RULE][*] message`.
     check(dir.path(), &["--output-format", "concise", "bad.py"])
         .assert()
         .code(1)

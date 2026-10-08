@@ -52,7 +52,8 @@ pub enum OutputFormat {
     /// Ruff-style output with arrows and help lines (default).
     #[default]
     Full,
-    /// Concise single-line: `file:line:col: [RULE] message`.
+    /// Concise single-line: `file:line:col: level[RULE] message` (`[*]` marks
+    /// a fixable violation).
     Concise,
     /// JSON array written to stdout (machine-readable).
     Json,

@@ -9,7 +9,6 @@ Python linter and language server.
 * **KIS001** — flags `from X import obj` imports that should be `import X`
 * **KIS002** — flags unnecessary import aliases (`from X import Y as Z` when the alias buys nothing)
 * **KPT** — user-defined regex pattern rules from `konform_patterns.toml`
-* **Hover** — hover over a violation to read the full rule documentation
 * **Code actions** — "Konform: Fix <rule-name> [<rule-code>]" per violation, and "Konform: Fix all auto-fixable problems" for the whole file
 * **Auto-fix on save** via `textDocument/formatting`
 
@@ -18,7 +17,8 @@ Python linter and language server.
 No prerequisites — the extension auto-installs `konform` for you.
 
 From the Zed Extensions panel, click **Install Dev Extension** and select this
-directory (or install the published extension from the Zed extension gallery).
+directory. The extension is currently available as a dev extension only;
+publication to the Zed extension gallery is planned.
 Once compiled, Zed activates the extension for every `.py` file in your
 workspace and resolves the `konform` binary in this order:
 

@@ -918,16 +918,16 @@ mod tests {
 
     // ── Zuul output ────────────────────────────────────────────────────────
 
-    fn viol(line: u64, message: &str) -> serde_json::Value {
+    fn zuul_viol(line: u64, message: &str) -> serde_json::Value {
         serde_json::json!({"line": line, "message": message, "help": "do better"})
     }
 
-    fn reported() -> HashMap<String, Vec<serde_json::Value>> {
+    fn zuul_reported() -> HashMap<String, Vec<serde_json::Value>> {
         HashMap::from([
-            ("changed.py".to_owned(), vec![viol(3, "bad import")]),
+            ("changed.py".to_owned(), vec![zuul_viol(3, "bad import")]),
             (
                 "other.py".to_owned(),
-                vec![viol(7, "old issue"), viol(9, "older")],
+                vec![zuul_viol(7, "old issue"), zuul_viol(9, "older")],
             ),
         ])
     }
@@ -947,7 +947,7 @@ mod tests {
     fn zuul_routes_changed_files_to_comments_and_the_rest_to_warnings() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("zuul_return.yaml");
-        emit_zuul_return(&out, &reported(), &changed(&["changed.py"])).unwrap();
+        emit_zuul_return(&out, &zuul_reported(), &changed(&["changed.py"])).unwrap();
 
         let zuul = read_zuul(&out);
         let comments = &zuul["file_comments"];
@@ -965,7 +965,7 @@ mod tests {
     fn zuul_without_changed_files_only_warns() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("nested/dir/zuul_return.yaml");
-        emit_zuul_return(&out, &reported(), &changed(&[])).unwrap();
+        emit_zuul_return(&out, &zuul_reported(), &changed(&[])).unwrap();
 
         let zuul = read_zuul(&out);
         assert!(zuul.get("file_comments").is_none());
@@ -981,7 +981,7 @@ mod tests {
             "data:\n  other: keep\n  zuul:\n    warnings: [stale]\n    extra: keep\n",
         )
         .unwrap();
-        emit_zuul_return(&out, &reported(), &changed(&["changed.py"])).unwrap();
+        emit_zuul_return(&out, &zuul_reported(), &changed(&["changed.py"])).unwrap();
 
         let yaml: serde_json::Value =
             serde_yaml::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
@@ -1006,7 +1006,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("zuul_return.yaml");
         std::fs::write(&out, "data: 3\n").unwrap();
-        assert!(emit_zuul_return(&out, &reported(), &changed(&[])).is_err());
+        assert!(emit_zuul_return(&out, &zuul_reported(), &changed(&[])).is_err());
     }
 
     #[test]
@@ -1014,18 +1014,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("zuul_return.yaml");
         std::fs::write(&out, "data:\n  zuul: 3\n").unwrap();
-        assert!(emit_zuul_return(&out, &reported(), &changed(&[])).is_err());
+        assert!(emit_zuul_return(&out, &zuul_reported(), &changed(&[])).is_err());
     }
 
     #[test]
     fn zuul_or_report_returns_whether_the_report_was_written() {
         let dir = tempfile::tempdir().unwrap();
         let ok = dir.path().join("zuul_return.yaml");
-        assert!(emit_zuul_return_or_report(&ok, &reported(), &changed(&[])));
+        assert!(emit_zuul_return_or_report(
+            &ok,
+            &zuul_reported(),
+            &changed(&[])
+        ));
         // A directory can't be written as a file.
         assert!(!emit_zuul_return_or_report(
             dir.path(),
-            &reported(),
+            &zuul_reported(),
             &changed(&[])
         ));
     }
@@ -1170,5 +1174,495 @@ mod tests {
             true,
         );
         assert_eq!(hint.matches("--unsafe-fixes").count(), 1, "got: {hint}");
+    }
+
+    // ── Machine-readable writers: shared fixtures ──────────────────────────
+
+    use crate::types::Violation;
+    use std::collections::HashSet;
+
+    /// Build a violation. `col` is 0-based like `Violation::col`; the wire
+    /// format (`to_json`) exposes it 1-based as `range.start_character`.
+    fn viol(file: &str, line: usize, col: usize, code: &str, level: Level, msg: &str) -> Violation {
+        // `file` is only used by `reported()` to key the map; keep it in the
+        // signature so call sites read naturally.
+        let _ = file;
+        Violation {
+            rule: code.to_owned(),
+            line,
+            col,
+            end_line: line,
+            end_col: col + 1,
+            message: format!("{code}: {msg}"),
+            help: None,
+            level,
+            fixable: false,
+        }
+    }
+
+    /// Group violations by file into the `reported` map the writers consume.
+    fn reported(items: &[(&str, Violation)]) -> HashMap<String, Vec<serde_json::Value>> {
+        let mut map: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        for (file, v) in items {
+            map.entry((*file).to_owned()).or_default().push(v.to_json());
+        }
+        map
+    }
+
+    fn sample() -> HashMap<String, Vec<serde_json::Value>> {
+        reported(&[
+            (
+                "src/a.py",
+                viol("src/a.py", 3, 4, "KIS001", Level::Error, "bad import"),
+            ),
+            (
+                "src/a.py",
+                viol(
+                    "src/a.py",
+                    10,
+                    0,
+                    "KIS001",
+                    Level::Error,
+                    "another bad import",
+                ),
+            ),
+            (
+                "src/b.py",
+                viol("src/b.py", 7, 2, "KPT002", Level::Warning, "pattern hit"),
+            ),
+        ])
+    }
+
+    fn parse(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).unwrap_or_else(|e| panic!("invalid JSON ({e}):\n{s}"))
+    }
+
+    // ── SARIF ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sarif_header_and_driver_metadata() {
+        let doc = parse(&render_sarif(&sample()));
+        assert_eq!(doc["version"], "2.1.0");
+        assert_eq!(doc["$schema"], "https://json.schemastore.org/sarif-2.1.0");
+        let driver = &doc["runs"][0]["tool"]["driver"];
+        assert_eq!(driver["name"], "konform");
+        assert_eq!(driver["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(driver["informationUri"], env!("CARGO_PKG_REPOSITORY"));
+    }
+
+    #[test]
+    fn sarif_help_uris_point_at_package_repository() {
+        let doc = parse(&render_sarif(&sample()));
+        let rules = doc["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .unwrap();
+        assert!(!rules.is_empty());
+        for r in rules {
+            let uri = r["helpUri"].as_str().unwrap();
+            assert!(
+                uri.starts_with(env!("CARGO_PKG_REPOSITORY")),
+                "helpUri {uri} does not start with the package repository"
+            );
+        }
+    }
+
+    #[test]
+    fn sarif_results_carry_location() {
+        let doc = parse(&render_sarif(&sample()));
+        let results = doc["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 3, "one result per violation");
+
+        // Sorted by path, then line.
+        let first = &results[0];
+        assert_eq!(first["ruleId"], "KIS001");
+        assert_eq!(first["level"], "error");
+        assert_eq!(
+            first["message"]["text"], "bad import",
+            "rule prefix stripped"
+        );
+        let loc = &first["locations"][0]["physicalLocation"];
+        assert_eq!(loc["artifactLocation"]["uri"], "src/a.py");
+        assert_eq!(loc["region"]["startLine"], 3);
+        assert_eq!(loc["region"]["startColumn"], 5, "SARIF columns are 1-based");
+
+        let last = &results[2];
+        assert_eq!(last["ruleId"], "KPT002");
+        assert_eq!(last["level"], "warning");
+        assert_eq!(
+            last["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "src/b.py"
+        );
+    }
+
+    #[test]
+    fn sarif_rules_deduplicated_per_rule_id() {
+        let doc = parse(&render_sarif(&sample()));
+        let ids: Vec<&str> = doc["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["KIS001", "KPT002"]);
+    }
+
+    #[test]
+    fn sarif_empty_input_has_empty_results() {
+        let doc = parse(&render_sarif(&HashMap::new()));
+        assert_eq!(doc["version"], "2.1.0");
+        assert_eq!(doc["runs"][0]["results"], serde_json::json!([]));
+        assert_eq!(
+            doc["runs"][0]["tool"]["driver"]["rules"],
+            serde_json::json!([])
+        );
+    }
+
+    // ── JUnit ──────────────────────────────────────────────────────────────
+
+    /// Minimal well-formedness check (no XML crate available): every
+    /// element is closed in order and every `&` starts a known entity.
+    fn assert_well_formed_xml(xml: &str) {
+        let body = xml
+            .strip_prefix("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+            .expect("XML declaration");
+        let mut stack: Vec<String> = Vec::new();
+        let mut rest = body;
+        while let Some(start) = rest.find('<') {
+            let end = rest[start..].find('>').expect("unterminated tag") + start;
+            let tag = &rest[start + 1..end];
+            assert!(!tag.contains('<'), "raw '<' inside tag: {tag}");
+            if let Some(name) = tag.strip_prefix('/') {
+                assert_eq!(stack.pop().as_deref(), Some(name), "mismatched </{name}>");
+            } else if !tag.ends_with('/') {
+                stack.push(tag.split_whitespace().next().unwrap().to_owned());
+            }
+            rest = &rest[end + 1..];
+        }
+        assert!(stack.is_empty(), "unclosed elements: {stack:?}");
+        for (i, _) in xml.match_indices('&') {
+            let tail = &xml[i..];
+            assert!(
+                ["&amp;", "&lt;", "&gt;", "&quot;", "&apos;"]
+                    .iter()
+                    .any(|e| tail.starts_with(e)),
+                "bare '&' at byte {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn junit_is_well_formed_with_matching_counts() {
+        let xml = render_junit(&sample());
+        assert_well_formed_xml(&xml);
+        assert!(
+            xml.contains("<testsuite name=\"konform\" tests=\"3\" failures=\"3\" errors=\"0\">")
+        );
+        assert_eq!(xml.matches("<testcase ").count(), 3);
+        assert_eq!(xml.matches("<failure ").count(), 3);
+    }
+
+    #[test]
+    fn junit_testcase_carries_location_and_message() {
+        let xml = render_junit(&sample());
+        assert!(xml.contains("<testcase name=\"src/a.py:3:5\" classname=\"src.a.py\">"));
+        assert!(xml.contains("<failure message=\"bad import\" type=\"KIS001\"/>"));
+        assert!(xml.contains("name=\"src/b.py:7:3\""));
+    }
+
+    #[test]
+    fn junit_escapes_xml_special_chars_in_message() {
+        let r = reported(&[(
+            "x.py",
+            viol("x.py", 1, 0, "KIS001", Level::Error, r#"a < b & "c" > 'd'"#),
+        )]);
+        let xml = render_junit(&r);
+        assert_well_formed_xml(&xml);
+        assert!(
+            xml.contains("message=\"a &lt; b &amp; &quot;c&quot; &gt; &apos;d&apos;\""),
+            "got:\n{xml}"
+        );
+    }
+
+    #[test]
+    fn junit_empty_input_is_well_formed() {
+        let xml = render_junit(&HashMap::new());
+        assert_well_formed_xml(&xml);
+        assert!(xml.contains("tests=\"0\" failures=\"0\""));
+        assert!(!xml.contains("<testcase"));
+    }
+
+    #[test]
+    fn junit_path_is_not_escaped() {
+        // NOTE: documents existing behaviour; see report.
+        // Only the message goes through `xml_escape`; the file path is
+        // interpolated raw into the `name`/`classname` attributes, so a path
+        // containing `&` yields malformed XML.
+        let r = reported(&[("a&b.py", viol("a&b.py", 1, 0, "KIS001", Level::Error, "m"))]);
+        let xml = render_junit(&r);
+        assert!(xml.contains("name=\"a&b.py:1:1\""), "got:\n{xml}");
+    }
+
+    // ── GitLab Code Quality ────────────────────────────────────────────────
+
+    #[test]
+    fn gitlab_entries_have_required_fields() {
+        let doc = parse(&render_gitlab(&sample()));
+        let entries = doc.as_array().expect("top-level array");
+        assert_eq!(entries.len(), 3);
+        let e = &entries[0];
+        assert_eq!(e["description"], "bad import");
+        assert_eq!(e["location"]["path"], "src/a.py");
+        assert_eq!(e["location"]["lines"]["begin"], 3);
+        assert_eq!(e["fingerprint"].as_str().unwrap().len(), 16);
+    }
+
+    #[test]
+    fn gitlab_has_no_check_name() {
+        // NOTE: documents existing behaviour; see report.
+        // GitLab's Code Quality schema lists `check_name` as required; the
+        // writer does not emit it, so the rule code is absent from entries.
+        let doc = parse(&render_gitlab(&sample()));
+        for e in doc.as_array().unwrap() {
+            assert!(e.get("check_name").is_none());
+        }
+    }
+
+    #[test]
+    fn gitlab_severity_mapping() {
+        let doc = parse(&render_gitlab(&sample()));
+        let sev: Vec<&str> = doc
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["severity"].as_str().unwrap())
+            .collect();
+        // error → "critical", warning → "minor".
+        assert_eq!(sev, vec!["critical", "critical", "minor"]);
+    }
+
+    #[test]
+    fn gitlab_fingerprints_unique_and_stable() {
+        let first = parse(&render_gitlab(&sample()));
+        let second = parse(&render_gitlab(&sample()));
+        let fps = |d: &serde_json::Value| -> Vec<String> {
+            d.as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["fingerprint"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let a = fps(&first);
+        assert_eq!(a, fps(&second), "fingerprints must be stable across runs");
+        let unique: HashSet<&String> = a.iter().collect();
+        assert_eq!(unique.len(), a.len(), "fingerprints must differ: {a:?}");
+    }
+
+    #[test]
+    fn gitlab_fingerprint_collides_on_same_line_and_rule() {
+        // NOTE: documents existing behaviour; see report.
+        // The fingerprint hashes only path + rule + line, so two hits of the
+        // same rule on one line (different columns/messages) collide and
+        // GitLab will de-duplicate them into one finding.
+        let r = reported(&[
+            ("x.py", viol("x.py", 5, 0, "KIS001", Level::Error, "first")),
+            (
+                "x.py",
+                viol("x.py", 5, 20, "KIS001", Level::Error, "second"),
+            ),
+        ]);
+        let doc = parse(&render_gitlab(&r));
+        let e = doc.as_array().unwrap();
+        assert_eq!(e[0]["fingerprint"], e[1]["fingerprint"]);
+    }
+
+    #[test]
+    fn gitlab_empty_input_is_empty_array() {
+        assert_eq!(
+            parse(&render_gitlab(&HashMap::new())),
+            serde_json::json!([])
+        );
+    }
+
+    // ── GitHub Actions annotations ─────────────────────────────────────────
+
+    #[test]
+    fn github_one_annotation_per_violation() {
+        let out = render_github(&sample());
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "::error file=src/a.py,line=3,col=5,title=KIS001::bad import",
+                "::error file=src/a.py,line=10,col=1,title=KIS001::another bad import",
+                "::warning file=src/b.py,line=7,col=3,title=KPT002::pattern hit",
+            ]
+        );
+    }
+
+    #[test]
+    fn github_empty_input_renders_nothing() {
+        assert_eq!(render_github(&HashMap::new()), "");
+    }
+
+    #[test]
+    fn github_message_newlines_not_escaped() {
+        // NOTE: documents existing behaviour; see report.
+        // GitHub workflow commands require `%`, `\r`, `\n` in the message to
+        // be encoded as `%25`, `%0D`, `%0A`; the writer passes them through,
+        // so a multi-line message truncates the annotation.
+        let r = reported(&[(
+            "x.py",
+            viol("x.py", 1, 0, "KIS001", Level::Error, "line1\nline2 100%"),
+        )]);
+        let out = render_github(&r);
+        assert_eq!(out.lines().count(), 2, "got: {out:?}");
+        assert!(out.contains("100%"));
+    }
+
+    // ── JSON ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn json_entries_have_expected_keys() {
+        let doc = parse(&render_for_file(&sample(), OutputFormat::Json));
+        let entries = doc.as_array().expect("top-level array");
+        assert_eq!(entries.len(), 3);
+        let e = entries[0].as_object().unwrap();
+        let mut keys: Vec<&str> = e.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["col", "filename", "fixable", "level", "line", "message", "rule"]
+        );
+        assert_eq!(e["filename"], "src/a.py");
+        assert_eq!(e["line"], 3);
+        assert_eq!(e["col"], 5);
+        assert_eq!(e["rule"], "KIS001");
+        assert_eq!(e["message"], "bad import");
+        assert_eq!(e["level"], "error");
+        assert_eq!(e["fixable"], false);
+    }
+
+    #[test]
+    fn json_empty_input_is_empty_array() {
+        let out = render_for_file(&HashMap::new(), OutputFormat::Json);
+        assert_eq!(out, "[]");
+    }
+
+    #[test]
+    fn json_stdout_writer_exit_code() {
+        // `print_violations_json` streams to stdout; only its exit code is
+        // observable here.
+        let changed = ChangedFiles {
+            files: HashSet::new(),
+        };
+        assert_eq!(
+            print_violations_json(&HashMap::new(), &changed, Level::Error, Level::Error),
+            0
+        );
+        assert_eq!(
+            print_violations_json(&sample(), &changed, Level::Error, Level::Error),
+            1
+        );
+    }
+
+    #[test]
+    fn concise_and_full_fall_back_to_json_for_file_output() {
+        let json = render_for_file(&sample(), OutputFormat::Json);
+        assert_eq!(render_for_file(&sample(), OutputFormat::Concise), json);
+        assert_eq!(render_for_file(&sample(), OutputFormat::Full), json);
+    }
+
+    // ── Zuul ───────────────────────────────────────────────────────────────
+
+    fn read_yaml(path: &Path) -> serde_json::Value {
+        serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn zuul_writes_file_comments_and_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("nested/zuul_return.yaml");
+        write_zuul_return(&out, sample(), vec!["heads up".into()]).unwrap();
+
+        let doc = read_yaml(&out);
+        let zuul = &doc["data"]["zuul"];
+        assert_eq!(zuul["warnings"], serde_json::json!(["heads up"]));
+        let a = zuul["file_comments"]["src/a.py"].as_array().unwrap();
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0]["line"], 3);
+        assert_eq!(a[0]["message"], "KIS001: bad import");
+        assert_eq!(zuul["file_comments"]["src/b.py"][0]["level"], "warning");
+    }
+
+    #[test]
+    fn zuul_appends_help_to_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("zuul_return.yaml");
+        let mut v = viol("x.py", 1, 0, "KIS001", Level::Error, "msg");
+        v.help = Some("do this".into());
+        write_zuul_return(&out, reported(&[("x.py", v)]), vec![]).unwrap();
+
+        let c = &read_yaml(&out)["data"]["zuul"]["file_comments"]["x.py"][0];
+        assert_eq!(c["message"], "KIS001: msg do this");
+        assert!(c.get("help").is_none(), "help key stripped");
+    }
+
+    #[test]
+    fn zuul_null_help_key_is_kept() {
+        // NOTE: documents existing behaviour; see report.
+        // `Violation::to_json` always emits `"help": null`; the writer only
+        // strips string-valued help, so `help: null` leaks into the Zuul file.
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("zuul_return.yaml");
+        write_zuul_return(&out, sample(), vec![]).unwrap();
+        let c = &read_yaml(&out)["data"]["zuul"]["file_comments"]["src/b.py"][0];
+        assert_eq!(c.get("help"), Some(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn zuul_merges_into_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("zuul_return.yaml");
+        std::fs::write(
+            &out,
+            "top: keep\n\
+             data:\n  other: keep\n  zuul:\n    pause: true\n    \
+             file_comments:\n      old.py: []\n",
+        )
+        .unwrap();
+
+        write_zuul_return(&out, sample(), vec![]).unwrap();
+
+        let doc = read_yaml(&out);
+        assert_eq!(doc["top"], "keep", "unrelated top-level key preserved");
+        assert_eq!(doc["data"]["other"], "keep", "unrelated data key preserved");
+        assert_eq!(
+            doc["data"]["zuul"]["pause"], true,
+            "unrelated zuul key kept"
+        );
+        // `file_comments` is replaced wholesale, not merged per file.
+        let fc = doc["data"]["zuul"]["file_comments"].as_object().unwrap();
+        assert!(fc.get("old.py").is_none());
+        assert!(fc.contains_key("src/a.py") && fc.contains_key("src/b.py"));
+        assert!(doc["data"]["zuul"].get("warnings").is_none());
+    }
+
+    #[test]
+    fn zuul_empty_input_leaves_existing_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("zuul_return.yaml");
+        std::fs::write(
+            &out,
+            "data:\n  zuul:\n    file_comments:\n      old.py: []\n",
+        )
+        .unwrap();
+
+        write_zuul_return(&out, HashMap::new(), vec![]).unwrap();
+
+        let doc = read_yaml(&out);
+        assert!(doc["data"]["zuul"]["file_comments"]
+            .as_object()
+            .unwrap()
+            .contains_key("old.py"));
     }
 }

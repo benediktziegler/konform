@@ -385,15 +385,14 @@ pub fn write_zuul_return(
                 let cleaned_comments = comments
                     .into_iter()
                     .map(|mut c| {
-                        if let Some(help) = c.get("help").and_then(|h| h.as_str()).map(String::from)
-                        {
+                        // Always drop the key (it is `null` when there is no
+                        // help); append string help to the message.
+                        let help = c.as_object_mut().and_then(|obj| obj.remove("help"));
+                        if let Some(help) = help.as_ref().and_then(|h| h.as_str()) {
                             if let Some(msg) = c.get_mut("message") {
                                 if let Some(s) = msg.as_str() {
                                     *msg = serde_json::Value::String(format!("{s} {help}"));
                                 }
-                            }
-                            if let Some(obj) = c.as_object_mut() {
-                                obj.remove("help");
                             }
                         }
                         c
@@ -665,12 +664,29 @@ pub fn render_github(reported: &HashMap<String, Vec<serde_json::Value>>) -> Stri
             } else {
                 "error"
             };
+            let file = escape_github_property(path);
+            let title = escape_github_property(rule);
+            let msg = escape_github_data(msg);
             out.push_str(&format!(
-                "::{level} file={path},line={line},col={col},title={rule}::{msg}\n"
+                "::{level} file={file},line={line},col={col},title={title}::{msg}\n"
             ));
         }
     }
     out
+}
+
+/// Escape a workflow-command message (the part after `::`).
+fn escape_github_data(s: &str) -> String {
+    s.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+/// Escape a workflow-command property value (`file=`, `title=`, ...).
+fn escape_github_property(s: &str) -> String {
+    escape_github_data(s)
+        .replace(':', "%3A")
+        .replace(',', "%2C")
 }
 
 /// Render a GitLab Code Quality JSON report.
@@ -689,6 +705,7 @@ pub fn render_gitlab(reported: &HashMap<String, Vec<serde_json::Value>>) -> Stri
         viols.sort_by_key(|v| v["line"].as_u64().unwrap_or(0));
         for v in viols {
             let line = v["line"].as_u64().unwrap_or(1);
+            let col = v["range"]["start_character"].as_u64().unwrap_or(1);
             let rule = v["rule"].as_str().unwrap_or("UNKNOWN");
             let raw_msg = v["message"].as_str().unwrap_or("");
             let msg = raw_msg
@@ -699,13 +716,17 @@ pub fn render_gitlab(reported: &HashMap<String, Vec<serde_json::Value>>) -> Stri
             } else {
                 "critical"
             };
-            // Stable fingerprint: SeaHash of path + rule + line.
+            // Stable fingerprint: SeaHash of path + rule + line + column +
+            // message, so distinct hits on the same line don't collide.
             let mut h = SeaHasher::new();
             path.hash(&mut h);
             rule.hash(&mut h);
             line.hash(&mut h);
+            col.hash(&mut h);
+            msg.hash(&mut h);
             let fingerprint = format!("{:016x}", h.finish());
             entries.push(serde_json::json!({
+                "check_name": rule,
                 "description": msg,
                 "fingerprint": fingerprint,
                 "severity": severity,
@@ -804,11 +825,13 @@ pub fn render_junit(reported: &HashMap<String, Vec<serde_json::Value>>) -> Strin
             let msg = raw_msg
                 .strip_prefix(&format!("{rule}: "))
                 .unwrap_or(raw_msg);
-            let classname = path.replace('/', ".").trim_matches('.').to_owned();
+            let classname = xml_escape(path.replace('/', ".").trim_matches('.'));
+            let path_esc = xml_escape(path);
+            let rule_esc = xml_escape(rule);
             let msg_esc = xml_escape(msg);
             cases.push_str(&format!(
-                "    <testcase name=\"{path}:{line}:{col}\" classname=\"{classname}\">\n\
-                       <failure message=\"{msg_esc}\" type=\"{rule}\"/>\n\
+                "    <testcase name=\"{path_esc}:{line}:{col}\" classname=\"{classname}\">\n\
+                       <failure message=\"{msg_esc}\" type=\"{rule_esc}\"/>\n\
                      </testcase>\n"
             ));
         }
@@ -1393,14 +1416,20 @@ mod tests {
     }
 
     #[test]
-    fn junit_path_is_not_escaped() {
-        // NOTE: documents existing behaviour; see report.
-        // Only the message goes through `xml_escape`; the file path is
-        // interpolated raw into the `name`/`classname` attributes, so a path
-        // containing `&` yields malformed XML.
-        let r = reported(&[("a&b.py", viol("a&b.py", 1, 0, "KIS001", Level::Error, "m"))]);
+    fn junit_escapes_path_and_rule_attributes() {
+        let path = "a&b\"c.py";
+        let r = reported(&[(path, viol(path, 1, 0, "K<1>", Level::Error, "m"))]);
         let xml = render_junit(&r);
-        assert!(xml.contains("name=\"a&b.py:1:1\""), "got:\n{xml}");
+        assert_well_formed_xml(&xml);
+        assert!(
+            xml.contains("name=\"a&amp;b&quot;c.py:1:1\""),
+            "got:\n{xml}"
+        );
+        assert!(
+            xml.contains("classname=\"a&amp;b&quot;c.py\""),
+            "got:\n{xml}"
+        );
+        assert!(xml.contains("type=\"K&lt;1&gt;\""), "got:\n{xml}");
     }
 
     // ── GitLab Code Quality ────────────────────────────────────────────────
@@ -1418,14 +1447,15 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_has_no_check_name() {
-        // NOTE: documents existing behaviour; see report.
-        // GitLab's Code Quality schema lists `check_name` as required; the
-        // writer does not emit it, so the rule code is absent from entries.
+    fn gitlab_check_name_is_rule_code() {
         let doc = parse(&render_gitlab(&sample()));
-        for e in doc.as_array().unwrap() {
-            assert!(e.get("check_name").is_none());
-        }
+        let names: Vec<&str> = doc
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["check_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["KIS001", "KIS001", "KPT002"]);
     }
 
     #[test]
@@ -1459,11 +1489,9 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_fingerprint_collides_on_same_line_and_rule() {
-        // NOTE: documents existing behaviour; see report.
-        // The fingerprint hashes only path + rule + line, so two hits of the
-        // same rule on one line (different columns/messages) collide and
-        // GitLab will de-duplicate them into one finding.
+    fn gitlab_fingerprint_distinguishes_hits_on_same_line() {
+        // Two hits of the same rule on one line must not be de-duplicated
+        // by GitLab, so column and message feed the fingerprint.
         let r = reported(&[
             ("x.py", viol("x.py", 5, 0, "KIS001", Level::Error, "first")),
             (
@@ -1473,7 +1501,7 @@ mod tests {
         ]);
         let doc = parse(&render_gitlab(&r));
         let e = doc.as_array().unwrap();
-        assert_eq!(e[0]["fingerprint"], e[1]["fingerprint"]);
+        assert_ne!(e[0]["fingerprint"], e[1]["fingerprint"]);
     }
 
     #[test]
@@ -1506,18 +1534,27 @@ mod tests {
     }
 
     #[test]
-    fn github_message_newlines_not_escaped() {
-        // NOTE: documents existing behaviour; see report.
-        // GitHub workflow commands require `%`, `\r`, `\n` in the message to
-        // be encoded as `%25`, `%0D`, `%0A`; the writer passes them through,
-        // so a multi-line message truncates the annotation.
+    fn github_message_is_percent_encoded() {
         let r = reported(&[(
             "x.py",
-            viol("x.py", 1, 0, "KIS001", Level::Error, "line1\nline2 100%"),
+            viol("x.py", 1, 0, "KIS001", Level::Error, "line1\r\nline2 100%"),
         )]);
         let out = render_github(&r);
-        assert_eq!(out.lines().count(), 2, "got: {out:?}");
-        assert!(out.contains("100%"));
+        assert_eq!(
+            out,
+            "::error file=x.py,line=1,col=1,title=KIS001::line1%0D%0Aline2 100%25\n"
+        );
+    }
+
+    #[test]
+    fn github_property_values_are_escaped() {
+        let path = "dir,x/a:b%.py";
+        let r = reported(&[(path, viol(path, 1, 0, "KIS001", Level::Error, "m"))]);
+        let out = render_github(&r);
+        assert_eq!(
+            out,
+            "::error file=dir%2Cx/a%3Ab%25.py,line=1,col=1,title=KIS001::m\n"
+        );
     }
 
     // ── JSON ───────────────────────────────────────────────────────────────
@@ -1609,15 +1646,15 @@ mod tests {
     }
 
     #[test]
-    fn zuul_null_help_key_is_kept() {
-        // NOTE: documents existing behaviour; see report.
-        // `Violation::to_json` always emits `"help": null`; the writer only
-        // strips string-valued help, so `help: null` leaks into the Zuul file.
+    fn zuul_drops_null_help_key() {
+        // `Violation::to_json` always emits `"help": null`; it must not leak
+        // into the Zuul file.
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("zuul_return.yaml");
         write_zuul_return(&out, sample(), vec![]).unwrap();
         let c = &read_yaml(&out)["data"]["zuul"]["file_comments"]["src/b.py"][0];
-        assert_eq!(c.get("help"), Some(&serde_json::Value::Null));
+        assert!(c.get("help").is_none(), "got: {c}");
+        assert_eq!(c["message"], "KPT002: pattern hit", "message unchanged");
     }
 
     #[test]

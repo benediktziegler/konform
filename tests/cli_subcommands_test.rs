@@ -264,7 +264,8 @@ fn show_files_lists_python_files_without_linting() {
         .stdout
         .clone();
     let stdout = String::from_utf8(out).unwrap();
-    let files: Vec<&str> = stdout.lines().collect();
+    // Paths are printed with the native separator (`sub\x.py` on Windows).
+    let files: Vec<String> = stdout.lines().map(|l| l.replace('\\', "/")).collect();
     assert_eq!(files, ["bad.py", "good.py", "sub/x.py"]);
 }
 

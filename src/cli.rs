@@ -249,7 +249,9 @@ pub struct CheckArgs {
 
     /// Append `# noqa: CODE` to every line that has a violation, then exit 0.
     ///
-    /// Lines that already carry any `# noqa` comment are left untouched.
+    /// Codes are merged into an existing `# noqa: ...` list (sorted, no
+    /// duplicates); a bare `# noqa` already suppresses everything and is
+    /// left untouched.
     /// When `-` is used as a FILE_PATH, the annotated source is written to
     /// stdout instead of back to disk.
     #[arg(long, default_value_t = false)]

@@ -3,7 +3,7 @@
 # This file is auto-discovered by konform when it sits alongside
 # pyproject.toml / konform.toml.  It can also be referenced explicitly:
 #
-#   [tool.konform.KPT]
+#   [tool.konform.lint.user-defined-patterns]
 #   rules_file = "konform_patterns.toml"
 #
 # Patterns are matched line-by-line against the source text using Rust
@@ -16,7 +16,7 @@
 # Optional per-entry fields:
 #
 #   files   — list of glob patterns; when omitted the rule applies to all files
-#   level   — "error" or "warning" (default: inherits [tool.konform.KPT].level)
+#   level   — "error" or "warning" (default: inherits [tool.konform.lint.user-defined-patterns].level)
 #
 # Suppress a specific violation on a line:
 #   print(x)  # noqa: KPT001

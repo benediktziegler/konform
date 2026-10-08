@@ -128,14 +128,14 @@ pub struct CommonArgs {
     // ── Rule selection ────────────────────────────────────────────────────
     /// Enable only these rule codes or category prefixes (comma-separated).
     ///
-    /// Overrides the `select` list in `[tool.konform]`.
+    /// Overrides the `select` list in `[tool.konform.lint]`.
     /// Example: `--select KIS` enables all KIS* rules.
     #[arg(long, value_delimiter = ',', help_heading = "Rule selection")]
     pub select: Vec<String>,
 
     /// Disable these rule codes or category prefixes (comma-separated).
     ///
-    /// Merged with the `ignore` list in `[tool.konform]`.
+    /// Merged with the `ignore` list in `[tool.konform.lint]`.
     #[arg(long, value_delimiter = ',', help_heading = "Rule selection")]
     pub ignore: Vec<String>,
 
@@ -165,7 +165,7 @@ pub struct CommonArgs {
     ///
     /// Format: `GLOB:CODE[,CODE,...]`.  The glob is matched against the file
     /// path relative to the project root.  Codes support the same prefix
-    /// matching as `--ignore`.  Overrides the `per_file_ignores` table from
+    /// matching as `--ignore`.  Overrides the `per-file-ignores` table from
     /// the config file.
     ///
     /// Example: `--per-file-ignores "tests/**:KIS001,KPT"`

@@ -761,7 +761,7 @@ pub fn render_sarif(reported: &HashMap<String, Vec<serde_json::Value>>) -> Strin
             serde_json::json!({
                 "id": id,
                 "shortDescription": { "text": format!("konform {id}") },
-                "helpUri": format!("https://github.com/bziegler/konform#rules")
+                "helpUri": concat!(env!("CARGO_PKG_REPOSITORY"), "#rules")
             })
         })
         .collect();
@@ -773,7 +773,7 @@ pub fn render_sarif(reported: &HashMap<String, Vec<serde_json::Value>>) -> Strin
                 "driver": {
                     "name": "konform",
                     "version": env!("CARGO_PKG_VERSION"),
-                    "informationUri": "https://github.com/bziegler/konform",
+                    "informationUri": env!("CARGO_PKG_REPOSITORY"),
                     "rules": rules
                 }
             },

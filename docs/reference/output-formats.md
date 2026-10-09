@@ -16,6 +16,15 @@ Select with `--output-format`; redirect with `-o/--output-file`.
 ## GitHub Actions
 
 ```yaml
+- uses: actions/checkout@v7
+- uses: benediktziegler/konform@v0.4.0
+```
+
+The action installs konform with `uv` and runs `konform check --output-format github .`.
+Inputs: `version` (konform version, default latest), `args` (arguments for `konform check`)
+and `working-directory`. Without the action:
+
+```yaml
 - run: pip install konform
 - run: konform check --output-format github .
 ```

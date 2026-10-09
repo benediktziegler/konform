@@ -1,0 +1,35 @@
+name: konform
+description: Lint Python files with konform and report violations as GitHub annotations.
+author: Benedikt Ziegler
+branding:
+  icon: check-circle
+  color: blue
+
+inputs:
+  version:
+    description: konform version to install (e.g. `0.4.0`). Defaults to the latest release.
+    required: false
+    default: ""
+  args:
+    description: Arguments passed to `konform check`.
+    required: false
+    default: "--output-format github ."
+  working-directory:
+    description: Directory to run konform in.
+    required: false
+    default: "."
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@v6
+    - name: Run konform
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        KONFORM_VERSION: ${{ inputs.version }}
+        KONFORM_ARGS: ${{ inputs.args }}
+      run: |
+        spec="konform${KONFORM_VERSION:+==$KONFORM_VERSION}"
+        # shellcheck disable=SC2086 # KONFORM_ARGS is intentionally word-split
+        uvx "$spec" check $KONFORM_ARGS

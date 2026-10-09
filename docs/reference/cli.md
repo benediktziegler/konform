@@ -71,7 +71,7 @@ konform check [OPTIONS] <FILE_PATHS>...
 | `--output-format <FMT>`    | See [Output formats](output-formats.md). Default `full`       |
 | `-o, --output-file <PATH>` | Write output to a file                                        |
 | `--statistics`             | Show violation counts per rule code                           |
-| `--output-path <PATH>`     | Zuul `zuul_return.yaml` path (default `tmp/zuul/zuul_return.yaml`) |
+| `--output-path <PATH>`     | Where `--output-format zuul` writes `zuul_return.yaml` (default `tmp/zuul/zuul_return.yaml`) |
 
 ### Miscellaneous
 

@@ -2,6 +2,15 @@
 
 ### Feat
 
+- **rules**: reject weak KNQ001 reasons
+- **rules**: add placeholder reasons and exempt codes to KNQ001
+- **rules**: add --reason and KNQ002 noqa style rule
+- **rules**: make KNQ001 opt-in via extend-select
+- **rules**: add KNQ001 requiring a reason on noqa
+- **kst**: add rule --schema for editor completion
+- **kst**: add rule --test with embedded snippets
+- **kst**: add konform ast to print the rule-visible tree
+- **kst**: fail hard on invalid rules in the CLI
 - **kst**: resolve simple alias assignments
 - **kst**: add user-defined structural rule engine
 - **rule**: render `rule --explain` as formatted terminal output
@@ -12,6 +21,7 @@
 
 ### Fix
 
+- **rules**: warn on invalid KNQ settings
 - **output**: make the CI writers schema-correct and escape user data
 - **output**: point SARIF URLs at the real repository
 - **cache**: key cache on rule config and pattern files
@@ -21,6 +31,7 @@
 
 ### Refactor
 
+- **cli**: rename --reason to --noqa-reason
 - **kst**: isolate parser types behind a node layer
 - drop unsafe impls, dead code and unused dependencies
 

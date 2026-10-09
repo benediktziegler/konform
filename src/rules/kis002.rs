@@ -44,6 +44,7 @@
 //! only see uses of the alias within the file being fixed, so it's applied
 //! only when `--unsafe-fixes` is passed alongside `--fix`.
 
+use super::docs::{DocSection, Example, RuleDocs, RuleOption};
 use super::scope::{
     bucket_for_offset, build_line_starts, build_scope_index, collect_all_exports,
     collect_load_names, is_name_shadowed, offset_to_line_col, shadowed_at_occurrences_of,
@@ -84,6 +85,10 @@ impl Rule for Kis002Rule {
         "KIS"
     }
 
+    fn category_title(&self) -> &str {
+        "Import style"
+    }
+
     fn config_name(&self) -> &str {
         "import-alias-policy"
     }
@@ -118,80 +123,82 @@ impl Rule for Kis002Rule {
         Ok(apply_fixes(ctx, &parse_kis002_config(cfg)))
     }
 
-    fn explain(&self) -> String {
-        "\
-KIS002 — Import alias policy [sometimes fixable, unsafe]
-
-  Checks that `from X import Y as Z` only renames the import when the
-  rename is actually needed to avoid a naming collision. If `Y` isn't bound
-  anywhere else the alias's uses can see, the rename buys nothing.
-
-  Why: an unneeded alias gives one thing two names. Readers must learn that
-  `bar_baz` is really `foo.bar.baz`, grepping for `baz` misses its uses, and
-  the same import can end up aliased differently from file to file.
-
-  Bad:
-    from foo.bar import baz as bar_baz    # `baz` isn't used anywhere else
-
-  Good:
-    from foo.bar import baz
-
-  Fix (with --unsafe-fixes) drops the alias and renames its uses:
-    from foo.bar import baz as bar_baz   ->   from foo.bar import baz
-    bar_baz()                            ->   baz()
-
-  Not flagged:
-    from foo.bar import baz as baz        # explicit re-export idiom;
-                                           # see Ruff's PLC0414 instead
-    from foo.bar import baz as _baz       # leading underscore: deliberate
-                                           # \"don't re-export\" marker
-    import x.y as z                       # plain `import ... as` is out of
-                                           # scope: dropping the alias would
-                                           # change what name gets bound
-
-    __all__ = [\"bar_baz\"]
-    from foo.bar import baz as bar_baz    # `bar_baz` is part of this
-                                           # module's public API
-
-  Also not flagged: several aliased imports of the same name from different
-  modules, since the aliases keep them apart:
-    from foo.bar import baz as bar_baz
-    from nor.kind import baz as kind_baz
-
-  Configure in [tool.konform.lint.import-alias-policy]:
-    level = \"warning\"   # default: \"warning\" | \"error\"
-    alias-template = \"{module_last}_{name}\"   # optional
-
-  With `alias-template`, an alias equal to the rendered template is always
-  allowed -- even when the rename isn't needed -- so a project can use one
-  aliasing convention everywhere. With the template above:
-    from foo.bar import baz as bar_baz    # allowed: matches the template
-    from foo.bar import baz as other      # flagged: no match, not needed
-  Placeholders:
-    {name}          the imported name           (baz)
-    {module}        dotted module, dots -> `_`   (foo_bar)
-    {module_first}  first module component       (foo)
-    {module_last}   last module component        (bar)
-  The template only ever allows aliases; it never flags any. Placeholders
-  must be written exactly (no spaces) and no other braces are allowed. An
-  invalid template is reported on stderr and ignored.
-
-  Not every violation can be auto-fixed: if the alias is also bound
-  elsewhere (shadowed by a local variable, or ambiguous with a different
-  import binding the same name), konform reports the violation but leaves
-  it for you to fix by hand.
-
-  This fix is marked unsafe: konform can only see uses of the alias within
-  the file being fixed, so it can't rule out other, dynamic references to
-  it by name (e.g. via `getattr`/`globals()`). Run `konform check --fix
-  --unsafe-fixes` (or `--fix-only --unsafe-fixes`) to apply it; plain
-  `--fix` reports the violation but leaves it unfixed.
-
-  Suppress per-line:
-    from foo.bar import baz as bar_baz   # noqa: KIS002
-    from foo.bar import baz as bar_baz   # noqa: KIS      (all KIS rules)
-"
-        .to_owned()
+    fn docs(&self) -> RuleDocs {
+        let defaults = Kis002Settings::default();
+        RuleDocs {
+            what_it_does: "Flags `from X import Y as Z` when the alias `Z` buys nothing: `Y` isn't \
+                bound to anything else in the module, so the alias only adds indirection.",
+            why_bad: "An unneeded alias gives one thing two names. Readers must learn that \
+                `bar_baz` is really `foo.bar.baz`, grepping for `baz` misses its uses, and the \
+                same import can end up aliased differently from file to file. Aliases earn their \
+                place when they resolve a real name clash; this rule flags the ones that don't.",
+            example: Some(Example {
+                bad: "from foo.bar import baz as bar_baz   # nothing else is named `baz`\n\nbar_baz()",
+                good: "from foo.bar import baz\n\nbaz()",
+            }),
+            sections: vec![
+                DocSection {
+                    title: "Fix behavior",
+                    body: "With `--fix --unsafe-fixes`, konform drops the alias and renames every \
+                        use of it back to the original name.\n\n\
+                        The fix is unsafe: konform can only see uses of the alias within the file \
+                        being fixed, so it can't rule out dynamic references by name (for example \
+                        `getattr` or `globals()`). It is skipped, and the violation is still \
+                        reported, when the alias is shadowed somewhere or bound to more than one \
+                        import in the file.",
+                },
+                DocSection {
+                    title: "What is not flagged",
+                    body: "```python\n\
+                        # The alias avoids a clash with a local name or another import\n\
+                        from foo.bar import baz as bar_baz\n\
+                        baz = compute()\n\n\
+                        # Same name imported from different modules: the aliases keep them apart\n\
+                        from foo.bar import baz as bar_baz\n\
+                        from nor.kind import baz as kind_baz\n\n\
+                        # The alias is a deliberate re-export\n\
+                        __all__ = [\"bar_baz\"]\n\
+                        from foo.bar import baz as bar_baz\n\n\
+                        # Leading underscore: a \"private, don't re-export\" marker\n\
+                        from foo.bar import baz as _baz\n\
+                        ```\n\n\
+                        Also left alone: self-aliases (`from X import Y as Y`, Ruff's `PLC0414`), \
+                        relative imports (no stable module identity for a collision check) and \
+                        plain `import X as Z` (dropping that alias changes what gets bound).",
+                },
+                DocSection {
+                    title: "Enforcing one aliasing convention",
+                    body: "If your project deliberately aliases imports (say, always \
+                        `<last module part>_<name>`), set `alias-template`; aliases equal to its \
+                        rendering are never flagged, even when the rename isn't needed.\n\n\
+                        ```toml\n\
+                        [tool.konform.lint.import-alias-policy]\n\
+                        alias-template = \"{module_last}_{name}\"\n\
+                        ```\n\n\
+                        ```python\n\
+                        from foo.bar import baz as bar_baz   # OK: matches the template\n\
+                        from foo.bar import baz as other     # KIS002: doesn't match, and isn't needed\n\
+                        ```\n\n\
+                        Placeholders: `{name}`, `{module}` (dots become `_`), `{module_first}`, \
+                        `{module_last}`. The template only exempts aliases, it never flags any. An \
+                        invalid template is reported on stderr and ignored.",
+                },
+            ],
+            options: vec![
+                RuleOption {
+                    name: "level",
+                    ty: "\"warning\" | \"error\"",
+                    default: format!("`\"{}\"`", defaults.level),
+                    description: "Severity of violations.",
+                },
+                RuleOption {
+                    name: "alias-template",
+                    ty: "str",
+                    default: "unset".to_owned(),
+                    description: "Aliases matching this template are always allowed.",
+                },
+            ],
+        }
     }
 }
 

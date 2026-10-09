@@ -13,6 +13,7 @@
 //! import os.path             # also fine
 //! ```
 
+use super::docs::{DocSection, Example, RuleDocs, RuleOption};
 use super::scope::{
     build_line_starts, build_scope_index, collect_all_exports, collect_load_names,
     offset_to_line_col, shadowed_at_occurrences_of,
@@ -56,6 +57,10 @@ impl Rule for Kis001Rule {
         "KIS"
     }
 
+    fn category_title(&self) -> &str {
+        "Import style"
+    }
+
     fn config_name(&self) -> &str {
         "module-only-imports"
     }
@@ -82,38 +87,56 @@ impl Rule for Kis001Rule {
         Ok(apply_fixes(ctx, &self.probe, &exceptions))
     }
 
-    fn explain(&self) -> String {
-        "\
-KIS001 — Module-only imports [sometimes fixable]
-
-  Checks that every `from X import Y` imports a module (sub-package or .py
-  file), not an object (class, function, or constant) from within one.
-
-  Bad:
-    from os.path import join      # join is a function
-
-  Good:
-    from os import path           # path is the os.path module
-    import os.path                # also fine
-
-  Configure exceptions in [tool.konform.lint.module-only-imports]:
-    exceptions = [\"__future__\", \"typing\", \"typing_extensions\", \"collections.abc\"]
-
-  Not every violation can be auto-fixed: if the new import's name is already
-  bound elsewhere in the file -- as a local variable, or by a different
-  import that would then overlap with it -- konform reports the violation
-  but leaves it for you to fix by hand.
-
-  When a package isn't installed in this environment, KIS001 can't tell
-  whether the imported name is a module or not. Control how that's reported
-  in [tool.konform.lint.module-only-imports]:
-    unresolved-level = \"warning\"   # default: \"warning\" | \"error\" | \"off\"
-
-  Suppress per-line:
-    from os.path import join   # noqa: KIS001
-    from os.path import join   # noqa: KIS      (silences all KIS rules)
-"
-        .to_owned()
+    fn docs(&self) -> RuleDocs {
+        let defaults = Kis001Settings::default();
+        RuleDocs {
+            what_it_does: "Checks that every `from X import Y` imports a module (a sub-package \
+                or `.py` file), not an object such as a function, class or constant.",
+            why_bad: "Importing only modules keeps the origin of every name visible at the call \
+                site (`path.join(...)` rather than a bare `join(...)`) and avoids name clashes. \
+                See the [Google Python Style Guide \u{a7}2.2]\
+                (https://google.github.io/styleguide/pyguide.html#22-imports).",
+            example: Some(Example {
+                bad: "from os.path import join   # KIS001: `join` is a function, not a module",
+                good: "import os.path\nfrom os import path        # `path` is a module",
+            }),
+            sections: vec![
+                DocSection {
+                    title: "Fix behavior",
+                    body: "konform rewrites the import when it is safe to do so. It leaves the \
+                        violation for you to fix by hand when the new import's name is already \
+                        bound elsewhere in the file: as a local variable, or by a different \
+                        import that would then overlap with it.",
+                },
+                DocSection {
+                    title: "Unresolved imports",
+                    body: "When a package isn't installed in this environment, KIS001 can't tell \
+                        whether the imported name is a module. `unresolved-level` controls how \
+                        that is reported. The extra search roots are described under \
+                        [module search roots](../configuration.md#module-search-roots).",
+                },
+            ],
+            options: vec![
+                RuleOption {
+                    name: "exceptions",
+                    ty: "list[str]",
+                    default: format!("`{:?}`", defaults.exceptions),
+                    description: "Modules that may import objects directly.",
+                },
+                RuleOption {
+                    name: "level",
+                    ty: "\"warning\" | \"error\"",
+                    default: format!("`\"{}\"`", defaults.level),
+                    description: "Severity of violations.",
+                },
+                RuleOption {
+                    name: "unresolved-level",
+                    ty: "\"warning\" | \"error\" | \"off\"",
+                    default: format!("`\"{}\"`", defaults.unresolved_level),
+                    description: "Severity for imports from packages that can't be resolved.",
+                },
+            ],
+        }
     }
 }
 

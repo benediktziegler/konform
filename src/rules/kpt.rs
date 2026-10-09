@@ -24,6 +24,7 @@
 //! * `sub_rules` — ordered list of refinements; the first sub-rule whose
 //!   pattern(s) match the already-flagged line overrides `message` and `help`
 
+use super::docs::{DocSection, Example, RuleDocs, RuleOption};
 use super::{has_noqa, FileContext, FixTarget, Rule, RuleDoc};
 use crate::types::{Level, Violation};
 use anyhow::Result;
@@ -282,6 +283,10 @@ impl Rule for KptRule {
         "KPT"
     }
 
+    fn category_title(&self) -> &str {
+        "User-defined patterns"
+    }
+
     fn gates_per_violation(&self) -> bool {
         true
     }
@@ -499,53 +504,98 @@ impl Rule for KptRule {
             .collect()
     }
 
-    fn explain(&self) -> String {
-        r#"KPT001 — User-defined pattern rules
-
-  Checks every Python source file against a set of regular expressions
-  defined in your project configuration.
-
-  Patterns are loaded from the first available source:
-    1. Inline [[tool.konform.lint.user-defined-patterns.rules]] in pyproject.toml / konform.toml
-    2. rules_file = "path" in [tool.konform.lint.user-defined-patterns]
-    3. konform_patterns.toml  (auto-discovered next to the config file)
-    4. konform_patterns.yaml  (legacy fallback)
-
-  Each pattern entry:
-    id      = "KPT001"
-    message = "Use the logger instead of bare print()."
-    pattern = '^\s*print\('              # single string
-    # or a list — any match fires the rule:
-    pattern = ['^\s*print\(', '^\s*breakpoint\(']
-    files   = ["src/**/*.py"]   # optional glob filter
-    level   = "warning"         # or "error"
-    help    = "Use logger.info() instead."  # optional guidance text
-
-  Sub-rules refine the message and help for more specific matches.
-  The first sub-rule whose pattern(s) match the already-flagged line wins:
-
-    [[rules]]
-    id      = "KPT901"
-    message = "os.environ found — discouraged in test code."
-    pattern = 'os\.environ'
-    help    = "Contact the project maintainers for guidance."
-    sub_rules = [
-      {
-        # pattern accepts a single string or a list; any match fires the sub-rule
-        pattern = ['os\.environ\.get\(', 'os\.environ\['],
-        message = "os.environ — special_key access detected.",
-        help    = "Use the 'shared_fixture' fixture instead.",
-      },
-    ]
-
-  If you use [[rules.sub_rules]] instead, each sub-rule belongs to the
-  most recently declared [[rules]] block.
-
-  Suppress per-line:
-    os.environ.get("X")   # noqa: KPT901
-    os.environ.get("X")   # noqa: KPT      (silences all KPT rules on this line)
-"#
-        .to_owned()
+    fn docs(&self) -> RuleDocs {
+        RuleDocs {
+            what_it_does: "Checks every source file against regular expressions (Rust \
+                [`regex`](https://docs.rs/regex) syntax) defined in your project \
+                configuration, line by line. Each pattern has its own code and is addressable \
+                in `select`, `ignore`, `per-file-ignores` and `# noqa`.",
+            why_bad: "Some conventions are specific to a project (no bare `print()`, no \
+                `breakpoint()` left behind, no unticketed `TODO`). A pattern rule enforces them \
+                without writing a plugin.",
+            example: Some(Example {
+                bad: "print(\"hello\")   # KPT001, with the pattern below",
+                good: "logger.info(\"hello\")",
+            }),
+            sections: vec![
+                DocSection {
+                    title: "Defining patterns",
+                    body: "```toml\n\
+                        [[tool.konform.lint.user-defined-patterns.rules]]\n\
+                        id      = \"KPT001\"\n\
+                        message = \"Use the project logger instead of bare print().\"\n\
+                        pattern = '^\\s*print\\s*\\('\n\
+                        files   = [\"src/**/*.py\"]\n\
+                        level   = \"warning\"\n\
+                        ```\n\n\
+                        Patterns are loaded from the first available source:\n\n\
+                        1. Inline `[[tool.konform.lint.user-defined-patterns.rules]]` in the config file.\n\
+                        2. `rules_file = \"path\"` in `[tool.konform.lint.user-defined-patterns]`.\n\
+                        3. `konform_patterns.toml`, auto-discovered next to the config file.\n\
+                        4. `konform_patterns.yaml` (legacy fallback).\n\n\
+                        A standalone file uses plain `[[rules]]` tables.",
+                },
+                DocSection {
+                    title: "Pattern entry fields",
+                    body: "| Field | Required | Description |\n\
+                        | --- | --- | --- |\n\
+                        | `id` | yes | Code shown in output and used for `# noqa` |\n\
+                        | `message` | yes | Human-readable description |\n\
+                        | `pattern` | yes | Regex, or a list of regexes (any match fires) |\n\
+                        | `files` | no | Glob filter; omitted means every file |\n\
+                        | `level` | no | `\"error\"` or `\"warning\"`; inherits the table's `level` |\n\
+                        | `help` | no | Guidance text shown with the violation |\n\
+                        | `multiline` | no | Match against the whole file instead of line by line |\n\
+                        | `replacement` | no | Replacement string (`$1`, `$2`, ... captures); makes the pattern fixable |\n\
+                        | `sub_rules` | no | Refinements overriding `message`/`help`; the first match wins |",
+                },
+                DocSection {
+                    title: "Sub-rules",
+                    body: "Sub-rules refine the message and help for more specific matches. The \
+                        first sub-rule whose pattern(s) match the already-flagged line wins.\n\n\
+                        ```toml\n\
+                        [[rules]]\n\
+                        id      = \"KPT901\"\n\
+                        message = \"os.environ found, discouraged in test code.\"\n\
+                        pattern = 'os\\.environ'\n\
+                        sub_rules = [\n\
+                          {\n\
+                            pattern = ['os\\.environ\\.get\\(', 'os\\.environ\\['],\n\
+                            message = \"os.environ special_key access detected.\",\n\
+                            help    = \"Use the 'shared_fixture' fixture instead.\",\n\
+                          },\n\
+                        ]\n\
+                        ```\n\n\
+                        With `[[rules.sub_rules]]` tables, each sub-rule belongs to the most \
+                        recently declared `[[rules]]` entry.",
+                },
+                DocSection {
+                    title: "Fix behavior",
+                    body: "A pattern with a `replacement` is fixable; patterns without one are \
+                        report-only.",
+                },
+            ],
+            options: vec![
+                RuleOption {
+                    name: "level",
+                    ty: "\"warning\" | \"error\"",
+                    default: "`\"warning\"`".to_owned(),
+                    description: "Default severity for patterns that don't set their own.",
+                },
+                RuleOption {
+                    name: "rules_file",
+                    ty: "str",
+                    default: "unset".to_owned(),
+                    description: "Load patterns from this file instead of auto-discovery.",
+                },
+                RuleOption {
+                    name: "rules",
+                    ty: "array of tables",
+                    default: "`[]`".to_owned(),
+                    description: "Inline pattern entries.",
+                },
+            ],
+        }
     }
 }
 

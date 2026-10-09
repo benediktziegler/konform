@@ -22,6 +22,7 @@ use ruff_text_size::Ranged;
 // ---------------------------------------------------------------------------
 // Sub-modules
 // ---------------------------------------------------------------------------
+pub mod docs;
 pub mod kis001;
 pub mod kis002;
 pub mod kpt;
@@ -199,6 +200,12 @@ pub trait Rule: Send + Sync {
     /// prefix matching and for `--list-rules` display.
     fn category(&self) -> &str;
 
+    /// Human-readable name of the category, e.g. `"Import style"`; shown in
+    /// the generated rule docs next to the prefix.
+    fn category_title(&self) -> &str {
+        self.category()
+    }
+
     /// Stable config-table name, e.g. `"module-only-imports"`.
     ///
     /// Used by [`crate::config::Config::rule_config`] to look up this rule's
@@ -275,10 +282,27 @@ pub trait Rule: Send + Sync {
         0
     }
 
-    /// Multi-line human-readable explanation with a bad/good code example.
+    /// Whether the rule runs when no `select` is configured. Listed on the
+    /// generated "Default rules" page.
+    fn enabled_by_default(&self) -> bool {
+        true
+    }
+
+    /// Prose, examples and options for the rule's documentation page.
     ///
-    /// Printed by `konform rule --explain <CODE>`.
-    fn explain(&self) -> String;
+    /// Everything else on the page (code, name, config table, fix
+    /// availability and safety) is read from the other methods of this trait,
+    /// so it can't drift from the rule's behaviour. Every registered rule must
+    /// fill in at least `what_it_does` (enforced by a test).
+    fn docs(&self) -> docs::RuleDocs {
+        docs::RuleDocs::default()
+    }
+
+    /// Full Markdown documentation, printed by `konform rule --explain <CODE>`
+    /// and published on the docs site. Rendered from [`Rule::docs`].
+    fn explain(&self) -> String {
+        docs::render_rule_page(self)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -357,6 +381,28 @@ pub fn all_rules(
         Box::new(kis002::Kis002Rule::new()),
         Box::new(kpt::KptRule::new(config_dir)),
     ]
+}
+
+#[cfg(test)]
+mod docs_tests {
+    use super::*;
+
+    #[test]
+    fn every_registered_rule_is_documented() {
+        for rule in all_rules(Arc::new(ModuleProbe::default()), None) {
+            let docs = rule.docs();
+            assert!(
+                !docs.what_it_does.trim().is_empty(),
+                "{} has no `what_it_does` docs",
+                rule.code()
+            );
+            assert!(
+                !docs.options.is_empty(),
+                "{} documents no options",
+                rule.code()
+            );
+        }
+    }
 }
 
 #[cfg(test)]

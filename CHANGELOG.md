@@ -10,10 +10,16 @@
 
 ### Fix
 
+- **output**: make the CI writers schema-correct and escape user data
+- **output**: point SARIF URLs at the real repository
 - **cache**: key cache on rule config and pattern files
 - **rule**: list and explain user-defined patterns
 - **kpt**: honor select/ignore per pattern id
 - **noqa**: ignore empty codes and non-comment matches
+
+### Refactor
+
+- drop unsafe impls, dead code and unused dependencies
 
 ### Perf
 

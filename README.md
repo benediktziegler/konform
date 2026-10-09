@@ -4,7 +4,7 @@
 [![codecov](https://codecov.io/gh/benediktziegler/konform/graph/badge.svg)](https://codecov.io/gh/benediktziegler/konform)
 [![Docs](https://github.com/benediktziegler/konform/actions/workflows/docs.yml/badge.svg)](https://benediktziegler.github.io/konform/)
 [![PyPI](https://img.shields.io/pypi/v/konform)](https://pypi.org/project/konform/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/benediktziegler/konform/blob/main/LICENSE)
 
 Multi-rule Python linter and language server — fast, configurable, and CI-ready.
 
@@ -17,16 +17,20 @@ Multi-rule Python linter and language server — fast, configurable, and CI-read
 ## Why konform?
 
 [Ruff](https://github.com/astral-sh/ruff) covers most of what a Python project
-wants from a linter, but not everything. konform is a small, fast Rust linter for
-the checks that fall through the gaps:
+wants from a linter, but not everything. konform is a small, fast Rust linter
+for the checks that fall through the gaps. Its rules are **opinionated**: they
+encode a specific style (such as the
+[Google Python Style Guide](https://google.github.io/styleguide/pyguide.html)'s
+module-only imports) rather than universal correctness, and the list keeps
+growing.
 
-- **Import style** — enforce module-only imports (KIS001) and flag needless
-  `from X import Y as Z` aliases (KIS002).
+- **Opinionated import rules** — enforce module-only imports (KIS001) and flag
+  needless `from X import Y as Z` aliases (KIS002).
 - **Project-specific rules** — define your own regex rules (KPT) in TOML, with
   messages, file globs and optional replacements. No plugin code.
 - **Auto-fixes** with a Ruff-style safe/unsafe split.
 - **Built-in language server** that shares the CLI's engine.
-- **CI-ready** output: GitHub, GitLab, SARIF, JUnit and JSON.
+- **CI-ready** output: GitHub, GitLab, SARIF, JUnit, Zuul and JSON.
 
 ## Installation
 
@@ -108,7 +112,7 @@ uv run --only-group dev --python 3.12 zensical serve
 uv run --only-group dev --python 3.12 zensical build --clean --strict
 ```
 
-The docs source lives in `docs/` (config in `mkdocs.yml`) and is deployed to
+The docs source lives in `docs/` (config in `mkdocs.yml`; the landing page is this README) and is deployed to
 GitHub Pages by `.github/workflows/docs.yml` on every push to `main`.
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/);
 releases are cut with [commitizen](https://commitizen-tools.github.io/commitizen/).
@@ -131,4 +135,4 @@ Thanks to all the maintainers of all used open-source projects.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/benediktziegler/konform/blob/main/LICENSE)

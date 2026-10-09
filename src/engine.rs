@@ -15,7 +15,6 @@
 //!       CLI check path                    LSP handler path
 //!       CheckInput { path, &fs::read() }  CheckInput { path, &session.get() }
 //! ```
-#![allow(dead_code)]
 
 use crate::config::Config;
 use crate::rules::{FileContext, FixTarget, Rule};
@@ -458,9 +457,6 @@ mod tests {
         fn description(&self) -> &str {
             "test-only rule that always corrupts the source"
         }
-        fn fixable(&self) -> bool {
-            true
-        }
         fn check(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Vec<Violation> {
             Vec::new()
         }
@@ -492,9 +488,6 @@ mod tests {
         }
         fn description(&self) -> &str {
             "test-only rule that always applies a trivial valid fix"
-        }
-        fn fixable(&self) -> bool {
-            true
         }
         fn check(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Vec<Violation> {
             Vec::new()
@@ -563,9 +556,6 @@ mod tests {
         fn description(&self) -> &str {
             "test-only rule: NEEDS_A -> NEEDS_B"
         }
-        fn fixable(&self) -> bool {
-            true
-        }
         fn check(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Vec<Violation> {
             Vec::new()
         }
@@ -601,9 +591,6 @@ mod tests {
         }
         fn description(&self) -> &str {
             "test-only rule: NEEDS_B -> FIXED_B"
-        }
-        fn fixable(&self) -> bool {
-            true
         }
         fn check(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Vec<Violation> {
             Vec::new()
@@ -664,9 +651,6 @@ mod tests {
         fn description(&self) -> &str {
             "test-only rule that never converges"
         }
-        fn fixable(&self) -> bool {
-            true
-        }
         fn check(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Vec<Violation> {
             Vec::new()
         }
@@ -716,9 +700,6 @@ mod tests {
         }
         fn description(&self) -> &str {
             "test-only rule whose fix is marked unsafe"
-        }
-        fn fixable(&self) -> bool {
-            true
         }
         fn is_unsafe_fix(&self) -> bool {
             true

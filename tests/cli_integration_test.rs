@@ -535,3 +535,82 @@ fn init_path_argument_selects_directory() {
     assert!(target.path().join("konform_patterns.toml").is_file());
     assert!(!cwd.path().join("konform.toml").exists());
 }
+
+fn violating_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("app.py"), "from os.path import join\n").unwrap();
+    dir
+}
+
+/// Without `--output-format zuul`, no `zuul_return.yaml` is written anywhere.
+#[test]
+fn zuul_file_is_not_written_by_default() {
+    let dir = violating_dir();
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["check", "--isolated", "app.py"])
+        .assert()
+        .code(1);
+    assert!(!dir.path().join("tmp").exists());
+
+    let explicit = dir.path().join("out.yaml");
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["check", "--isolated", "--output-path"])
+        .arg(&explicit)
+        .arg("app.py")
+        .assert()
+        .code(1);
+    assert!(!explicit.exists(), "--output-path alone must not write");
+}
+
+/// `--output-format zuul` writes (creating directories) and merges into the
+/// file at `--output-path`, keeping unrelated content.
+#[test]
+fn zuul_output_format_writes_and_merges_zuul_return() {
+    let dir = violating_dir();
+    let out = dir.path().join("nested/dir/zuul_return.yaml");
+    std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+    std::fs::write(&out, "data:\n  other: keep\n").unwrap();
+
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args([
+            "check",
+            "--isolated",
+            "--output-format",
+            "zuul",
+            "--output-path",
+        ])
+        .arg(&out)
+        .arg("app.py")
+        .assert()
+        .code(1)
+        .stderr(contains("Wrote Zuul output"));
+
+    let yaml = std::fs::read_to_string(&out).unwrap();
+    assert!(yaml.contains("other: keep"), "{yaml}");
+    assert!(yaml.contains("zuul:"), "{yaml}");
+    // Not in a git repo, so the file isn't a "changed file" -> reported as a warning.
+    assert!(
+        yaml.contains("warnings:") && yaml.contains("app.py:1"),
+        "{yaml}"
+    );
+}
+
+/// A new nested output directory is created.
+#[test]
+fn zuul_output_format_creates_missing_directories() {
+    let dir = violating_dir();
+    let out = dir.path().join("tmp/zuul/zuul_return.yaml");
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["check", "--isolated", "--output-format", "zuul", "app.py"])
+        .assert()
+        .code(1);
+    assert!(out.is_file());
+}

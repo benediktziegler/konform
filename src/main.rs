@@ -21,8 +21,8 @@ use git::{find_repo_root, get_changed_files};
 use ignore::WalkBuilder;
 use module_probe::ModuleProbe;
 use output::{
-    format_fix_hint, has_unsafe_fixable, print_statistics, print_violations, render_for_file,
-    write_zuul_return, OutputFormat,
+    emit_zuul_return_or_report, format_fix_hint, has_unsafe_fixable, print_statistics,
+    print_violations, render_for_file, OutputFormat,
 };
 use owo_colors::OwoColorize;
 use rayon::prelude::*;
@@ -686,23 +686,10 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
         eprintln!("{}", format_fix_hint(&argv, include_unsafe));
     }
 
-    let mut file_comments: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-    let mut warnings: Vec<String> = Vec::new();
-    for (path, viols) in &reported {
-        if changed_files.contains(path) {
-            file_comments.insert(path.clone(), viols.clone());
-        } else {
-            for v in viols {
-                let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("");
-                let line = v.get("line").and_then(|l| l.as_u64()).unwrap_or(0);
-                warnings.push(format!("{path}:{line}: {msg}"));
-            }
-        }
-    }
-    if let Some(parent) = args.output_path.parent() {
-        if parent.exists() || parent.to_str() == Some("") {
-            let _ = write_zuul_return(&args.output_path, file_comments, warnings);
-        }
+    if args.output_format == OutputFormat::Zuul
+        && !emit_zuul_return_or_report(&args.output_path, &reported, &changed_files)
+    {
+        std::process::exit(2);
     }
 
     if args.statistics {

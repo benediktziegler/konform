@@ -55,6 +55,8 @@ pub enum OutputFormat {
     Sarif,
     /// JUnit XML report (written to stdout).
     Junit,
+    /// Zuul `zuul_return.yaml` (merged into the file at `--output-path`).
+    Zuul,
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +176,10 @@ pub fn print_violations(
         }
         OutputFormat::Junit => {
             print!("{}", render_junit(reported));
+            return exit_code_for(reported, changed_files, level, changed_files_level);
+        }
+        // The report is written to `--output-path` by the caller; nothing to print.
+        OutputFormat::Zuul => {
             return exit_code_for(reported, changed_files, level, changed_files_level);
         }
         OutputFormat::Full => {} // fall through to the full renderer below
@@ -305,6 +311,54 @@ pub fn print_violations(
 // write_zuul_return
 // ---------------------------------------------------------------------------
 
+/// Write the Zuul report for `reported` to `output_path`.
+///
+/// Violations in files changed in the current git change become inline file
+/// comments; all others are listed as warnings (`path:line: message`, in path
+/// order so the output is deterministic).
+pub fn emit_zuul_return(
+    output_path: &Path,
+    reported: &HashMap<String, Vec<serde_json::Value>>,
+    changed_files: &ChangedFiles,
+) -> anyhow::Result<()> {
+    let mut file_comments: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut paths: Vec<&String> = reported.keys().collect();
+    paths.sort();
+    for path in paths {
+        let viols = &reported[path];
+        if changed_files.contains(path) {
+            file_comments.insert(path.clone(), viols.clone());
+        } else {
+            for v in viols {
+                let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                let line = v.get("line").and_then(|l| l.as_u64()).unwrap_or(0);
+                warnings.push(format!("{path}:{line}: {msg}"));
+            }
+        }
+    }
+    write_zuul_return(output_path, file_comments, warnings)
+}
+
+/// Like [`emit_zuul_return`], but prints the error to stderr; returns whether
+/// the report was written.
+pub fn emit_zuul_return_or_report(
+    output_path: &Path,
+    reported: &HashMap<String, Vec<serde_json::Value>>,
+    changed_files: &ChangedFiles,
+) -> bool {
+    match emit_zuul_return(output_path, reported, changed_files) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!(
+                "error: failed to write Zuul output to {}: {e}",
+                output_path.display()
+            );
+            false
+        }
+    }
+}
+
 /// Write violations to a zuul_return.yaml file (create or merge).
 pub fn write_zuul_return(
     output_path: &Path,
@@ -378,7 +432,9 @@ pub fn write_zuul_return(
     }
     let yaml_str = serde_yaml::to_string(&serde_json::Value::Object(root))?;
     std::fs::write(output_path, yaml_str)?;
-    eprintln!("Wrote Zuul output to {}", output_path.display());
+    if !theme::is_quiet() {
+        eprintln!("Wrote Zuul output to {}", output_path.display());
+    }
     Ok(())
 }
 
@@ -768,8 +824,8 @@ fn xml_escape(s: &str) -> String {
 
 /// Return the rendered output for `--output-file`, using the selected format.
 ///
-/// All CI formats render to a string here; `Full` and `Concise` fall back to
-/// JSON since they stream to stderr and have no returnable string form.
+/// All CI formats render to a string here; `Full`, `Concise` and `Zuul` fall
+/// back to JSON since they have no returnable string form.
 pub fn render_for_file(
     reported: &HashMap<String, Vec<serde_json::Value>>,
     format: OutputFormat,
@@ -808,8 +864,11 @@ pub fn render_for_file(
         OutputFormat::Gitlab => render_gitlab(reported),
         OutputFormat::Sarif => render_sarif(reported),
         OutputFormat::Junit => render_junit(reported),
-        // Full/Concise stream to stderr — fall back to JSON for file output.
-        OutputFormat::Full | OutputFormat::Concise => render_for_file(reported, OutputFormat::Json),
+        // Full/Concise stream to stderr and Zuul is written to `--output-path`
+        // (it needs the changed-file routing) — fall back to JSON for file output.
+        OutputFormat::Full | OutputFormat::Concise | OutputFormat::Zuul => {
+            render_for_file(reported, OutputFormat::Json)
+        }
     }
 }
 
@@ -847,6 +906,141 @@ pub fn print_statistics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Zuul output ────────────────────────────────────────────────────────
+
+    fn viol(line: u64, message: &str) -> serde_json::Value {
+        serde_json::json!({"line": line, "message": message, "help": "do better"})
+    }
+
+    fn reported() -> HashMap<String, Vec<serde_json::Value>> {
+        HashMap::from([
+            ("changed.py".to_owned(), vec![viol(3, "bad import")]),
+            (
+                "other.py".to_owned(),
+                vec![viol(7, "old issue"), viol(9, "older")],
+            ),
+        ])
+    }
+
+    fn changed(files: &[&str]) -> ChangedFiles {
+        ChangedFiles {
+            files: files.iter().map(|f| (*f).to_owned()).collect(),
+        }
+    }
+
+    fn read_zuul(path: &Path) -> serde_json::Value {
+        let yaml = std::fs::read_to_string(path).unwrap();
+        serde_yaml::from_str::<serde_json::Value>(&yaml).unwrap()["data"]["zuul"].clone()
+    }
+
+    #[test]
+    fn zuul_routes_changed_files_to_comments_and_the_rest_to_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("zuul_return.yaml");
+        emit_zuul_return(&out, &reported(), &changed(&["changed.py"])).unwrap();
+
+        let zuul = read_zuul(&out);
+        let comments = &zuul["file_comments"];
+        assert_eq!(comments.as_object().unwrap().len(), 1);
+        // `help` is folded into the message, Zuul has no such field.
+        assert_eq!(comments["changed.py"][0]["message"], "bad import do better");
+        assert!(comments["changed.py"][0].get("help").is_none());
+        assert_eq!(
+            zuul["warnings"],
+            serde_json::json!(["other.py:7: old issue", "other.py:9: older"])
+        );
+    }
+
+    #[test]
+    fn zuul_without_changed_files_only_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("nested/dir/zuul_return.yaml");
+        emit_zuul_return(&out, &reported(), &changed(&[])).unwrap();
+
+        let zuul = read_zuul(&out);
+        assert!(zuul.get("file_comments").is_none());
+        assert_eq!(zuul["warnings"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn zuul_merges_into_existing_content_and_replaces_its_own_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("zuul_return.yaml");
+        std::fs::write(
+            &out,
+            "data:\n  other: keep\n  zuul:\n    warnings: [stale]\n    extra: keep\n",
+        )
+        .unwrap();
+        emit_zuul_return(&out, &reported(), &changed(&["changed.py"])).unwrap();
+
+        let yaml: serde_json::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(yaml["data"]["other"], "keep");
+        assert_eq!(yaml["data"]["zuul"]["extra"], "keep");
+        assert_eq!(
+            yaml["data"]["zuul"]["warnings"].as_array().unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn zuul_with_no_violations_writes_an_empty_zuul_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("zuul_return.yaml");
+        emit_zuul_return(&out, &HashMap::new(), &changed(&[])).unwrap();
+        assert_eq!(read_zuul(&out), serde_json::json!({}));
+    }
+
+    #[test]
+    fn zuul_rejects_a_non_object_data_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("zuul_return.yaml");
+        std::fs::write(&out, "data: 3\n").unwrap();
+        assert!(emit_zuul_return(&out, &reported(), &changed(&[])).is_err());
+    }
+
+    #[test]
+    fn zuul_rejects_a_non_object_zuul_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("zuul_return.yaml");
+        std::fs::write(&out, "data:\n  zuul: 3\n").unwrap();
+        assert!(emit_zuul_return(&out, &reported(), &changed(&[])).is_err());
+    }
+
+    #[test]
+    fn zuul_or_report_returns_whether_the_report_was_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = dir.path().join("zuul_return.yaml");
+        assert!(emit_zuul_return_or_report(&ok, &reported(), &changed(&[])));
+        // A directory can't be written as a file.
+        assert!(!emit_zuul_return_or_report(
+            dir.path(),
+            &reported(),
+            &changed(&[])
+        ));
+    }
+
+    #[test]
+    fn zuul_format_prints_nothing_and_follows_the_level_for_the_exit_code() {
+        let reported = HashMap::from([(
+            "a.py".to_owned(),
+            vec![
+                serde_json::json!({"line": 1, "message": "m", "rule": "KIS001", "level": "error"}),
+            ],
+        )]);
+        let code = print_violations(
+            &reported,
+            &changed(&[]),
+            Level::Error,
+            Level::Error,
+            OutputFormat::Zuul,
+            &[],
+        );
+        assert_eq!(code, 1);
+        // `--output-file` falls back to JSON for this format.
+        assert!(render_for_file(&reported, OutputFormat::Zuul).contains("\"filename\""));
+    }
 
     // ── rule_category ──────────────────────────────────────────────────────
 

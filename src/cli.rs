@@ -300,7 +300,11 @@ pub struct CheckArgs {
     )]
     pub watch: bool,
 
-    /// Path to write the Zuul CI `zuul_return.yaml` output.
+    /// Path of the Zuul `zuul_return.yaml` written by `--output-format zuul`.
+    ///
+    /// Existing content is preserved; only `data.zuul.file_comments` and
+    /// `data.zuul.warnings` are replaced. Violations in changed files become
+    /// file comments, all others warnings. Ignored for other output formats.
     #[arg(
         long,
         default_value = "tmp/zuul/zuul_return.yaml",

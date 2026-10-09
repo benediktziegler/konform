@@ -1,3 +1,26 @@
+## Unreleased
+
+### Feat
+
+- **rule**: render `rule --explain` as formatted terminal output
+- **rules**: generate the rule docs from structured Rule::docs()
+- **output**: make Zuul a --output-format instead of a default side effect
+- **init**: insert the config after ruff blocks and test the init flows
+- **kis002**: allow multi-module aliases and add alias-template
+
+### Fix
+
+- **cache**: key cache on rule config and pattern files
+- **rule**: list and explain user-defined patterns
+- **kpt**: honor select/ignore per pattern id
+- **noqa**: ignore empty codes and non-comment matches
+
+### Perf
+
+- **rules**: parse each file once
+- **lsp**: build rules once per config load
+- **kpt**: compile patterns once per run
+
 ## v0.4.0 (2026-09-29)
 
 ### Feat

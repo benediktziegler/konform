@@ -29,6 +29,17 @@ repos:
         pass_filenames: false
         files: ^(src/(cli|cli_docs|main)\.rs|src/rules/.*\.rs|docs/(rules|reference)/.*\.md)$
         verbose: false
+      # Keeps the "Unreleased" section of CHANGELOG.md in sync with the commit
+      # history (commitizen `changelog_incremental`). It sees the commits made
+      # so far, so a commit shows up from the next commit on; `cz bump`
+      # regenerates the full release section anyway. Skipped in CI (SKIP).
+      - id: changelog
+        name: Changelog Unreleased section
+        language: system
+        entry: uvx --from commitizen==4.19.2 cz changelog
+        pass_filenames: false
+        always_run: true
+        verbose: false
 
   - repo: https://github.com/commitizen-tools/commitizen
     rev: v4.19.2

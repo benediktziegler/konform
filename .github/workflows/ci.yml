@@ -70,6 +70,10 @@ jobs:
       # including `generate-docs`, so stale generated docs fail the build.
       - name: Run pre-commit hooks
         run: uvx prek run --all-files --show-diff-on-failure
+        env:
+          # The changelog hook lags one commit behind by design; it is a
+          # local convenience, not a CI check.
+          SKIP: changelog
 
   coverage:
     name: Code Coverage

@@ -305,6 +305,42 @@ fn editing_pattern_file_invalidates_cache() {
     assert!(!after.contains("old message"));
 }
 
+/// `docs/rules/` is generated from the rule definitions; regenerate with
+/// `cargo run -- rule --generate-docs docs/rules` when this fails.
+#[test]
+fn generated_rule_docs_are_up_to_date() {
+    let dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("konform")
+        .unwrap()
+        .args(["rule", "--generate-docs"])
+        .arg(dir.path())
+        .assert()
+        .success();
+
+    let committed = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/rules");
+    let names = |p: &std::path::Path| {
+        let mut v: Vec<_> = std::fs::read_dir(p)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        names(dir.path()),
+        names(&committed),
+        "docs/rules file set differs"
+    );
+    for name in names(dir.path()) {
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(&name)).unwrap(),
+            std::fs::read_to_string(committed.join(&name)).unwrap(),
+            "docs/rules/{} is stale",
+            name.to_string_lossy(),
+        );
+    }
+}
+
 fn run_init(dir: &std::path::Path) {
     Command::cargo_bin("konform")
         .unwrap()

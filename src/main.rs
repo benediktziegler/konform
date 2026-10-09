@@ -866,6 +866,16 @@ fn recheck_batch(files: &[PathBuf], ctx: &RecheckContext<'_>, cache: &mut Cache)
 }
 
 fn run_rule(args: RuleArgs, isolated: bool) {
+    if let Some(dir) = &args.generate_docs {
+        // Independent of any project config: only the built-in rules.
+        let all = all_rules(Arc::new(ModuleProbe::default()), None);
+        if let Err(err) = rules::docs::generate(&all, dir) {
+            eprintln!("Failed to write docs to {}: {err}", dir.display());
+            std::process::exit(2);
+        }
+        std::process::exit(0);
+    }
+
     // Same config discovery as `check`, so user-defined rules show up.
     let config = if isolated {
         config::Config::default()

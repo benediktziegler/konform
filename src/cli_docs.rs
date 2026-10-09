@@ -244,7 +244,7 @@ pub fn render_env() -> String {
         for arg in visible_args(cmd) {
             if let Some(env) = arg.get_env() {
                 let name = env.to_string_lossy().into_owned();
-                if rows.iter().all(|(n, _)| *n != name) {
+                if rows.iter().all(|(n, _)| *n != format!("`{name}`")) {
                     let help = arg.get_help().map(ToString::to_string).unwrap_or_default();
                     rows.push((
                         format!("`{name}`"),

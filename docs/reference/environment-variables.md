@@ -5,14 +5,6 @@
 | Variable | Effect |
 | -------- | ------ |
 | `KONFORM_COLOR` | Default for `--color`; the flag takes precedence. Control when coloured output is used |
-| `KONFORM_COLOR` | Default for `--color`; the flag takes precedence. Control when coloured output is used |
-| `KONFORM_COLOR` | Default for `--color`; the flag takes precedence. Control when coloured output is used |
-| `KONFORM_COLOR` | Default for `--color`; the flag takes precedence. Control when coloured output is used |
-| `KONFORM_COLOR` | Default for `--color`; the flag takes precedence. Control when coloured output is used |
-| `KONFORM_COLOR` | Default for `--color`; the flag takes precedence. Control when coloured output is used |
-| `KONFORM_COLOR` | Default for `--color`; the flag takes precedence. Control when coloured output is used |
-| `KONFORM_COLOR` | Default for `--color`; the flag takes precedence. Control when coloured output is used |
-| `KONFORM_COLOR` | Default for `--color`; the flag takes precedence. Control when coloured output is used |
 | `NO_COLOR` | When set, disables colour in `--color auto` mode ([no-color.org](https://no-color.org)). |
 | `TERM` | `TERM=dumb` disables colour in `--color auto` mode. |
 

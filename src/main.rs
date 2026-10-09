@@ -1,5 +1,6 @@
 mod cache;
 mod cli;
+mod cli_docs;
 mod config;
 mod engine;
 mod git;
@@ -14,7 +15,7 @@ mod types;
 
 use cache::Cache;
 use cache::FileCacheKey;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use cli::{CheckArgs, CleanArgs, Cli, Command, InitArgs, RuleArgs};
 use config::{load_config, resolve_python};
 use engine::CheckInput;
@@ -249,10 +250,11 @@ fn inject_default_subcommand(args: &mut Vec<std::ffi::OsString>) {
     }
 
     let first = args[i].to_string_lossy();
-    let is_subcommand = matches!(
-        first.as_ref(),
-        "check" | "server" | "rule" | "version" | "clean" | "init" | "help"
-    );
+    // Subcommand names come from the clap definition so new ones (including
+    // hidden ones) can't be forgotten here and silently treated as paths.
+    let is_subcommand = Cli::command().get_subcommands().any(|sc| {
+        sc.get_name() == first.as_ref() || sc.get_all_aliases().any(|a| a == first.as_ref())
+    }) || first.as_ref() == "help";
     let is_top_level_flag = matches!(first.as_ref(), "--help" | "-h" | "--version" | "-V");
     if !is_subcommand && !is_top_level_flag {
         args.insert(i, "check".into());
@@ -867,16 +869,6 @@ fn recheck_batch(files: &[PathBuf], ctx: &RecheckContext<'_>, cache: &mut Cache)
 }
 
 fn run_rule(args: RuleArgs, isolated: bool) {
-    if let Some(dir) = &args.generate_docs {
-        // Independent of any project config: only the built-in rules.
-        let all = all_rules(Arc::new(ModuleProbe::default()), None);
-        if let Err(err) = rules::docs::generate(&all, dir) {
-            eprintln!("Failed to write docs to {}: {err}", dir.display());
-            std::process::exit(2);
-        }
-        std::process::exit(0);
-    }
-
     // Same config discovery as `check`, so user-defined rules show up.
     let config = if isolated {
         config::Config::default()
@@ -926,6 +918,18 @@ fn run_rule(args: RuleArgs, isolated: bool) {
 
     eprintln!("Use --list to list all rules or --explain <CODE> to explain one.");
     std::process::exit(1);
+}
+
+/// Write the generated reference docs (rules, CLI, environment variables)
+/// into `dir`. Independent of any project config: only the built-in rules.
+fn run_generate_docs(dir: &Path) {
+    let all = all_rules(Arc::new(ModuleProbe::default()), None);
+    let result =
+        rules::docs::generate(&all, &dir.join("rules")).and_then(|()| cli_docs::generate(dir));
+    if let Err(err) = result {
+        eprintln!("Failed to write docs to {}: {err}", dir.display());
+        std::process::exit(2);
+    }
 }
 
 fn run_version() {
@@ -1280,6 +1284,7 @@ fn main() {
         Some(Command::Server) | None => lsp::run(),
         Some(Command::Check(a)) => run_check(*a, isolated),
         Some(Command::Rule(a)) => run_rule(a, isolated),
+        Some(Command::GenerateDocs { dir }) => run_generate_docs(&dir),
         Some(Command::Version) => run_version(),
         Some(Command::Clean(a)) => run_clean(a),
         Some(Command::Init(a)) => run_init(a),

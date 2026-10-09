@@ -305,38 +305,48 @@ fn editing_pattern_file_invalidates_cache() {
     assert!(!after.contains("old message"));
 }
 
-/// `docs/rules/` is generated from the rule definitions; regenerate with
-/// `cargo run -- rule --generate-docs docs/rules` when this fails.
+/// The generated docs (`docs/rules/` and the CLI / environment-variable
+/// reference) come from the rule and clap definitions; regenerate with
+/// `cargo run -- generate-docs docs` when this fails.
 #[test]
-fn generated_rule_docs_are_up_to_date() {
+fn generated_docs_are_up_to_date() {
     let dir = tempfile::tempdir().unwrap();
     Command::cargo_bin("konform")
         .unwrap()
-        .args(["rule", "--generate-docs"])
+        .arg("generate-docs")
         .arg(dir.path())
         .assert()
         .success();
 
-    let committed = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/rules");
-    let names = |p: &std::path::Path| {
-        let mut v: Vec<_> = std::fs::read_dir(p)
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        v.sort();
-        v
-    };
-    assert_eq!(
-        names(dir.path()),
-        names(&committed),
-        "docs/rules file set differs"
-    );
-    for name in names(dir.path()) {
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join(&name)).unwrap(),
-            std::fs::read_to_string(committed.join(&name)).unwrap(),
-            "docs/rules/{} is stale",
-            name.to_string_lossy(),
+    let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+    let mut generated = Vec::new();
+    let mut stack = vec![dir.path().to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                generated.push(path.strip_prefix(dir.path()).unwrap().to_path_buf());
+            }
+        }
+    }
+    assert!(generated.len() >= 6, "{generated:?}");
+    for rel in generated {
+        let fresh = std::fs::read_to_string(dir.path().join(&rel)).unwrap();
+        // Windows checkouts may convert the committed files to CRLF.
+        let committed = std::fs::read_to_string(docs.join(&rel))
+            .unwrap_or_else(|_| panic!("docs/{} is missing", rel.display()))
+            .replace("\r\n", "\n");
+        assert_eq!(fresh, committed, "docs/{} is stale", rel.display());
+    }
+    // No committed page under docs/rules/ without a generated counterpart.
+    for entry in std::fs::read_dir(docs.join("rules")).unwrap() {
+        let name = entry.unwrap().file_name();
+        assert!(
+            dir.path().join("rules").join(&name).exists(),
+            "docs/rules/{} is no longer generated",
+            name.to_string_lossy()
         );
     }
 }

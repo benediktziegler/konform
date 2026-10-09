@@ -20,12 +20,18 @@ $ uv run maturin develop                 # install into the project venv
 
 ## Build the docs
 
-The pages under `docs/rules/` are generated from the rule definitions in `src/rules/`
-(`Rule::docs()`, plus fix safety and config names read from the `Rule` trait). Edit the
-rule, then regenerate; a test fails if the committed pages are stale.
+Three parts of the reference are generated from the code and must not be edited by hand:
+
+- `docs/rules/`: from the rule definitions in `src/rules/` (`Rule::docs()`, plus fix safety
+  and config names read from the `Rule` trait).
+- `docs/reference/cli.md` and `docs/reference/environment-variables.md`: from the clap
+  definitions in `src/cli.rs` (the doc comments on the arguments, their defaults, value
+  names, possible values and `env` bindings).
+
+Change the code, then regenerate; a test fails if the committed pages are stale.
 
 ```console
-$ cargo run -- rule --generate-docs docs/rules
+$ cargo run -- generate-docs docs
 $ uv run --only-group dev --python 3.12 zensical serve
 $ uv run --only-group dev --python 3.12 zensical build --clean --strict
 ```

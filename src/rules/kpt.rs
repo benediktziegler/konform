@@ -1041,6 +1041,30 @@ pattern = 'print\('
     // ── glob file filter ──────────────────────────────────────────────────
 
     #[test]
+    fn glob_matches_strips_the_cwd_prefix_of_absolute_paths() {
+        let gs = GlobSetBuilder::new()
+            .add(Glob::new("src/**/*.py").unwrap())
+            .build()
+            .unwrap();
+        let cwd = Path::new("/work/project");
+        let path = cwd.join("src/pkg/mod.py");
+        // Neither the path itself nor the (different) config dir matches, but
+        // relative to the CWD it does.
+        assert!(glob_matches(
+            &gs,
+            &path,
+            Some(Path::new("/elsewhere")),
+            Some(cwd)
+        ));
+        assert!(!glob_matches(
+            &gs,
+            &path,
+            Some(Path::new("/elsewhere")),
+            None
+        ));
+    }
+
+    #[test]
     fn glob_filter_absolute_path_stripped_by_config_dir() {
         // Simulates a CLI invocation with an absolute path when config_dir
         // equals the project root.  `src/**/*.py` must still match.

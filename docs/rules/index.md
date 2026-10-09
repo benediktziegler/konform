@@ -2,7 +2,7 @@
 
 # Rules
 
-konform supports 3 built-in rules. List them, including your project's own `KPT` patterns, with `konform rule --list`; read one with `konform rule --explain <CODE>`.
+konform supports an increasing list of opinionated rules not supported by Ruff. List them, including your project's own `KPT` patterns, with `konform rule --list`; read one with `konform rule --explain <CODE>`.
 
 ## Legend
 

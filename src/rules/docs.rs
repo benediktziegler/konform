@@ -175,11 +175,11 @@ const LEGEND: &str = "\
 pub fn render_index(rules: &[Box<dyn Rule>]) -> String {
     let mut out = format!(
         "{GENERATED}# Rules\n\n\
-         konform supports {} built-in rules. List them, including your project's own `KPT` \
-         patterns, with `konform rule --list`; read one with `konform rule --explain <CODE>`.\n\n\
+         konform supports an increasing list of opinionated rules not supported by Ruff. \
+         List them, including your project's own `KPT` patterns, with `konform rule --list`; \
+         read one with `konform rule --explain <CODE>`.\n\n\
          {LEGEND}\n\
          | Code | Rule | Linter | Status |\n| ---- | ---- | ------ | ------ |\n",
-        rules.len(),
     );
     for r in sorted(rules) {
         let _ = writeln!(

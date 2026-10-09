@@ -1,8 +1,23 @@
 # Installation
 
-```console
-$ pip install konform
-```
+=== "uv"
+
+    ```console
+    $ uv tool install konform     # isolated, on your PATH
+    $ uvx konform check src/      # or run it without installing
+    ```
+
+=== "pipx"
+
+    ```console
+    $ pipx install konform
+    ```
+
+=== "pip"
+
+    ```console
+    $ pip install konform
+    ```
 
 Wheels ship a pre-compiled Rust binary — no Rust installation is needed at runtime.
 

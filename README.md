@@ -35,6 +35,14 @@ growing.
 ## Installation
 
 ```bash
+# As an isolated tool (recommended)
+uv tool install konform
+pipx install konform
+
+# Run without installing
+uvx konform check src/
+
+# Into the current environment
 pip install konform
 ```
 

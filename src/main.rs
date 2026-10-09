@@ -1067,6 +1067,11 @@ fn run_generate_docs(dir: &Path) {
     }
 }
 
+fn run_completions(args: cli::CompletionsArgs) {
+    let mut cmd = Cli::command();
+    clap_complete::generate(args.shell, &mut cmd, "konform", &mut std::io::stdout());
+}
+
 fn run_version() {
     println!("konform {}", env!("CARGO_PKG_VERSION"));
 }
@@ -1424,6 +1429,7 @@ fn main() {
         Some(Command::Version) => run_version(),
         Some(Command::Clean(a)) => run_clean(a),
         Some(Command::Init(a)) => run_init(a),
+        Some(Command::Completions(a)) => run_completions(a),
     }
 }
 

@@ -121,6 +121,11 @@ pub enum Command {
     /// Initialise konform in the current directory.
     Init(InitArgs),
 
+    /// Print a shell completion script to stdout.
+    ///
+    /// Example: `konform completions zsh > ~/.zfunc/_konform`
+    Completions(CompletionsArgs),
+
     /// Write the generated reference docs (rules, CLI, environment variables)
     /// into DIR. Used to build the docs site.
     #[command(hide = true)]
@@ -350,6 +355,13 @@ pub struct CheckArgs {
 // rule
 // clean
 // ---------------------------------------------------------------------------
+
+/// Arguments for the `completions` subcommand.
+#[derive(Args, Debug)]
+pub struct CompletionsArgs {
+    /// Shell to generate the completion script for.
+    pub shell: clap_complete::Shell,
+}
 
 /// Arguments for the `clean` subcommand.
 #[derive(Args, Debug)]

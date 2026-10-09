@@ -21,6 +21,7 @@
 
 ### Fix
 
+- **docs**: list each environment variable once
 - **rules**: warn on invalid KNQ settings
 - **output**: make the CI writers schema-correct and escape user data
 - **output**: point SARIF URLs at the real repository

@@ -28,7 +28,10 @@ Three parts of the reference are generated from the code and must not be edited 
   definitions in `src/cli.rs` (the doc comments on the arguments, their defaults, value
   names, possible values and `env` bindings).
 
-Change the code, then regenerate; a test fails if the committed pages are stale.
+Change the code, then regenerate with `cargo run -- generate-docs docs`. The
+`generate-docs` pre-commit hook does this on every commit that touches the code or the
+generated pages (the commit stops so you can stage the updated pages), and a test fails if
+the committed pages are stale.
 
 ```console
 $ cargo run -- generate-docs docs

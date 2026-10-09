@@ -20,6 +20,15 @@ repos:
         entry: cargo check
         pass_filenames: false
         verbose: false
+      # Regenerates the rules / CLI / env-var reference. When the output changes
+      # the hook fails, leaving the updated pages to stage and commit.
+      - id: generate-docs
+        name: Generated docs are up to date
+        language: system
+        entry: cargo run --quiet -- generate-docs docs
+        pass_filenames: false
+        files: ^(src/(cli|cli_docs|main)\.rs|src/rules/.*\.rs|docs/(rules|reference)/.*\.md)$
+        verbose: false
 
   - repo: https://github.com/commitizen-tools/commitizen
     rev: v3.29.1

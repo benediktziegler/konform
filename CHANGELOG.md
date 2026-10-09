@@ -2,6 +2,7 @@
 
 ### Feat
 
+- **cli**: add completions subcommand for shell completion scripts
 - **rules**: reject weak KNQ001 reasons
 - **rules**: add placeholder reasons and exempt codes to KNQ001
 - **rules**: add --reason and KNQ002 noqa style rule

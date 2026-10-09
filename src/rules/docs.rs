@@ -239,3 +239,161 @@ pub fn generate(rules: &[Box<dyn Rule>], dir: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module_probe::ModuleProbe;
+    use crate::rules::{all_rules, FileContext};
+    use crate::types::Violation;
+    use std::sync::Arc;
+
+    fn rules() -> Vec<Box<dyn Rule>> {
+        all_rules(Arc::new(ModuleProbe::default()), None)
+    }
+
+    fn page(code: &str) -> String {
+        let all = rules();
+        let rule = all.iter().find(|r| r.code() == code).expect("rule");
+        render_rule_page(&**rule)
+    }
+
+    /// A rule that relies on every default (no docs, no fix, no options).
+    struct Bare;
+
+    impl Rule for Bare {
+        fn code(&self) -> &str {
+            "ZZZ001"
+        }
+        fn category(&self) -> &str {
+            "ZZZ"
+        }
+        fn config_name(&self) -> &str {
+            "bare"
+        }
+        fn name(&self) -> &str {
+            "Bare"
+        }
+        fn description(&self) -> &str {
+            "Does nothing."
+        }
+        fn enabled_by_default(&self) -> bool {
+            false
+        }
+        fn check(&self, _ctx: &FileContext, _cfg: &toml::Value) -> Vec<Violation> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn unsafe_fix_rule_page_has_every_section() {
+        let page = page("KIS002");
+        for needle in [
+            "# import-alias-policy (KIS002)",
+            "Fix is available, but **unsafe**",
+            "This rule is enabled by default.",
+            "## What it does",
+            "## Why is this bad?",
+            "## Example",
+            "Use instead:",
+            "## Fix behavior",
+            "## Options",
+            "Configured in `[tool.konform.lint.import-alias-policy]`.",
+            "| `alias-template` | `str` | unset |",
+            "## Suppression",
+            "x = 1  # noqa: KIS002",
+            "x = 1  # noqa: KIS  (every KIS* rule)",
+        ] {
+            assert!(page.contains(needle), "{needle} missing in:\n{page}");
+        }
+        assert!(page.starts_with(GENERATED));
+    }
+
+    #[test]
+    fn safe_fix_rule_page_mentions_a_plain_fix() {
+        let page = page("KIS001");
+        assert!(page.contains("\nFix is available.\n"), "{page}");
+        assert!(
+            page.contains("`\"warning\" \\| \"error\"`"),
+            "pipes are escaped: {page}"
+        );
+    }
+
+    #[test]
+    fn pattern_rule_is_documented_by_its_prefix() {
+        let all = rules();
+        let kpt = all.iter().find(|r| r.gates_per_violation()).expect("KPT");
+        assert_eq!(display_code(&**kpt), "KPT*");
+        assert_eq!(slug(&**kpt), "kpt");
+        assert!(render_rule_page(&**kpt)
+            .starts_with(&format!("{GENERATED}# user-defined-patterns (KPT*)")));
+    }
+
+    #[test]
+    fn rule_without_docs_gets_minimal_page() {
+        let page = render_rule_page(&Bare);
+        assert!(page.contains("This rule has no options."), "{page}");
+        assert!(
+            !page.contains("Why is this bad?") && !page.contains("## Example"),
+            "{page}"
+        );
+        assert!(
+            !page.contains("enabled by default") && !page.contains("Fix is available"),
+            "{page}"
+        );
+        assert_eq!(Bare.category_title(), "ZZZ");
+        assert!(Bare.explain().contains("# bare (ZZZ001)"));
+    }
+
+    #[test]
+    fn status_combines_default_fix_and_unsafe_markers() {
+        let all = rules();
+        let status_of = |code: &str| status(&**all.iter().find(|r| r.code() == code).unwrap());
+        assert_eq!(status_of("KIS001"), "✅ 🛠️");
+        assert_eq!(status_of("KIS002"), "✅ 🛠️ ⚠️");
+        assert_eq!(status(&Bare), "");
+    }
+
+    #[test]
+    fn index_lists_every_rule_by_prefix_then_code() {
+        let index = render_index(&rules());
+        let pos = |needle: &str| {
+            index
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}:\n{index}"))
+        };
+        assert!(pos("| `KIS001` |") < pos("| `KIS002` |"));
+        assert!(pos("| `KIS002` |") < pos("| `KPT*` |"));
+        assert!(
+            index.contains("## Legend") && index.contains("[`module-only-imports`](kis001.md)")
+        );
+        assert!(index.contains("Import style (KIS)"));
+    }
+
+    #[test]
+    fn default_page_has_one_section_per_prefix_and_skips_disabled_rules() {
+        let mut all = rules();
+        all.push(Box::new(Bare));
+        let page = render_default(&all);
+        assert!(
+            page.contains(
+                "## Import style (KIS)\n\n- [`module-only-imports`](kis001.md) (`KIS001`)"
+            ),
+            "{page}"
+        );
+        assert!(page.contains("## User-defined patterns (KPT)"), "{page}");
+        assert!(
+            !page.contains("ZZZ"),
+            "disabled rules are not listed: {page}"
+        );
+    }
+
+    #[test]
+    fn generate_writes_index_default_and_one_page_per_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        generate(&rules(), &dir.path().join("rules")).unwrap();
+        for file in ["index.md", "default.md", "kis001.md", "kis002.md", "kpt.md"] {
+            assert!(dir.path().join("rules").join(file).is_file(), "{file}");
+        }
+    }
+}

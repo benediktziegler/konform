@@ -896,16 +896,10 @@ fn run_rule(args: RuleArgs, isolated: bool) {
     if let Some(code) = &args.explain {
         match docs.iter().find(|d| d.code == code.as_str()) {
             Some(doc) => {
-                // Rendered Markdown on a colour terminal; the raw Markdown when
-                // piped (or with `--color never`), so it can be saved as-is.
-                if output::stdout_colors_enabled() {
-                    print!(
-                        "{}",
-                        markdown::render(&doc.explain, markdown::terminal_width(), true)
-                    );
-                } else {
-                    println!("{}", doc.explain);
-                }
+                print!(
+                    "{}",
+                    explain_output(&doc.explain, output::stdout_colors_enabled())
+                );
                 std::process::exit(0);
             }
             None => {
@@ -920,13 +914,27 @@ fn run_rule(args: RuleArgs, isolated: bool) {
     std::process::exit(1);
 }
 
+/// What `rule --explain` prints: the Markdown rendered for a colour terminal,
+/// or the raw Markdown otherwise (piped, `--color never`) so it can be saved
+/// as-is.
+fn explain_output(explain: &str, color: bool) -> String {
+    if color {
+        markdown::render(explain, markdown::terminal_width(), true)
+    } else {
+        format!("{explain}\n")
+    }
+}
+
 /// Write the generated reference docs (rules, CLI, environment variables)
 /// into `dir`. Independent of any project config: only the built-in rules.
-fn run_generate_docs(dir: &Path) {
+fn generate_docs(dir: &Path) -> std::io::Result<()> {
     let all = all_rules(Arc::new(ModuleProbe::default()), None);
-    let result =
-        rules::docs::generate(&all, &dir.join("rules")).and_then(|()| cli_docs::generate(dir));
-    if let Err(err) = result {
+    rules::docs::generate(&all, &dir.join("rules"))?;
+    cli_docs::generate(dir)
+}
+
+fn run_generate_docs(dir: &Path) {
+    if let Err(err) = generate_docs(dir) {
         eprintln!("Failed to write docs to {}: {err}", dir.display());
         std::process::exit(2);
     }
@@ -1355,6 +1363,38 @@ mod noqa_tests {
         let src = "[tool.ruff]\nx = [\n  [\"a\", \"b\"],\n]\n[tool.other]\ny = 1\n";
         let out = insert_section(src, "[tool.konform]");
         assert!(out.contains("]\n\n[tool.konform]\n\n[tool.other]"), "{out}");
+    }
+
+    #[test]
+    fn explain_output_renders_only_with_colour() {
+        let md = "# Title\n\n`code`\n";
+        assert_eq!(explain_output(md, false), format!("{md}\n"));
+        let rendered = explain_output(md, true);
+        assert!(
+            rendered.contains('\u{1b}') && !rendered.contains("# "),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn generate_docs_writes_rules_and_reference_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_docs(dir.path()).unwrap();
+        for page in [
+            "rules/index.md",
+            "rules/default.md",
+            "rules/kis001.md",
+            "reference/cli.md",
+            "reference/environment-variables.md",
+        ] {
+            assert!(dir.path().join(page).is_file(), "{page} missing");
+        }
+    }
+
+    #[test]
+    fn generate_docs_fails_when_the_target_is_not_a_directory() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(generate_docs(file.path()).is_err());
     }
 
     #[test]

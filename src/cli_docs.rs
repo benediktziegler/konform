@@ -318,4 +318,62 @@ mod tests {
             "{page}"
         );
     }
+
+    #[test]
+    fn generate_writes_both_reference_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        generate(dir.path()).unwrap();
+        for page in ["reference/cli.md", "reference/environment-variables.md"] {
+            let text = std::fs::read_to_string(dir.path().join(page)).unwrap();
+            assert!(text.starts_with(GENERATED), "{page}");
+        }
+    }
+
+    #[test]
+    fn arguments_without_docs_fall_back_gracefully() {
+        // Possible values without their own help are listed inline.
+        let arg = Arg::new("mode")
+            .long("mode")
+            .value_parser(["fast", "slow"])
+            .default_value("fast")
+            .env("KONFORM_TEST_MODE");
+        let cmd = Command::new("t").arg(arg.clone());
+        let mut cmd = cmd;
+        cmd.build();
+        let built = cmd.get_arguments().find(|a| a.get_id() == "mode").unwrap();
+        let text = description(built);
+        assert!(text.contains("Possible values: `fast`, `slow`"), "{text}");
+        assert!(text.contains("Default: `fast`"), "{text}");
+        assert!(
+            text.contains("Environment variable: `KONFORM_TEST_MODE`"),
+            "{text}"
+        );
+        assert_eq!(label(built), "`--mode <MODE>`");
+    }
+
+    #[test]
+    fn positional_and_flag_labels() {
+        let mut cmd = Command::new("t")
+            .arg(Arg::new("paths").num_args(1..).required(true))
+            .arg(
+                Arg::new("verbose")
+                    .short('v')
+                    .long("verbose")
+                    .action(clap::ArgAction::SetTrue),
+            );
+        cmd.build();
+        let paths = cmd.get_arguments().find(|a| a.get_id() == "paths").unwrap();
+        let verbose = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "verbose")
+            .unwrap();
+        assert_eq!(label(paths), "`<PATHS>...`");
+        assert_eq!(label(verbose), "`-v, --verbose`");
+        assert_eq!(description(verbose), "");
+    }
+
+    #[test]
+    fn table_cells_escape_pipes_and_join_paragraphs() {
+        assert_eq!(cell("a | b\nc\n\nd"), "a \\| b c<br><br>d");
+    }
 }

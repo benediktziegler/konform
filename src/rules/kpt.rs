@@ -931,6 +931,30 @@ help    = "Rename it."
     }
 
     #[test]
+    fn catalog_explains_multiline_and_replacement_patterns() {
+        let cfg = cfg_with_rules(
+            r#"
+[[rules]]
+id          = "KPT031"
+message     = "Join it."
+pattern     = 'a\nb'
+multiline   = true
+replacement = "ab"
+"#,
+        );
+        let explain = rule().catalog(&cfg).remove(0).explain;
+        assert!(explain.contains("- **Files:** all files"), "{explain}");
+        assert!(
+            explain.contains("- **Match:** whole file (multiline)"),
+            "{explain}"
+        );
+        assert!(
+            explain.contains("- **Fix:** replace with `ab`"),
+            "{explain}"
+        );
+    }
+
+    #[test]
     fn catalog_reports_pattern_file_as_source() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(

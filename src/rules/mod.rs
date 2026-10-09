@@ -401,6 +401,11 @@ mod docs_tests {
                 "{} documents no options",
                 rule.code()
             );
+            assert!(
+                !rule.category_title().is_empty(),
+                "{} has no category title",
+                rule.code()
+            );
         }
     }
 }

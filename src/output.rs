@@ -1051,6 +1051,14 @@ mod tests {
         assert!(render_for_file(&reported, OutputFormat::Zuul).contains("\"filename\""));
     }
 
+    #[test]
+    fn colours_are_off_without_a_terminal() {
+        // Not a TTY: never coloured under the default (auto) preference.
+        assert!(!colors_enabled_for(false));
+        // Depends on how the tests are run (captured vs. a terminal).
+        let _ = stdout_colors_enabled();
+    }
+
     // ── rule_category ──────────────────────────────────────────────────────
 
     #[test]

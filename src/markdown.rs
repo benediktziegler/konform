@@ -677,4 +677,70 @@ mod tests {
             vec!["`\"a\" | \"b\"`".to_owned(), "x".to_owned()]
         );
     }
+
+    #[test]
+    fn unmatched_markup_is_kept_literally() {
+        assert_eq!(
+            plain("a `b and **c and [d](e and [f\n"),
+            "a `b and **c and [d](e and [f\n"
+        );
+    }
+
+    #[test]
+    fn br_becomes_a_space_and_inline_links_are_styled() {
+        assert_eq!(plain("one<br>two\n"), "one two\n");
+        let styled = render("[docs](x.md) and [web](https://e.com)\n", 80, true);
+        assert!(styled.contains('\u{1b}'), "{styled:?}");
+    }
+
+    #[test]
+    fn star_bullets_and_continuation_lines_join_the_item() {
+        let out = plain("* first item\n  continues here\n* second\n");
+        assert_eq!(out, "  • first item continues here\n  • second\n");
+    }
+
+    #[test]
+    fn unterminated_code_fence_runs_to_the_end() {
+        assert_eq!(plain("```\nx = 1\n"), "  │ x = 1\n");
+    }
+
+    #[test]
+    fn coloured_table_bolds_the_header_and_wraps_long_cells() {
+        let out = render(WIDE, 90, true);
+        assert!(out.contains('\u{1b}'), "{out:?}");
+        let plain_out = render(WIDE, 90, false);
+        assert!(plain_out.contains('│'), "{plain_out}");
+    }
+
+    #[test]
+    fn coloured_list_fallback_styles_values() {
+        let out = render(WIDE, 40, true);
+        assert!(
+            out.contains("exceptions") && out.contains('\u{1b}'),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn words_longer_than_a_line_are_split() {
+        let word = "x".repeat(100);
+        let out = render(&word, 40, false);
+        assert!(out.lines().count() >= 3, "{out}");
+        assert!(out.lines().all(|l| l.chars().count() <= 40), "{out}");
+    }
+
+    #[test]
+    fn empty_input_and_empty_tables_render_to_a_newline() {
+        assert_eq!(plain(""), "\n");
+        let mut out = Vec::new();
+        render_table(&[], 80, false, &mut out);
+        render_table_as_list(&[], 80, false, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn terminal_width_is_a_sane_default() {
+        // `COLUMNS` / the real terminal decide; either way it is positive.
+        assert!(terminal_width() > 0);
+    }
 }

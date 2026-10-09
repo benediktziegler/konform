@@ -206,7 +206,7 @@ impl Rule for Knq001Rule {
                     `--ignore-noqa` does not affect it. Turn it off with `ignore` or \
                     `per-file-ignores` instead. It is not fixable. `konform check --add-noqa --noqa-reason \"...\"` fills in a \
                     missing reason on the comments it flags (see \
-                    [Baselining](../suppression.md#baselining-with---add-noqa)).",
+                    [Baselining](../suppression.md#baselining-with-add-noqa)).",
                 },
             ],
             options: vec![

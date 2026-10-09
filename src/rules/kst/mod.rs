@@ -1088,6 +1088,14 @@ match = { all = [{ kind = "function" }, { name = "^_" }] }
     }
 
     #[test]
+    fn name_of_an_attribute_or_method_call_is_the_attribute() {
+        let attr = "[[rules]]\nid = \"KST908\"\nmessage = \"m\"\nmatch = { kind = \"attribute\", name = \"^path$\" }\n";
+        assert_eq!(ids(attr, "import os\nos.path\nos.sep\n").len(), 1);
+        let call = "[[rules]]\nid = \"KST909\"\nmessage = \"m\"\nmatch = { kind = \"call\", name = \"^getcwd$\" }\n";
+        assert_eq!(ids(call, "import os\nos.getcwd()\nos.listdir()\n").len(), 1);
+    }
+
+    #[test]
     fn resolved_names_only_apply_to_the_nodes_they_describe() {
         // `callee` needs a call, `qualname` a name/attribute,
         // `decorated_with` a function or class.

@@ -469,19 +469,17 @@ impl Default for ModuleProbe {
     }
 }
 
-// SAFETY: DashMap<K,V> is Send + Sync when K and V are Send + Sync.
-// (String, String) and bool are both Send + Sync.
-// Vec<PathBuf> is Send + Sync.
-// The unsafe impls are needed because the compiler cannot see through the
-// DashMap newtype when inferring auto-traits for the struct.
-unsafe impl Send for ModuleProbe {}
-unsafe impl Sync for ModuleProbe {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn module_probe_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ModuleProbe>();
+    }
 
     /// Build a `ModuleProbe` whose `sys_path` is exactly one directory.
     fn probe_for(root: &std::path::Path) -> ModuleProbe {

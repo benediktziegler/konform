@@ -37,14 +37,12 @@ ignore = "0.4"
 
 # SHA-256 for the file-level cache
 sha2 = "0.11"
-hex  = "0.4"
 
 # Terminal colours — TTY detection, NO_COLOR, TERM=dumb handled in output.rs
 owo-colors = "4"
 
 # Error handling
 anyhow    = "1"
-thiserror = "2"
 
 # Python AST parsing — ruff's own parser, published on crates.io.
 # ruff_text_size provides TextRange / TextSize for source locations.
@@ -86,8 +84,6 @@ filetime = "0.2"
 lsp-server  = "0.10"
 # LSP protocol types (Diagnostic, Position, …)
 lsp-types   = "0.97"
-# Actor-model messaging between the main-loop and worker threads.
-crossbeam-channel = "0.5"
 
 # ---------------------------------------------------------------------------
 # Watch mode (step 26)

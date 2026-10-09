@@ -4,14 +4,13 @@
 //! [`Rule::check`] to find violations and [`Rule::fix`] to rewrite source
 //! in-place.  Both the CLI and the LSP build a [`FileContext`] and pass it
 //! to the same rule implementations — no duplication of logic.
-#![allow(dead_code)]
 
 use crate::config::RuleSelection;
 use crate::module_probe::ModuleProbe;
 use crate::types::Violation;
 use anyhow::Result;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use ruff_python_ast::token::{TokenKind, Tokens};
@@ -72,12 +71,6 @@ pub struct FixTarget {
 }
 
 impl FileContext {
-    /// Build a `FileContext` by reading `path` from disk.
-    pub fn from_path(path: &Path) -> Result<Self> {
-        let source = std::fs::read_to_string(path)?;
-        Ok(Self::from_source(path.to_path_buf(), source))
-    }
-
     /// Build a `FileContext` from an already-loaded source string.
     ///
     /// Used by the LSP, which keeps documents in memory rather than
@@ -232,6 +225,8 @@ pub trait Rule: Send + Sync {
     }
 
     /// Whether this rule can automatically rewrite violations in-place.
+    ///
+    /// Used by the generated rule docs (fix availability).
     fn fixable(&self) -> bool {
         false
     }

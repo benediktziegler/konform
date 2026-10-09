@@ -1138,3 +1138,19 @@ fn malformed_params_do_not_crash_the_server() {
 
     server.shutdown();
 }
+
+#[test]
+fn editor_settings_can_extend_the_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::new(
+        Config::default(),
+        Arc::new(ModuleProbe::default()),
+        dir.path().to_path_buf(),
+    );
+    session.apply_editor_settings(&serde_json::json!({
+        "extend-select": ["KNQ001", 7, "KNQ002"],
+        "select": ["KIS"],
+    }));
+    assert_eq!(session.config.lint.extend_select, ["KNQ001", "KNQ002"]);
+    assert_eq!(session.config.lint.select, ["KIS"]);
+}

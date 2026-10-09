@@ -1587,6 +1587,16 @@ mod noqa_tests {
     // add_noqa_to_source -------------------------------------------------------
 
     #[test]
+    fn add_noqa_source_ignores_violations_without_a_line_or_rule() {
+        let viols = vec![
+            serde_json::json!({"rule": "", "line": 1}),
+            serde_json::json!({"rule": "KIS001", "line": 0}),
+            serde_json::json!({"line": 1}),
+        ];
+        assert!(add_noqa_to_source("import os\n", &viols, None).is_none());
+    }
+
+    #[test]
     fn add_noqa_source_no_violations_returns_none() {
         assert!(add_noqa_to_source("import os\n", &[], None).is_none());
     }

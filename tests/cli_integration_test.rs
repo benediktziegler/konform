@@ -1319,3 +1319,29 @@ fn knq001_minimum_letters_and_repeated_characters_are_configurable() {
     )
     .success();
 }
+
+/// `rule --test` without any user-defined rule says so and succeeds.
+#[test]
+fn rule_test_without_rules_reports_none_found() {
+    let dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["rule", "--test", "--isolated"])
+        .assert()
+        .success()
+        .stdout(contains("No user-defined rules found."));
+}
+
+/// `rule` with no action prints the usage hint and fails.
+#[test]
+fn rule_without_an_action_prints_usage() {
+    Command::cargo_bin("konform")
+        .unwrap()
+        .arg("rule")
+        .assert()
+        .code(1)
+        .stderr(contains(
+            "Use --list, --explain <CODE>, --test or --schema.",
+        ));
+}

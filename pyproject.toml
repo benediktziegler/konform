@@ -44,6 +44,9 @@ version_scheme           = "semver"
 version_provider         = "pep621"
 update_changelog_on_bump = true
 changelog_file           = "CHANGELOG.md"
+# `cz changelog` only (re)writes the "Unreleased" section on top; `cz bump`
+# turns it into the new version's section.
+changelog_incremental    = true
 allowed_prefixes         = ["Merge", "Revert", "fixup!", "squash!"]
 version_files = [
     "Cargo.toml:^version",

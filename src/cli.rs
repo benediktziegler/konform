@@ -104,6 +104,14 @@ pub enum Command {
 
     /// Initialise konform in the current directory.
     Init(InitArgs),
+
+    /// Write the generated reference docs (rules, CLI, environment variables)
+    /// into DIR. Used to build the docs site.
+    #[command(hide = true)]
+    GenerateDocs {
+        /// The docs directory, e.g. `docs`.
+        dir: PathBuf,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -366,9 +374,4 @@ pub struct RuleArgs {
     /// Example: `konform rule --explain KIS001`
     #[arg(long)]
     pub explain: Option<String>,
-
-    /// Write the generated rules documentation (index, default rules and one
-    /// page per rule) into DIR and exit. Used to build the docs site.
-    #[arg(long, value_name = "DIR", hide = true)]
-    pub generate_docs: Option<std::path::PathBuf>,
 }

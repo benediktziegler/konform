@@ -104,8 +104,9 @@ cargo run -- check path/to/file.py
 uv run maturin build --release        # wheels land in target/wheels/
 uv run maturin develop                # or install into the project venv
 
-# Regenerate the rules docs from the rule definitions (docs/rules/, checked by a test)
-cargo run -- rule --generate-docs docs/rules
+# Regenerate the rules, CLI and env-var reference pages from the code
+# (docs/rules/ and docs/reference/{cli,environment-variables}.md, checked by a test)
+cargo run -- generate-docs docs
 
 # Build and preview the documentation
 uv run --only-group dev --python 3.12 zensical serve

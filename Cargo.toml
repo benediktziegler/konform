@@ -94,6 +94,7 @@ crossbeam-channel = "0.5"
 # ---------------------------------------------------------------------------
 # Cross-platform filesystem event notifications.
 notify = "8"
+terminal_size = "0.4.4"
 
 [profile.release]
 lto           = "thin"  # fat (lto=true) saves ~1-2 % binary size but costs 3-5 min; thin gives 90 % of the gain

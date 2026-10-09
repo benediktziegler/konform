@@ -4,6 +4,7 @@ mod config;
 mod engine;
 mod git;
 mod lsp;
+mod markdown;
 mod migrations;
 mod module_probe;
 mod output;
@@ -903,7 +904,16 @@ fn run_rule(args: RuleArgs, isolated: bool) {
     if let Some(code) = &args.explain {
         match docs.iter().find(|d| d.code == code.as_str()) {
             Some(doc) => {
-                println!("{}", doc.explain);
+                // Rendered Markdown on a colour terminal; the raw Markdown when
+                // piped (or with `--color never`), so it can be saved as-is.
+                if output::stdout_colors_enabled() {
+                    print!(
+                        "{}",
+                        markdown::render(&doc.explain, markdown::terminal_width(), true)
+                    );
+                } else {
+                    println!("{}", doc.explain);
+                }
                 std::process::exit(0);
             }
             None => {

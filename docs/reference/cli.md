@@ -91,6 +91,9 @@ konform check [OPTIONS] <FILE_PATHS>...
 | `--list`           | List all rules, including project KPT patterns |
 | `--explain <CODE>` | Print full documentation for a rule  |
 
+`--explain` renders the rule's Markdown page (headings, code blocks, tables) when stdout is a
+colour terminal. Piped, or with `--color never`, it prints the raw Markdown.
+
 ## `init`
 
 ```text

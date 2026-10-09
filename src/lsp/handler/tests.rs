@@ -1026,6 +1026,19 @@ fn watch_globs_cover_config_pattern_and_rules_files() {
         globs.iter().any(|g| g == "**/rules/structural.toml"),
         "missing structural rules_file glob: {globs:?}"
     );
+
+    // An absolute rules_file is watched as is, not under `**/`.
+    let mut config = Config::default();
+    let absolute = std::env::temp_dir().join("rules.toml");
+    config.lint.rules.insert(
+        "structural-rules".into(),
+        toml::from_str(&format!("rules_file = {:?}", absolute.to_str().unwrap())).unwrap(),
+    );
+    let globs = watch_globs(&config);
+    assert!(
+        globs.iter().any(|g| g == absolute.to_str().unwrap()),
+        "absolute rules_file glob missing: {globs:?}"
+    );
 }
 
 #[test]

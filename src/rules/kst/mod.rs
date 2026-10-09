@@ -1048,4 +1048,86 @@ match = { all = [{ kind = "function" }, { name = "^_" }] }
         assert!(!rule().fixable());
         assert!(rule().gates_per_violation());
     }
+
+    // ── coverage of the node vocabulary ───────────────────────────────────
+
+    fn kind_rule(kind: &str) -> String {
+        format!("[[rules]]\nid = \"KST900\"\nmessage = \"m\"\nmatch = {{ kind = \"{kind}\" }}\n")
+    }
+
+    #[test]
+    fn every_node_kind_can_be_matched() {
+        for (kind, src) in [
+            ("lambda", "f = lambda x: x\n"),
+            ("with", "with a as b:\n    pass\n"),
+            ("for", "for i in x:\n    pass\n"),
+            ("while", "while x:\n    pass\n"),
+            ("await", "async def f():\n    await g()\n"),
+            ("class", "class C:\n    pass\n"),
+            ("try", "try:\n    pass\nexcept E:\n    pass\n"),
+            ("if", "if x:\n    pass\n"),
+        ] {
+            assert_eq!(
+                ids(&kind_rule(kind), src),
+                vec!["KST900".to_owned()],
+                "kind {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn name_matches_classes_and_names_but_not_unnamed_nodes() {
+        let rules = "[[rules]]\nid = \"KST901\"\nmessage = \"m\"\nmatch = { kind = \"class\", name = \"^Foo$\" }\n";
+        assert_eq!(
+            ids(rules, "class Foo:\n    pass\nclass Bar:\n    pass\n").len(),
+            1
+        );
+        // A lambda has no identifier, so a `name` condition never matches it.
+        let rules = "[[rules]]\nid = \"KST902\"\nmessage = \"m\"\nmatch = { kind = \"lambda\", name = \".\" }\n";
+        assert!(ids(rules, "f = lambda x: x\n").is_empty());
+    }
+
+    #[test]
+    fn resolved_names_only_apply_to_the_nodes_they_describe() {
+        // `callee` needs a call, `qualname` a name/attribute,
+        // `decorated_with` a function or class.
+        for cond in [
+            "callee = \"os.getcwd\"",
+            "qualname = \"os\"",
+            "decorated_with = \"x\"",
+        ] {
+            let rules = format!(
+                "[[rules]]\nid = \"KST903\"\nmessage = \"m\"\nmatch = {{ kind = \"assert\", {cond} }}\n"
+            );
+            assert!(ids(&rules, "assert 1\n").is_empty(), "{cond}");
+        }
+        let rules = "[[rules]]\nid = \"KST904\"\nmessage = \"m\"\nmatch = { kind = \"class\", decorated_with = \"dataclasses.dataclass\" }\n";
+        let src = "import dataclasses\n\n@dataclasses.dataclass\nclass C:\n    pass\n\nclass D:\n    pass\n";
+        assert_eq!(hits(rules, src), vec![("KST904".to_owned(), 4)]);
+    }
+
+    #[test]
+    fn name_of_a_call_is_its_callee_name_when_there_is_one() {
+        let rules = "[[rules]]\nid = \"KST907\"\nmessage = \"m\"\nmatch = { kind = \"call\", name = \"^print$\" }\n";
+        assert_eq!(ids(rules, "print(1)\nlen(2)\n").len(), 1);
+        // The callee of `(lambda: 1)()` or `f()()` has no simple name.
+        assert!(ids(rules, "(lambda: 1)()\nf()()\n").is_empty());
+    }
+
+    #[test]
+    fn has_stops_at_the_first_descendant_that_matches() {
+        let rules = "[[rules]]\nid = \"KST905\"\nmessage = \"m\"\nmatch = { kind = \"function\", has = { kind = \"assert\" } }\n";
+        let src = "def f():\n    assert 1\n    assert 2\n    assert 3\n";
+        assert_eq!(ids(rules, src).len(), 1);
+    }
+
+    #[test]
+    fn explain_lists_files_and_help_of_a_rule() {
+        let cfg = cfg(
+            "[[rules]]\nid = \"KST906\"\nmessage = \"m\"\nhelp = \"do better\"\nfiles = [\"src/**\"]\nmatch = { kind = \"assert\" }\n",
+        );
+        let explain = rule().catalog(&cfg).remove(0).explain;
+        assert!(explain.contains("- **Files:** `src/**`"), "{explain}");
+        assert!(explain.contains("- **Help:** do better"), "{explain}");
+    }
 }

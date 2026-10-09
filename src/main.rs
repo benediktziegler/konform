@@ -1026,13 +1026,13 @@ fn init_config(dir: &std::path::Path, force: bool, dry_run: bool) {
 
     if pyproject.is_file() && !force {
         let content = std::fs::read_to_string(&pyproject).unwrap_or_default();
-        if content.contains("[tool.konform]") {
+        if has_konform_table(&content) {
             eprintln!(
                 "note: [tool.konform] already in pyproject.toml. Run with --force to create konform.toml."
             );
             return;
         }
-        let updated = format!("{}{PYPROJECT_APPEND}", content.trim_end());
+        let updated = insert_section(&content, PYPROJECT_APPEND);
         if dry_run {
             print_file_diff(&pyproject, &content, &updated);
         } else {
@@ -1055,6 +1055,66 @@ fn init_config(dir: &std::path::Path, force: bool, dry_run: bool) {
         }
         eprintln!("Created konform.toml");
     }
+}
+
+/// Whether `content` already has a `[tool.konform]` table or sub-table.
+fn has_konform_table(content: &str) -> bool {
+    content.lines().any(|line| {
+        line.trim()
+            .strip_prefix("[tool.konform")
+            .is_some_and(|rest| rest.starts_with(']') || rest.starts_with('.'))
+    })
+}
+
+/// The table name of a TOML header line (`[a.b]` / `[[a.b]]`), if `line` is one.
+fn toml_header(line: &str) -> Option<&str> {
+    let line = line.trim();
+    let inner = line.strip_prefix('[')?;
+    let inner = inner.strip_prefix('[').unwrap_or(inner);
+    let end = inner.find(']')?;
+    let (name, rest) = inner.split_at(end);
+    let rest = rest.trim_start_matches(']').trim();
+    let plain = name
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '"' | '\'' | ' '));
+    (plain && (rest.is_empty() || rest.starts_with('#'))).then(|| name.trim())
+}
+
+fn is_ruff_table(name: &str) -> bool {
+    name == "tool.ruff" || name.starts_with("tool.ruff.")
+}
+
+/// Add `section` to the TOML `content`.
+///
+/// When `content` has `[tool.ruff…]` tables, the section goes right after the
+/// last of them (before whatever follows); otherwise it is appended. Either
+/// way it is separated from its neighbours by exactly one blank line, and the
+/// result ends in a single newline.
+fn insert_section(content: &str, section: &str) -> String {
+    let section = section.trim_matches('\n');
+    let lines: Vec<&str> = content.lines().collect();
+    let headers: Vec<(usize, &str)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| toml_header(l).map(|name| (i, name)))
+        .collect();
+    let Some(last_ruff) = headers.iter().rposition(|(_, n)| is_ruff_table(n)) else {
+        return match content.trim_end() {
+            "" => format!("{section}\n"),
+            existing => format!("{existing}\n\n{section}\n"),
+        };
+    };
+    // The last ruff block runs until the next header (or the end of the file).
+    let end = headers.get(last_ruff + 1).map_or(lines.len(), |(i, _)| *i);
+    let before = lines[..end].join("\n");
+    let after = lines[end..].join("\n");
+    let mut out = format!("{}\n\n{section}\n", before.trim_end());
+    if !after.trim().is_empty() {
+        out.push('\n');
+        out.push_str(after.trim_end());
+        out.push('\n');
+    }
+    out
 }
 
 /// Create `konform_patterns.toml` in `dir` (or show a diff when `dry_run`).
@@ -1152,8 +1212,7 @@ fn patch_ruff_config(
     }
 
     // Safe to append a new section.
-    let append = format!("\n{lint_section}\n{ext_line}\n");
-    let updated = format!("{}{append}", content.trim_end());
+    let updated = insert_section(content, &format!("{lint_section}\n{ext_line}\n"));
     if dry_run {
         print_file_diff(path, content, &updated);
     } else {
@@ -1241,6 +1300,49 @@ mod noqa_tests {
         let result = merge_noqa("from os.path import join", &codes, &mut changed);
         assert_eq!(result, "from os.path import join  # noqa: KIS001");
         assert!(changed);
+    }
+
+    #[test]
+    fn insert_section_appends_with_one_blank_line() {
+        for existing in [
+            "[project]\nx = 1\n",
+            "[project]\nx = 1",
+            "[project]\nx = 1\n\n\n",
+        ] {
+            assert_eq!(
+                insert_section(existing, "\n[tool.konform]\n"),
+                "[project]\nx = 1\n\n[tool.konform]\n"
+            );
+        }
+        assert_eq!(insert_section("", "[tool.konform]\n"), "[tool.konform]\n");
+    }
+
+    #[test]
+    fn insert_section_goes_after_the_last_ruff_block() {
+        let src = "[project]\nx = 1\n\n[tool.ruff]\nline-length = 100\n\n\
+                   [tool.ruff.lint]\nselect = [\"E\"]\n\n[tool.pytest]\nq = 1\n";
+        assert_eq!(
+            insert_section(src, "[tool.konform]\n"),
+            "[project]\nx = 1\n\n[tool.ruff]\nline-length = 100\n\n\
+             [tool.ruff.lint]\nselect = [\"E\"]\n\n[tool.konform]\n\n[tool.pytest]\nq = 1\n"
+        );
+    }
+
+    #[test]
+    fn insert_section_after_non_contiguous_ruff_blocks() {
+        let src = "[tool.ruff]\na = 1\n[tool.black]\nb = 2\n[tool.ruff.format]\nc = 3\n[tool.mypy]\nd = 4\n";
+        let out = insert_section(src, "[tool.konform]");
+        assert!(
+            out.contains("c = 3\n\n[tool.konform]\n\n[tool.mypy]"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn insert_section_ignores_array_values_that_look_like_headers() {
+        let src = "[tool.ruff]\nx = [\n  [\"a\", \"b\"],\n]\n[tool.other]\ny = 1\n";
+        let out = insert_section(src, "[tool.konform]");
+        assert!(out.contains("]\n\n[tool.konform]\n\n[tool.other]"), "{out}");
     }
 
     #[test]

@@ -31,7 +31,7 @@ repos:
         verbose: false
 
   - repo: https://github.com/commitizen-tools/commitizen
-    rev: v3.29.1
+    rev: v4.19.2
     hooks:
       - id: commitizen
         stages: [commit-msg]

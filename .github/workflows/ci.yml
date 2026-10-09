@@ -47,6 +47,30 @@ jobs:
       - name: Run Rust tests
         run: cargo test --verbose
 
+  pre-commit:
+    name: Pre-commit hooks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.rust_version }}
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-pre-commit"
+
+      - uses: astral-sh/setup-uv@v6
+
+      # Runs every hook from .pre-commit-config.yaml on the whole repository,
+      # including `generate-docs`, so stale generated docs fail the build.
+      - name: Run pre-commit hooks
+        run: uvx prek run --all-files --show-diff-on-failure
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest

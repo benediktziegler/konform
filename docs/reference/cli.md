@@ -17,6 +17,7 @@ konform [OPTIONS] [COMMAND]
 | [`version`](#version) | Print konform's version |
 | [`clean`](#clean) | Clear any caches in the current directory or directories |
 | [`init`](#init) | Initialise konform in the current directory |
+| [`completions`](#completions) | Print a shell completion script to stdout.<br><br>Example: `konform completions zsh > ~/.zfunc/_konform` |
 
 ## Global options
 
@@ -182,3 +183,19 @@ konform init [OPTIONS] [PATH]
 | `--force` | Overwrite an existing configuration (creates `konform.toml` even when `pyproject.toml` or `konform.toml` already exists) |
 | `--no-patterns` | Skip creating `konform_patterns.toml` |
 | `--diff` | Show what would be created or changed without writing any files |
+
+## completions
+
+Print a shell completion script to stdout.
+
+Example: `konform completions zsh > ~/.zfunc/_konform`
+
+```text
+konform completions [OPTIONS] <SHELL>
+```
+
+### Arguments
+
+| Argument | Description |
+| -------- | ----------- |
+| `<SHELL>` | Shell to generate the completion script for<br><br>Possible values: `bash`, `elvish`, `fish`, `powershell`, `zsh` |

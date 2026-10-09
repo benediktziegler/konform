@@ -501,3 +501,26 @@ fn stdin_reports_violations_under_stdin_filename() {
         .assert()
         .success();
 }
+
+#[test]
+fn completions_prints_a_script_per_shell() {
+    let dir = tempfile::tempdir().unwrap();
+
+    konform(dir.path())
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(contains("_konform"))
+        .stdout(contains("--add-noqa"));
+
+    konform(dir.path())
+        .args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(contains("#compdef konform"));
+
+    konform(dir.path())
+        .args(["completions", "nushell"])
+        .assert()
+        .failure();
+}

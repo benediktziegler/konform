@@ -1,6 +1,7 @@
 default_install_hook_types:
   - pre-commit
   - commit-msg
+  - pre-push
 
 default_stages:
   - pre-commit
@@ -35,8 +36,9 @@ repos:
       # regenerates the full release section anyway. Skipped in CI (SKIP).
       - id: changelog
         name: Changelog Unreleased section
-        language: system
-        entry: uvx --from commitizen==4.19.2 cz changelog
+        language: python
+        additional_dependencies: ["commitizen==4.19.2"]
+        entry: cz changelog
         pass_filenames: false
         always_run: true
         verbose: false
@@ -46,6 +48,9 @@ repos:
     hooks:
       - id: commitizen
         stages: [commit-msg]
+      # Validates all commit messages of the branch before pushing.
+      - id: commitizen-branch
+        stages: [pre-push]
 
   - repo: meta
     hooks:

@@ -163,28 +163,28 @@ struct CompiledPattern {
 }
 
 impl CompiledPattern {
-    /// Human-readable summary printed by `konform rule --explain <ID>`.
+    /// Markdown summary printed by `konform rule --explain <ID>`.
     fn explain(&self) -> String {
-        let mut out = format!("{} — {}\n\n", self.id, self.message);
-        out.push_str(&format!("  Level:   {}\n", self.level));
-        out.push_str(&format!("  Source:  {}\n", self.source));
+        let mut out = format!("# {} — {}\n\n", self.id, self.message);
+        out.push_str(&format!("- **Level:** {}\n", self.level));
+        out.push_str(&format!("- **Source:** `{}`\n", self.source));
         let files = if self.raw_files.is_empty() {
             "all files".to_owned()
         } else {
-            self.raw_files.join(", ")
+            format!("`{}`", self.raw_files.join("`, `"))
         };
-        out.push_str(&format!("  Files:   {files}\n"));
+        out.push_str(&format!("- **Files:** {files}\n"));
         for re in &self.raw_regexes {
-            out.push_str(&format!("  Pattern: {re}\n"));
+            out.push_str(&format!("- **Pattern:** `{re}`\n"));
         }
         if self.multiline {
-            out.push_str("  Match:   whole file (multiline)\n");
+            out.push_str("- **Match:** whole file (multiline)\n");
         }
         if let Some(r) = &self.replacement {
-            out.push_str(&format!("  Fix:     replace with `{r}`\n"));
+            out.push_str(&format!("- **Fix:** replace with `{r}`\n"));
         }
         if let Some(h) = &self.help {
-            out.push_str(&format!("  Help:    {h}\n"));
+            out.push_str(&format!("- **Help:** {h}\n"));
         }
         out
     }

@@ -650,3 +650,61 @@ fn zuul_output_format_creates_missing_directories() {
         .code(1);
     assert!(out.is_file());
 }
+
+/// `rule --explain` renders the Markdown on a colour terminal and leaves it
+/// raw when the output is piped, so it can be saved as-is.
+#[test]
+fn explain_renders_markdown_only_when_colour_is_on() {
+    let rendered = Command::cargo_bin("konform")
+        .unwrap()
+        .args(["--color", "always", "rule", "--explain", "KIS001"])
+        .assert()
+        .success();
+    let rendered = String::from_utf8(rendered.get_output().stdout.clone()).unwrap();
+    assert!(rendered.contains('\u{1b}'), "expected ANSI styling");
+    assert!(
+        !rendered.contains("## "),
+        "headings should be rendered: {rendered}"
+    );
+    assert!(
+        !rendered.contains("```"),
+        "code fences should be rendered: {rendered}"
+    );
+    assert!(rendered.contains("What it does"));
+
+    // Piped (not a TTY) with default colour settings: raw Markdown.
+    Command::cargo_bin("konform")
+        .unwrap()
+        .args(["rule", "--explain", "KIS001"])
+        .assert()
+        .success()
+        .stdout(contains("## What it does"))
+        .stdout(contains("```python"));
+}
+
+/// Rendered `rule --explain` prose and tables never exceed the terminal width,
+/// even for the wide options tables. Code blocks are deliberately left
+/// unwrapped so they can be copied verbatim.
+#[test]
+fn explain_output_fits_the_terminal_width() {
+    let ansi = regex::Regex::new("\u{1b}\\[[0-9;]*m").unwrap();
+    for width in [50usize, 70, 100, 140] {
+        let out = Command::cargo_bin("konform")
+            .unwrap()
+            .env("COLUMNS", width.to_string())
+            .args(["--color", "always", "rule", "--explain", "KIS001"])
+            .assert()
+            .success();
+        let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+        for line in ansi.replace_all(&text, "").lines() {
+            if line.starts_with("  │ ") {
+                continue; // code block line
+            }
+            assert!(
+                line.chars().count() <= width,
+                "width {width}: {line:?} is {} columns",
+                line.chars().count()
+            );
+        }
+    }
+}

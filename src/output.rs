@@ -11,6 +11,7 @@ use crate::rules::Rule;
 use crate::theme;
 use crate::types::{ChangedFiles, Level};
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::Path;
 
 /// Returns `true` when stderr should emit ANSI colour codes.
@@ -20,19 +21,27 @@ use std::path::Path;
 /// * Always strip when `NO_COLOR` is set (<https://no-color.org>).
 /// * Always strip when `TERM=dumb`.
 pub fn colors_enabled() -> bool {
+    colors_enabled_for(std::io::stderr().is_terminal())
+}
+
+/// Like [`colors_enabled`], for output written to stdout.
+pub fn stdout_colors_enabled() -> bool {
+    colors_enabled_for(std::io::stdout().is_terminal())
+}
+
+fn colors_enabled_for(is_terminal: bool) -> bool {
     use crate::theme::{ColorWhen, COLOR_PREFERENCE};
     match COLOR_PREFERENCE.get().copied().unwrap_or(ColorWhen::Auto) {
         ColorWhen::Always => true,
         ColorWhen::Never => false,
         ColorWhen::Auto => {
-            use std::io::IsTerminal;
             if std::env::var_os("NO_COLOR").is_some() {
                 return false;
             }
             if std::env::var("TERM").is_ok_and(|t| t == "dumb") {
                 return false;
             }
-            std::io::stderr().is_terminal()
+            is_terminal
         }
     }
 }

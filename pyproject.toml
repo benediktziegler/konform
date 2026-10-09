@@ -60,4 +60,5 @@ pre_bump_hooks = [
 dev = [
   "ipython",
   "maturin>=1.0,<2.0",
+  "zensical>=0.0.69; python_version >= '3.11'",  # needs Python 3.11+
 ]

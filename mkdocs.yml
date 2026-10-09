@@ -1,0 +1,56 @@
+site_name: konform
+site_description: Multi-rule Python linter and language server — fast, configurable, and CI-ready.
+site_url: https://benediktziegler.github.io/konform/
+repo_url: https://github.com/benediktziegler/konform
+repo_name: benediktziegler/konform
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2025 Benedikt Ziegler
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle: { icon: material/weather-night, name: Switch to dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle: { icon: material/weather-sunny, name: Switch to light mode }
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc: { permalink: true }
+  - pymdownx.details
+  - pymdownx.highlight: { anchor_linenums: true }
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed: { alternate_style: true }
+
+nav:
+  - Overview: index.md
+  - Installation: installation.md
+  - Tutorial: tutorial.md
+  - Configuration: configuration.md
+  - Suppressing violations: suppression.md
+  - Fixes: fixes.md
+  - Caching: caching.md
+  - Rules: rules/index.md
+  - Default rules: rules/default.md
+  - Editors: editors.md
+  - Settings: reference/settings.md
+  - Command-line interface: reference/cli.md
+  - Environment variables: reference/environment-variables.md
+  - Output formats: reference/output-formats.md
+  - Contributing: contributing.md

@@ -2,6 +2,8 @@
 
 ### Feat
 
+- **kst**: resolve simple alias assignments
+- **kst**: add user-defined structural rule engine
 - **rule**: render `rule --explain` as formatted terminal output
 - **rules**: generate the rule docs from structured Rule::docs()
 - **output**: make Zuul a --output-format instead of a default side effect
@@ -19,6 +21,7 @@
 
 ### Refactor
 
+- **kst**: isolate parser types behind a node layer
 - drop unsafe impls, dead code and unused dependencies
 
 ### Perf

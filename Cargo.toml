@@ -2,7 +2,7 @@
 name        = "konform"
 version     = "0.4.0"
 edition     = "2021"
-description = "Multi-rule Python linter and language server — module-only imports, pattern rules, and more"
+description = "Multi-rule Python linter and language server: module-only imports, pattern rules, and more"
 license     = "MIT"
 authors     = ["Benedikt Ziegler <benediktziegler@gmail.com>"]
 homepage    = "https://github.com/benediktziegler/konform"
@@ -40,13 +40,13 @@ ignore = "0.4"
 # SHA-256 for the file-level cache
 sha2 = "0.11"
 
-# Terminal colours — TTY detection, NO_COLOR, TERM=dumb handled in output.rs
+# Terminal colours: TTY detection, NO_COLOR, TERM=dumb handled in output.rs
 owo-colors = "4"
 
 # Error handling
 anyhow    = "1"
 
-# Python AST parsing — ruff's own parser, published on crates.io.
+# Python AST parsing: ruff's own parser, published on crates.io.
 # ruff_text_size provides TextRange / TextSize for source locations.
 ruff_python_parser = "0.0.15"
 ruff_python_ast    = "0.0.15"
@@ -65,7 +65,7 @@ similar = "3"
 # ---------------------------------------------------------------------------
 # Cache (ruff-style binary cache)
 # ---------------------------------------------------------------------------
-# Binary serialisation — replaces serde_json in the cache path.
+# Binary serialisation: replaces serde_json in the cache path.
 # Pinned to 2.0.1: the last working release before the project was abandoned
 # (3.0.0 is a tombstone that refuses to compile). The upstream maintainer
 # recommends `wincode` as a maintained fork; we can migrate when it
@@ -81,7 +81,7 @@ filetime = "0.2"
 # ---------------------------------------------------------------------------
 # LSP server (step 3)
 # ---------------------------------------------------------------------------
-# JSON-RPC framing + message types — no tokio, crossbeam-based, ~769 LoC.
+# JSON-RPC framing + message types: no tokio, crossbeam-based, ~769 LoC.
 # Actively maintained by the rust-analyzer team.
 lsp-server  = "0.10"
 # LSP protocol types (Diagnostic, Position, …)
@@ -100,7 +100,7 @@ codegen-units = 4       # 1 disables all parallelism; 4 is a good balance for a 
 strip         = true
 opt-level     = 3
 
-# Fast profile used by `maturin develop` / tests — full incremental, no LTO.
+# Fast profile used by `maturin develop` / tests: full incremental, no LTO.
 [profile.dev-release]
 inherits      = "release"
 lto           = false

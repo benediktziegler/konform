@@ -2,6 +2,7 @@
 
 ### Feat
 
+- **action**: add a GitHub Action that runs konform check
 - **cli**: add completions subcommand for shell completion scripts
 - **rules**: reject weak KNQ001 reasons
 - **rules**: add placeholder reasons and exempt codes to KNQ001

@@ -82,7 +82,7 @@ fn init_does_not_overwrite_existing_konform_toml_without_force() {
     let cfg = dir.path().join("konform.toml");
     std::fs::write(&cfg, "# mine\n").unwrap();
 
-    // NOTE: documents existing behaviour — an existing config is a note, not
+    // NOTE: documents existing behaviour: an existing config is a note, not
     // an error, so the exit code is 0.
     konform(dir.path())
         .args(["init", "--no-patterns"])
@@ -276,7 +276,7 @@ fn show_files_honours_exclude() {
     std::fs::create_dir(dir.path().join("sub")).unwrap();
     std::fs::write(dir.path().join("sub/x.py"), GOOD).unwrap();
 
-    // NOTE: documents existing behaviour — when walking `.`, a root-relative
+    // NOTE: documents existing behaviour: when walking `.`, a root-relative
     // glob such as `sub/**` does not match (the walked path is `./sub/x.py`),
     // so a `**/` prefix is needed.
     check(dir.path(), &["--show-files", "--exclude", "**/sub/**", "."])
@@ -407,7 +407,7 @@ fn output_file_receives_report() {
     assert_eq!(v[0]["rule"], "KIS001");
     assert_eq!(v[0]["filename"], "bad.py");
 
-    // NOTE: documents existing behaviour — `--help` says the report goes to
+    // NOTE: documents existing behaviour: `--help` says the report goes to
     // the file *instead of* stderr, but the full report is still printed to
     // stderr, and for `full`/`concise` the file receives JSON, not text.
     check(dir.path(), &["--output-file", "report.txt", "bad.py"])

@@ -236,7 +236,7 @@ pub fn print_violations(
                 }
             }
 
-            // Strip the leading "RULE_CODE: " prefix from the message — the
+            // Strip the leading "RULE_CODE: " prefix from the message: the
             // rule code is already shown in the [brackets] on the same line.
             let msg = raw_msg
                 .strip_prefix(&format!("{rule_code}: "))
@@ -262,7 +262,7 @@ pub fn print_violations(
 
             // ── Help (optional) ───────────────────────────────────────────
             if !help.is_empty() {
-                // Strip "(fixable)" suffix — the [*] badge already shows it.
+                // Strip "(fixable)" suffix: the [*] badge already shows it.
                 let help_text = help.strip_suffix(" (fixable)").unwrap_or(help);
                 eprintln!("  {}: {help_text}", pal.help_label("help"));
             }
@@ -378,7 +378,7 @@ pub fn write_zuul_return(
     let mut zuul_data: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
     if !file_comments.is_empty() {
-        // Strip "help" key — Zuul doesn't support it; append to message instead.
+        // Strip "help" key: Zuul doesn't support it; append to message instead.
         let cleaned: HashMap<String, Vec<serde_json::Value>> = file_comments
             .into_iter()
             .map(|(path, comments)| {
@@ -483,7 +483,7 @@ pub fn format_fix_hint(args: &[String], include_unsafe_fixes: bool) -> String {
             skip_next = false;
             continue;
         }
-        // Drop "check" — the hint already starts with "konform check --fix".
+        // Drop "check": the hint already starts with "konform check --fix".
         if arg == "check" {
             continue;
         }
@@ -566,7 +566,7 @@ fn print_violations_concise(
     exit_code_for(reported, changed_files, level, changed_files_level)
 }
 
-/// JSON renderer — writes a JSON array to **stdout**.
+/// JSON renderer: writes a JSON array to **stdout**.
 fn print_violations_json(
     reported: &HashMap<String, Vec<serde_json::Value>>,
     changed_files: &ChangedFiles,
@@ -898,7 +898,7 @@ pub fn render_for_file(
         OutputFormat::Sarif => render_sarif(reported),
         OutputFormat::Junit => render_junit(reported),
         // Full/Concise stream to stderr and Zuul is written to `--output-path`
-        // (it needs the changed-file routing) — fall back to JSON for file output.
+        // (it needs the changed-file routing): fall back to JSON for file output.
         OutputFormat::Full | OutputFormat::Concise | OutputFormat::Zuul => {
             render_for_file(reported, OutputFormat::Json)
         }

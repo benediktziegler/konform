@@ -4,7 +4,7 @@
 //! `ty_server`: `main_loop` runs against one end of an in-memory
 //! `lsp_server::Connection` pair (`Connection::memory()`), and tests drive
 //! the other end with real `lsp_types` request/notification values. No
-//! subprocess, no stdio framing — fast and deterministic.
+//! subprocess, no stdio framing: fast and deterministic.
 //!
 //! This complements (but does not replace) `tests/lsp_integration_test.rs`,
 //! which exercises the compiled binary over real stdio.

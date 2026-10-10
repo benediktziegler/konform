@@ -1,11 +1,11 @@
-//! KIS002 — Konform Import Style: import alias policy (unnecessary aliases).
+//! KIS002: Konform Import Style: import alias policy (unnecessary aliases).
 //!
 //! Flags `from X import Y as Z` when the rename to `Z` isn't needed to avoid
 //! a naming collision -- i.e. `Y` itself is never bound anywhere else that
 //! the alias's uses can see, so `from X import Y` would behave identically.
 //!
 //! ```python
-//! # Bad — KIS002
+//! # Bad: KIS002
 //! from foo.bar import baz as bar_baz     # `baz` isn't used anywhere else
 //!
 //! # Good

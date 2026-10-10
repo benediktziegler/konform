@@ -6,9 +6,9 @@ konform supports an increasing list of opinionated rules not supported by Ruff. 
 
 ## Legend
 
-- ✅ — enabled by default
-- 🛠️ — the rule has an auto-fix (`--fix`)
-- ⚠️ — the fix is unsafe and needs `--unsafe-fixes`
+- ✅: enabled by default
+- 🛠️: the rule has an auto-fix (`--fix`)
+- ⚠️: the fix is unsafe and needs `--unsafe-fixes`
 
 | Code | Rule | Linter | Status |
 | ---- | ---- | ------ | ------ |

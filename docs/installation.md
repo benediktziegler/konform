@@ -19,7 +19,7 @@
     $ pip install konform
     ```
 
-Wheels ship a pre-compiled Rust binary — no Rust installation is needed at runtime.
+Wheels ship a pre-compiled Rust binary, so no Rust installation is needed at runtime.
 
 Verify the install:
 

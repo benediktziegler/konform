@@ -1,8 +1,8 @@
-//! konform LSP server — entry point and public API.
+//! konform LSP server: entry point and public API.
 //!
 //! Invoked via `konform lsp` (detected in `main.rs` before clap).
 //! Architecture: single-threaded main loop driven by `lsp-server`'s
-//! crossbeam-based I/O threads.  No tokio — the rule engine is CPU-bound
+//! crossbeam-based I/O threads.  No tokio: the rule engine is CPU-bound
 //! and `rayon` handles any file-level parallelism.
 
 pub mod convert;

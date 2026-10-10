@@ -3,10 +3,10 @@
 //! # Directory layout
 //! ```text
 //! {cache_dir}/
-//! ├── .gitignore       — "*" so the cache is never accidentally committed
-//! ├── CACHEDIR.TAG     — Cache Directory Tagging spec file
-//! └── {VERSION}/       — one sub-directory per konform release
-//!     └── {hash:016x}  — one binary file per (package_root × settings) pair
+//! ├── .gitignore:        "*" so the cache is never accidentally committed
+//! ├── CACHEDIR.TAG:      Cache Directory Tagging spec file
+//! └── {VERSION}/:        one sub-directory per konform release
+//!     └── {hash:016x}:   one binary file per (package_root × settings) pair
 //! ```
 //!
 //! # Invalidation strategy
@@ -41,7 +41,7 @@ const EVICT_DAYS: u64 = 30;
 /// Root on-disk structure; one per *(package_root × settings)* combination.
 #[derive(Encode, Decode)]
 struct PackageCache {
-    /// Canonicalised package root — sanity-checked on open.
+    /// Canonicalised package root: sanity-checked on open.
     package_root: String,
     /// Absolute-path string → per-file cache entry.
     files: HashMap<String, FileCache>,
@@ -108,7 +108,7 @@ impl CachedViolation {
 }
 
 // ---------------------------------------------------------------------------
-// File cache key — mtime + permissions
+// File cache key: mtime + permissions
 // ---------------------------------------------------------------------------
 
 /// Inputs that determine whether a cached result is still valid for a file.
@@ -155,7 +155,7 @@ impl FileCacheKey {
 }
 
 // ---------------------------------------------------------------------------
-// Settings hash — determines the cache file name
+// Settings hash: determines the cache file name
 // ---------------------------------------------------------------------------
 
 /// Hash of everything that changes lint results besides the file contents
@@ -254,16 +254,16 @@ fn settings_hash(
 }
 
 // ---------------------------------------------------------------------------
-// init() — called once before the first cache access
+// init(): called once before the first cache access
 // ---------------------------------------------------------------------------
 
 /// Create the version sub-directory, `.gitignore`, and `CACHEDIR.TAG`.
 ///
-/// Safe to call on every run — existing files are left untouched.
+/// Safe to call on every run: existing files are left untouched.
 pub fn init(cache_root: &Path) -> Result<()> {
     fs::create_dir_all(cache_root.join(VERSION))?;
 
-    // .gitignore — skip if already present
+    // .gitignore: skip if already present
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -339,7 +339,7 @@ impl Cache {
                 ) {
                     Ok(mut pkg) => {
                         if pkg.package_root != root_str {
-                            // Hash collision (astronomically rare) — start fresh.
+                            // Hash collision (astronomically rare): start fresh.
                             pkg.files.clear();
                         }
                         Self {
@@ -736,7 +736,7 @@ mod tests {
             std::fs::write(&path, bytes).unwrap();
         }
 
-        // Open and persist — the old entry should be evicted.
+        // Open and persist: the old entry should be evicted.
         let mut c = open_cache(tmp.path(), &[], &[]);
         c.persist().unwrap();
 

@@ -1,11 +1,11 @@
-//! KIS001 — Konform Import Style: module-only imports.
+//! KIS001: Konform Import Style: module-only imports.
 //!
 //! Checks that every `from X import Y` statement imports a sub-module rather
 //! than a concrete object (function, class, or constant) from within one,
 //! following the Google Python Style Guide §2.2.
 //!
 //! ```python
-//! # Bad  — KIS001
+//! # Bad:   KIS001
 //! from os.path import join
 //!
 //! # Good
@@ -393,9 +393,9 @@ fn collect_imports(
 
 /// Attempt to find an automatic fix for importing `attr_name` from `module`.
 ///
-/// Strategy 1 — from-parent: walk the dotted module path looking for the
+/// Strategy 1 (from-parent): walk the dotted module path looking for the
 /// deepest parent.child split where child is itself a module.
-/// Strategy 2 — bare import: fall back to `import {module}`.
+/// Strategy 2 (bare import): fall back to `import {module}`.
 fn can_fix(module: &str, attr_name: &str, probe: &ModuleProbe) -> Option<FixInfo> {
     let parts: Vec<&str> = module.split('.').collect();
 
@@ -480,7 +480,7 @@ fn overlaps_existing_import(
 // Violation construction
 // ---------------------------------------------------------------------------
 
-/// Source span for a violation — all values are in the same unit as
+/// Source span for a violation: all values are in the same unit as
 /// [`ParsedImport`] (lines are 1-based, columns are 0-based byte offsets).
 struct ViolationSpan {
     start_line: usize,
@@ -703,7 +703,7 @@ fn check_imports(
 }
 
 // ---------------------------------------------------------------------------
-// apply_fixes — six-phase source rewriter
+// apply_fixes: six-phase source rewriter
 // ---------------------------------------------------------------------------
 //
 // The rewriter operates on the source *text* (not the AST) for phases 3-6;
@@ -1499,7 +1499,7 @@ mod tests {
 
     #[test]
     fn multiline_paren_import_all_removed() {
-        // Both aliases are non-modules — all lines should be blanked.
+        // Both aliases are non-modules: all lines should be blanked.
         let source = "from os.path import (\n    join,\n    dirname,\n)\n";
         let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
         assert!(result.is_some(), "expected a fix");

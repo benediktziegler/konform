@@ -6,6 +6,17 @@ All settings live in `konform.toml` (under `[konform]`) or `pyproject.toml` (und
 
 ## Top-level: `[tool.konform]`
 
+#### `extend`
+Path of a config file to inherit from, relative to this one (`~/` is expanded). This
+file's settings are laid over it; see [Sharing configuration](../configuration.md#sharing-configuration).
+
+**Default:** none · **Type:** `str`
+
+```toml
+[tool.konform]
+extend = "../shared/konform.toml"
+```
+
 #### `cache-dir`
 Directory for the [result cache](../caching.md).
 

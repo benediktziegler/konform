@@ -1059,6 +1059,19 @@ fn did_change_watched_files_reloads_pattern_files() {
 }
 
 #[test]
+fn watch_globs_include_files_pulled_in_through_extend() {
+    let config = Config {
+        extends: vec![PathBuf::from("/shared/base.toml")],
+        ..Config::default()
+    };
+    let globs = watch_globs(&config);
+    assert!(
+        globs.iter().any(|g| g == "/shared/base.toml"),
+        "extended files must be watched: {globs:?}"
+    );
+}
+
+#[test]
 fn watch_globs_cover_config_pattern_and_rules_files() {
     let globs = watch_globs(&Config::default());
     for g in [

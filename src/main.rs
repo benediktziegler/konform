@@ -903,9 +903,15 @@ fn recheck_batch(files: &[PathBuf], ctx: &RecheckContext<'_>, cache: &mut Cache)
 /// Invalid user rule definitions are a hard error (exit 2): silently skipping
 /// them would give false greens in CI.
 fn exit_on_config_errors(config: &config::Config, rules: &[Box<dyn rules::Rule>]) {
-    let errors: Vec<String> = rules
+    let errors: Vec<String> = config
+        .errors
         .iter()
-        .flat_map(|r| r.config_errors(config.rule_config(r.config_name())))
+        .cloned()
+        .chain(
+            rules
+                .iter()
+                .flat_map(|r| r.config_errors(config.rule_config(r.config_name()))),
+        )
         .collect();
     if errors.is_empty() {
         return;

@@ -2,6 +2,7 @@
 
 ### Feat
 
+- **config**: inherit settings from another file with extend
 - **kst**: add replace and delete autofixes to structural rules
 - **config**: add fixable and unfixable lint settings
 - **rules**: add opt-in KNQ003 for unused noqa codes

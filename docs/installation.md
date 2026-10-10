@@ -50,3 +50,18 @@ $ konform completions zsh > ~/.zfunc/_konform                      # zsh (~/.zfu
 $ konform completions bash > ~/.local/share/bash-completion/completions/konform
 $ konform completions fish > ~/.config/fish/completions/konform.fish
 ```
+
+## pre-commit
+
+Add konform to your `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/benediktziegler/konform
+    rev: v0.4.0  # pin a release tag
+    hooks:
+      - id: konform        # lint only
+      # - id: konform-fix  # lint and apply safe fixes; fails the commit when it changed files
+```
+
+pre-commit builds konform from source with cargo (installing a Rust toolchain if needed), so the first run takes a minute; later runs use the cached build.

@@ -19,7 +19,7 @@
     $ pip install konform
     ```
 
-Wheels ship a pre-compiled Rust binary — no Rust installation is needed at runtime.
+Wheels ship a pre-compiled Rust binary, so no Rust installation is needed at runtime.
 
 Verify the install:
 
@@ -40,3 +40,13 @@ $ konform init
 | `--force`       | Create `konform.toml` even if `pyproject.toml`/`konform.toml` exists    |
 | `--no-patterns` | Skip creating `konform_patterns.toml`                                   |
 | `--diff`        | Show what would be created without writing files                        |
+
+## Shell completions
+
+`konform completions <shell>` prints a completion script for `bash`, `zsh`, `fish`, `elvish` or `powershell`:
+
+```console
+$ konform completions zsh > ~/.zfunc/_konform                      # zsh (~/.zfunc must be in $fpath)
+$ konform completions bash > ~/.local/share/bash-completion/completions/konform
+$ konform completions fish > ~/.config/fish/completions/konform.fish
+```

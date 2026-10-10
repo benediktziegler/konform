@@ -180,11 +180,11 @@ fn add_noqa_to_source(
 /// Merge `new_codes` into any existing `# noqa` comment on `line`.
 ///
 /// Cases:
-/// 1. No `# noqa` at all — `  # noqa: CODES` (plus `  # REASON`) is appended.
+/// 1. No `# noqa` at all: `  # noqa: CODES` (plus `  # REASON`) is appended.
 ///    Without codes there is nothing to add and the line stays as is.
-/// 2. `# noqa: CODES` — codes from `new_codes` absent from `CODES` are merged
+/// 2. `# noqa: CODES`: codes from `new_codes` absent from `CODES` are merged
 ///    in, sorted.  Any trailing reason after the code list is preserved.
-/// 3. Bare `# noqa` — suppresses everything; the codes are left unchanged.
+/// 3. Bare `# noqa`: suppresses everything; the codes are left unchanged.
 ///
 /// With a `reason`, an existing comment that has none gets it appended.
 /// An existing reason is never overwritten.
@@ -200,7 +200,7 @@ fn merge_noqa(
         if new_codes.is_empty() {
             return line.to_owned();
         }
-        // No existing noqa — append one.
+        // No existing noqa: append one.
         let codes_str = new_codes.iter().cloned().collect::<Vec<_>>().join(", ");
         *changed = true;
         return match reason {
@@ -653,7 +653,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
         }
     }
 
-    // stdin: always run uncached — there is no mtime key for stdin.
+    // stdin: always run uncached: there is no mtime key for stdin.
     if let Some(ref src) = stdin_source {
         let mut input = CheckInput::new(&stdin_display, src);
         input.ignore_noqa = config.ignore_noqa;
@@ -1008,7 +1008,7 @@ fn run_rule(args: RuleArgs, isolated: bool) {
     if args.list {
         for doc in &docs {
             println!(
-                "{:8}  {:<10}  {:<24}  {}  — {}",
+                "{:8}  {:<10}  {:<24}  {}: {}",
                 doc.code, doc.category, doc.config_name, doc.name, doc.description,
             );
         }
@@ -1067,6 +1067,11 @@ fn run_generate_docs(dir: &Path) {
     }
 }
 
+fn run_completions(args: cli::CompletionsArgs) {
+    let mut cmd = Cli::command();
+    clap_complete::generate(args.shell, &mut cmd, "konform", &mut std::io::stdout());
+}
+
 fn run_version() {
     println!("konform {}", env!("CARGO_PKG_VERSION"));
 }
@@ -1080,7 +1085,7 @@ const RULE_CATEGORIES: &[&str] = &["KIS", "KPT", "KST"];
 
 /// Default content written to a new `konform.toml`.
 /// Only non-default settings are included; everything else is left as a comment.
-const KONFORM_TOML: &str = r#"# konform.toml — project linting configuration
+const KONFORM_TOML: &str = r#"# konform.toml: project linting configuration
 # Run `konform rule --list` to see available rules.
 # Run `konform rule --explain KIS001` for detailed documentation.
 
@@ -1117,7 +1122,7 @@ const PYPROJECT_APPEND: &str = r#"
 "#;
 
 /// Default `konform_patterns.toml` with commented-out example patterns.
-const PATTERNS_TOML: &str = r#"# konform_patterns.toml — user-defined KPT pattern rules
+const PATTERNS_TOML: &str = r#"# konform_patterns.toml: user-defined KPT pattern rules
 # Auto-discovered when placed alongside pyproject.toml / konform.toml.
 # Run `konform rule --explain KPT001` for full documentation.
 
@@ -1125,14 +1130,14 @@ const PATTERNS_TOML: &str = r#"# konform_patterns.toml — user-defined KPT patt
 
 [[rules]]
 id      = "KPT001"
-message = "Remove bare print() — use the project logger instead."
+message = "Remove bare print(): use the project logger instead."
 pattern = '^\\s*print\\s*\\('
 files   = ["src/**/*.py"]
 level   = "warning"
 
 [[rules]]
 id      = "KPT002"
-message = "Remove breakpoint() — debugging artefact must not be committed."
+message = "Remove breakpoint(): debugging artefact must not be committed."
 pattern = '^\\s*breakpoint\\s*\\(\\s*\\)'
 level   = "error"
 
@@ -1186,7 +1191,7 @@ fn init_config(dir: &std::path::Path, force: bool, dry_run: bool) {
                 eprintln!("error: failed to update pyproject.toml: {e}");
                 std::process::exit(1);
             }
-            eprintln!("Updated pyproject.toml — added [tool.konform]");
+            eprintln!("Updated pyproject.toml: added [tool.konform]");
         }
         return;
     }
@@ -1325,7 +1330,7 @@ fn init_ruff_compat(dir: &std::path::Path, dry_run: bool) {
             return;
         }
     }
-    // No ruff config found — nothing to do.
+    // No ruff config found: nothing to do.
 }
 
 /// Attempt to add `external = ["KIS", "KPT", "KST"]` to a ruff config file.
@@ -1343,13 +1348,13 @@ fn patch_ruff_config(
     dry_run: bool,
 ) {
     if content.contains("external") {
-        // Already configured — nothing to add.
+        // Already configured: nothing to add.
         return;
     }
 
     if content.contains(lint_section) {
         // Section exists but without `external`; unsafe to insert without a
-        // TOML parser — tell the user what to add manually.
+        // TOML parser: tell the user what to add manually.
         eprintln!(
             "note: add to {lint_section} in {}: {ext_line}",
             path.display()
@@ -1366,7 +1371,7 @@ fn patch_ruff_config(
             eprintln!("error: failed to update {}: {e}", path.display());
         } else {
             eprintln!(
-                "Updated {} — added {lint_section} external for konform codes",
+                "Updated {}: added {lint_section} external for konform codes",
                 path.display()
             );
         }
@@ -1424,6 +1429,7 @@ fn main() {
         Some(Command::Version) => run_version(),
         Some(Command::Clean(a)) => run_clean(a),
         Some(Command::Init(a)) => run_init(a),
+        Some(Command::Completions(a)) => run_completions(a),
     }
 }
 

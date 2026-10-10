@@ -1,7 +1,7 @@
 //! Filesystem-based Python module existence probe.
 //!
 //! Asks the Python interpreter for `sys.path` once at startup, then answers
-//! every `(module_name, attr_name)` query purely via filesystem look-ups —
+//! every `(module_name, attr_name)` query purely via filesystem look-ups:
 //! no code execution, no pyo3, no `__import__`.
 //!
 //! Results are cached in a [`dashmap::DashMap`] for the lifetime of the
@@ -26,7 +26,7 @@ pub enum ModuleCheck {
     /// `attr_name` resolved and is definitively not a module.
     NotModule,
     /// The root package (first dotted component of `module_name`) could not
-    /// be found anywhere in `sys.path` — e.g. it isn't installed in this
+    /// be found anywhere in `sys.path`, e.g. it isn't installed in this
     /// Python environment. There is no way to tell whether `attr_name` would
     /// be a module or not, so callers should treat this as "unknown" rather
     /// than a definitive violation.
@@ -107,7 +107,7 @@ impl ModuleProbe {
     /// Hashes each `sys.path` directory's own mtime (not a recursive scan).
     /// Installing, upgrading, or removing a package touches the mtime of the
     /// directory that contains it (site-packages, a namespace-package root,
-    /// etc.), so this changes whenever the resolvable module set changes —
+    /// etc.), so this changes whenever the resolvable module set changes,
     /// even though no *source file being linted* was touched.
     ///
     /// Callers should fold this into any on-disk cache key that depends on
@@ -311,8 +311,8 @@ impl ModuleProbe {
     ///
     /// `visiting` guards against circular `__init__.py` re-export chains
     /// (A re-exports from B, B re-exports from A). It is local to a single
-    /// top-level `is_module` call — never shared across threads or across
-    /// unrelated queries — so it cannot corrupt the shared `cache`.
+    /// top-level `is_module` call: never shared across threads or across
+    /// unrelated queries: so it cannot corrupt the shared `cache`.
     fn is_module_recursive(
         &self,
         module_name: &str,
@@ -534,7 +534,7 @@ mod tests {
         fs::write(pkg.join("networking.py"), "").unwrap();
 
         let probe = probe_for(tmp.path());
-        // Direct check: networking is a direct child — always true.
+        // Direct check: networking is a direct child: always true.
         assert!(probe.is_module("mypkg", "networking"));
     }
 
@@ -580,7 +580,7 @@ mod tests {
         fs::write(impl_pkg.join("networking.py"), "").unwrap();
 
         let probe = probe_for(tmp.path());
-        // networking lives under impl_pkg, not pub — check_init_reexport should
+        // networking lives under impl_pkg, not pub: check_init_reexport should
         // follow the import chain and return true.
         assert!(probe.is_module("pub", "networking"));
     }
@@ -599,7 +599,7 @@ mod tests {
         )
         .unwrap();
         fs::write(impl_pkg.join("__init__.py"), "").unwrap();
-        // No core.py — SomeClass is not a module anywhere
+        // No core.py: SomeClass is not a module anywhere
         // (impl_pkg/core.py does not exist)
 
         let probe = probe_for(tmp.path());

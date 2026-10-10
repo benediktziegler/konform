@@ -1,10 +1,10 @@
 //! End-to-end LSP smoke test over **real stdio**, against the compiled
-//! binary — mirroring the blackbox approach used by tools like `pytest-lsp`.
+//! binary, mirroring the blackbox approach used by tools like `pytest-lsp`.
 //!
 //! This intentionally duplicates only a thin slice of what
 //! `src/lsp/handler/tests.rs`'s in-process harness already covers in depth.
-//! Its job is narrower: catch bugs the in-process harness *can't* see —
-//! stdio framing, process startup/argv handling, and clean shutdown/exit —
+//! Its job is narrower: catch bugs the in-process harness *can't* see:
+//! stdio framing, process startup/argv handling, and clean shutdown/exit,
 //! which is exactly the class of bug that can make the server "not work"
 //! when a real editor (e.g. Zed) launches it as a subprocess.
 
@@ -186,7 +186,7 @@ fn server_exits_promptly_after_shutdown_and_exit() {
     let mut server = ServerProcess::spawn(dir.path());
     server.initialize();
     // Regression guard for the original stub test: the process must not
-    // just "stay alive" — it must actually terminate on shutdown/exit,
+    // just "stay alive": it must actually terminate on shutdown/exit,
     // and do so quickly rather than hanging.
     let start = std::time::Instant::now();
     server.shutdown_and_exit();

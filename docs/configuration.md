@@ -44,8 +44,8 @@ The complete list of options is in the [settings reference](reference/settings.m
 ## Per-rule tables
 
 Each rule's settings live in a table keyed by a stable *config name* (shown by
-`konform rule --list`), not by its code. Renaming a rule code — with
-[`noqa-aliases`](suppression.md#aliasing-noqa-codes) covering old comments —
+`konform rule --list`), not by its code. Renaming a rule code (with
+[`noqa-aliases`](suppression.md#aliasing-noqa-codes) covering old comments)
 never forces a config rewrite.
 
 ## Module search roots
@@ -70,5 +70,5 @@ in the project.
 ## Upgrading from an older config format
 
 When the config shape changes (as in 0.3.0), konform auto-migrates an outdated
-file in place the first time you run any command — comments and other
-`[tool.*]` sections are preserved — and prints a summary to stderr.
+file in place the first time you run any command (comments and other
+`[tool.*]` sections are preserved) and prints a summary to stderr.

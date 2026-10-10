@@ -146,7 +146,7 @@ fn handle_request(connection: &Connection, session: &Arc<RwLock<Session>>, req: 
         "textDocument/formatting" => handle_formatting(session, req.params),
         "textDocument/rangeFormatting" => handle_range_formatting(session, req.params),
         _ => {
-            // Unknown request — send MethodNotFound.
+            // Unknown request: send MethodNotFound.
             let resp = Response::new_err(
                 id,
                 lsp_server::ErrorCode::MethodNotFound as i32,
@@ -172,7 +172,7 @@ fn handle_request(connection: &Connection, session: &Arc<RwLock<Session>>, req: 
 // Request handlers
 // ---------------------------------------------------------------------------
 
-/// `textDocument/diagnostic` — pull-model diagnostics (LSP 3.17).
+/// `textDocument/diagnostic`: pull-model diagnostics (LSP 3.17).
 fn handle_diagnostic(
     session: &Arc<RwLock<Session>>,
     params: serde_json::Value,
@@ -195,16 +195,16 @@ fn handle_diagnostic(
     Ok(serde_json::to_value(report)?)
 }
 
-/// `textDocument/codeAction` — return fix actions for violations in range.
+/// `textDocument/codeAction`: return fix actions for violations in range.
 ///
 /// Offers three tiers of code action, filtered by `context.only`:
-/// 1. **Per-violation quick-fix** (`quickfix`, preferred) — for each fixable
+/// 1. **Per-violation quick-fix** (`quickfix`, preferred): for each fixable
 ///    [`Violation`] whose source line intersects the requested range, a
 ///    minimal edit fixing *only that violation* via [`violation_fix_edit`].
-/// 2. **"Fix All" (safe)** (`source.fixAll.konform`) — runs the fixer over
+/// 2. **"Fix All" (safe)** (`source.fixAll.konform`): runs the fixer over
 ///    only *safe* fixes ([`Rule::is_unsafe_fix`] == `false`) on the whole
 ///    document and replaces it with a single full-document [`TextEdit`].
-/// 3. **"Fix All (safe + unsafe)"** (`source.fixAll.konform.unsafe`) — same
+/// 3. **"Fix All (safe + unsafe)"** (`source.fixAll.konform.unsafe`): same
 ///    as above but also applies unsafe fixes (e.g. KIS002). Only offered
 ///    when it would actually change something beyond the safe-only fix, so
 ///    editors don't show a redundant duplicate action.
@@ -457,7 +457,7 @@ fn line_diff_edits(source: &str, fixed: &str) -> Vec<TextEdit> {
         .collect()
 }
 
-/// `textDocument/formatting` — apply all fixable violations to the whole document.
+/// `textDocument/formatting`: apply all fixable violations to the whole document.
 fn handle_formatting(
     session: &Arc<RwLock<Session>>,
     params: serde_json::Value,
@@ -484,7 +484,7 @@ fn handle_formatting(
     Ok(serde_json::to_value(edits)?)
 }
 
-/// `textDocument/rangeFormatting` — currently delegates to full-document formatting.
+/// `textDocument/rangeFormatting`: currently delegates to full-document formatting.
 ///
 /// A range-aware implementation would run the fixer and filter edits to the
 /// requested range. For now, full formatting is correct (the fixer is
@@ -551,7 +551,7 @@ fn handle_notification(
             }
         }
         "workspace/didChangeWatchedFiles" => {
-            // A config file changed — reload and re-lint all open documents.
+            // A config file changed: reload and re-lint all open documents.
             let uris: Vec<Uri> = {
                 let mut sess = session.write().unwrap();
                 sess.reload_config();
@@ -580,7 +580,7 @@ fn handle_notification(
             connection.sender.send(Message::Request(req)).ok();
             pending.insert(id, PendingKind::WorkspaceConfiguration);
         }
-        _ => {} // unknown notification — ignore
+        _ => {} // unknown notification: ignore
     }
 }
 
@@ -610,7 +610,7 @@ fn handle_pending_response(
                 .unwrap_or(serde_json::Value::Null);
 
             if !settings.is_object() {
-                // Client returned null or an empty array — nothing to apply.
+                // Client returned null or an empty array: nothing to apply.
                 return;
             }
 

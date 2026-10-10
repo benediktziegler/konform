@@ -1,6 +1,6 @@
 # Editors
 
-konform ships a language server that shares the CLI's rule engine — no second
+konform ships a language server that shares the CLI's rule engine, so there is no second
 process and no stale results.
 
 ```console
@@ -10,10 +10,10 @@ $ konform server    # LSP over stdin/stdout
 ## Code actions
 
 A quickfix is offered for every fixable diagnostic (including unsafe ones such as
-KIS002 — editing one open document is an explicit, reviewable action), plus:
+KIS002, since editing one open document is an explicit, reviewable action), plus:
 
-- **Fix all auto-fixable problems** — safe fixes only (`source.fixAll.konform`).
-- **Fix all problems (including unsafe fixes)** (`source.fixAll.konform.unsafe`) —
+- **Fix all auto-fixable problems**: safe fixes only (`source.fixAll.konform`).
+- **Fix all problems (including unsafe fixes)** (`source.fixAll.konform.unsafe`):
   only offered when it changes something beyond the safe pass.
 
 The server reloads rules when `pyproject.toml`, `konform.toml`,

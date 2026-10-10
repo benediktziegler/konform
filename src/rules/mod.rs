@@ -3,7 +3,7 @@
 //! Every linting rule implements [`Rule`].  The engine calls
 //! [`Rule::check`] to find violations and [`Rule::fix`] to rewrite source
 //! in-place.  Both the CLI and the LSP build a [`FileContext`] and pass it
-//! to the same rule implementations — no duplication of logic.
+//! to the same rule implementations: no duplication of logic.
 
 use crate::config::RuleSelection;
 use crate::module_probe::ModuleProbe;
@@ -44,7 +44,7 @@ pub struct FileContext {
     pub path: PathBuf,
     /// Full source text (UTF-8).
     pub source: String,
-    /// Source split into lines — 0-indexed, no trailing newlines.
+    /// Source split into lines: 0-indexed, no trailing newlines.
     pub lines: Vec<String>,
     /// When `true`, `# noqa` suppression comments are ignored.
     /// Propagated from `CheckInput::ignore_noqa` / `Config::ignore_noqa`.

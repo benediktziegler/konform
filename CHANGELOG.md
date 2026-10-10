@@ -2,6 +2,8 @@
 
 ### Feat
 
+- **action**: add a GitHub Action that runs konform check
+- **cli**: add completions subcommand for shell completion scripts
 - **rules**: reject weak KNQ001 reasons
 - **rules**: add placeholder reasons and exempt codes to KNQ001
 - **rules**: add --reason and KNQ002 noqa style rule
@@ -21,6 +23,7 @@
 
 ### Fix
 
+- **docs**: list each environment variable once
 - **rules**: warn on invalid KNQ settings
 - **output**: make the CI writers schema-correct and escape user data
 - **output**: point SARIF URLs at the real repository

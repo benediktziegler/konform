@@ -1,11 +1,11 @@
-//! KNQ001 — Konform NoQa: every `# noqa` comment must say why.
+//! KNQ001: Konform NoQa: every `# noqa` comment must say why.
 //!
 //! A suppression without a reason is a silent promise that someone, once,
 //! had a good cause. KNQ001 flags every `# noqa` comment (bare or with
 //! codes) that isn't followed by an explanation:
 //!
 //! ```python
-//! # Bad — KNQ001
+//! # Bad: KNQ001
 //! from os.path import join  # noqa: KIS001
 //!
 //! # Good

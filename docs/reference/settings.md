@@ -4,7 +4,7 @@ All settings live in `konform.toml` (under `[konform]`) or `pyproject.toml` (und
 `[tool.konform]`). Tables below use the `pyproject.toml` form. See
 [Configuration](../configuration.md) for file discovery.
 
-## Top-level — `[tool.konform]`
+## Top-level: `[tool.konform]`
 
 #### `cache-dir`
 Directory for the [result cache](../caching.md).
@@ -33,7 +33,7 @@ file. Falls back to `[tool.ruff] src`, then `[".", "src"]`.
 src = ["lib"]
 ```
 
-## Linter — `[tool.konform.lint]`
+## Linter: `[tool.konform.lint]`
 
 #### `select`
 Rule codes or prefixes to enable. Empty means all [default rules](../rules/default.md).

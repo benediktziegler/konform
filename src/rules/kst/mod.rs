@@ -1,4 +1,4 @@
-//! KST — Konform Structural rules: user-defined checks on the Python syntax tree.
+//! KST: Konform Structural rules: user-defined checks on the Python syntax tree.
 //!
 //! Where KPT matches regexes against text, KST matches *code structure*, so a
 //! rule can say "no `assert` inside a `@pytest.fixture` function" regardless
@@ -95,7 +95,7 @@ impl CompiledRule {
 
     /// Markdown summary printed by `konform rule --explain <ID>`.
     fn explain(&self) -> String {
-        let mut out = format!("# {} — {}\n\n", self.id, self.message);
+        let mut out = format!("# {}: {}\n\n", self.id, self.message);
         out.push_str(&format!("- **Source:** `{}`\n", self.source));
         if !self.raw_files.is_empty() {
             out.push_str(&format!("- **Files:** `{}`\n", self.raw_files.join("`, `")));
@@ -282,7 +282,7 @@ fn compile_rules(
 // Rule
 // ---------------------------------------------------------------------------
 
-/// KST — user-defined structural (AST) rules.
+/// KST: user-defined structural (AST) rules.
 pub struct KstRule {
     /// Directory of the config file; resolves `rules_file` and locates
     /// `konform_rules.toml`.

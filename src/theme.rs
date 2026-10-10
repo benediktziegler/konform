@@ -1,4 +1,4 @@
-//! Visual theme — one code point to change the appearance of all output.
+//! Visual theme: one code point to change the appearance of all output.
 //!
 //! [`ACTIVE_THEME`] is the single constant to change.  It controls:
 //! * The colour scheme of `konform --help` / `konform check --help` / etc.
@@ -15,7 +15,7 @@ use clap::builder::styling::{AnsiColor, Effects, Styles};
 use owo_colors::OwoColorize;
 
 // ---------------------------------------------------------------------------
-// ▸ Code point — change this one line to switch the whole visual theme
+// ▸ Code point: change this one line to switch the whole visual theme
 // ---------------------------------------------------------------------------
 
 /// **Change this constant to switch the colour theme for all output.**
@@ -80,7 +80,7 @@ pub fn palette(colors: bool) -> Palette {
 }
 
 // ---------------------------------------------------------------------------
-// Palette — per-element colour helpers
+// Palette: per-element colour helpers
 // ---------------------------------------------------------------------------
 
 /// A bundle of colour functions derived from a [`Theme`].
@@ -106,21 +106,21 @@ impl Palette {
 
     // ── Linting output ────────────────────────────────────────────────────
 
-    /// `error` keyword — bold bright-red.
+    /// `error` keyword: bold bright-red.
     pub fn error(&self, s: &str) -> String {
         self.p(s, |s| match self.theme {
             Theme::Ruff => s.bright_red().bold().to_string(),
         })
     }
 
-    /// `warning` keyword — bold bright-yellow.
+    /// `warning` keyword: bold bright-yellow.
     pub fn warning(&self, s: &str) -> String {
         self.p(s, |s| match self.theme {
             Theme::Ruff => s.bright_yellow().bold().to_string(),
         })
     }
 
-    /// `[RULE_CODE]` brackets — same colour as the level word.
+    /// `[RULE_CODE]` brackets: same colour as the level word.
     pub fn rule_brackets(&self, s: &str, is_error: bool) -> String {
         if is_error {
             self.error(s)
@@ -129,56 +129,56 @@ impl Palette {
         }
     }
 
-    /// `*` inside the `[*]` fixable badge — bold bright-cyan.
+    /// `*` inside the `[*]` fixable badge: bold bright-cyan.
     pub fn fixable_star(&self) -> String {
         self.p("*", |s| match self.theme {
             Theme::Ruff => s.bright_cyan().bold().to_string(),
         })
     }
 
-    /// `-->` file-location arrow — bold bright-blue.
+    /// `-->` file-location arrow: bold bright-blue.
     pub fn arrow(&self, s: &str) -> String {
         self.p(s, |s| match self.theme {
             Theme::Ruff => s.bright_blue().bold().to_string(),
         })
     }
 
-    /// `help:` label — bold bright-cyan.
+    /// `help:` label: bold bright-cyan.
     pub fn help_label(&self, s: &str) -> String {
         self.p(s, |s| match self.theme {
             Theme::Ruff => s.bright_cyan().bold().to_string(),
         })
     }
 
-    /// Violation message text — bold.
+    /// Violation message text: bold.
     pub fn message(&self, s: &str) -> String {
         self.p(s, |s| match self.theme {
             Theme::Ruff => s.bold().to_string(),
         })
     }
 
-    /// `hint:` label — yellow.
+    /// `hint:` label: yellow.
     pub fn hint_label(&self, s: &str) -> String {
         self.p(s, |s| match self.theme {
             Theme::Ruff => s.yellow().to_string(),
         })
     }
 
-    /// Command string in the fix hint — bold.
+    /// Command string in the fix hint: bold.
     pub fn hint_cmd(&self, s: &str) -> String {
         self.p(s, |s| match self.theme {
             Theme::Ruff => s.bold().to_string(),
         })
     }
 
-    /// `*` in `[*] N fixable …` summary line — cyan, non-bold (matches ruff).
+    /// `*` in `[*] N fixable …` summary line: cyan, non-bold (matches ruff).
     pub fn summary_star(&self) -> String {
         self.p("*", |s| match self.theme {
             Theme::Ruff => s.cyan().to_string(),
         })
     }
 
-    /// Flag names like `--all-files` — bold.
+    /// Flag names like `--all-files`: bold.
     #[allow(dead_code)]
     pub fn flag(&self, s: &str) -> String {
         self.p(s, |s| match self.theme {
@@ -223,14 +223,14 @@ pub fn init_colors(when: ColorWhen) {
 /// Ordered from most to least verbose.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
-    /// `-v` / `--verbose` — emit extra diagnostics.
+    /// `-v` / `--verbose`: emit extra diagnostics.
     Verbose,
-    /// Default — normal output.
+    /// Default: normal output.
     #[default]
     Default,
-    /// `-q` / `--quiet` — print violations only; suppress hints and summary.
+    /// `-q` / `--quiet`: print violations only; suppress hints and summary.
     Quiet,
-    /// `-s` / `--silent` — suppress all output (still exits 1 on violations).
+    /// `-s` / `--silent`: suppress all output (still exits 1 on violations).
     Silent,
 }
 
@@ -253,12 +253,12 @@ pub fn is_verbose() -> bool {
     log_level() == LogLevel::Verbose
 }
 
-/// `true` when quiet or silent — suppress hints, summaries, and progress.
+/// `true` when quiet or silent: suppress hints, summaries, and progress.
 pub fn is_quiet() -> bool {
     log_level() >= LogLevel::Quiet
 }
 
-/// `true` when silent — suppress all output entirely.
+/// `true` when silent: suppress all output entirely.
 pub fn is_silent() -> bool {
     log_level() >= LogLevel::Silent
 }

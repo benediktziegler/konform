@@ -959,7 +959,7 @@ fn run_rule_tests(config: &config::Config, all: &[Box<dyn rules::Rule>]) -> ! {
             }
         } else if total == 0 {
             println!(
-                "{:8}  {}  no test.valid / test.invalid snippets",
+                "{:8}  {}  no test.valid / test.invalid / test.fixed snippets",
                 r.code,
                 "skip".yellow()
             );

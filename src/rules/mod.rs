@@ -62,6 +62,9 @@ pub struct FileContext {
     pub selection: RuleSelection,
     /// `fixable` / `unfixable` lists; see [`FileContext::can_fix`].
     pub fix_selection: RuleSelection,
+    /// `--unsafe-fixes` is on. Rules whose fixes are unsafe per code (see
+    /// [`Rule::is_unsafe_fix_code`]) check it in [`Rule::fix`].
+    pub unsafe_fixes: bool,
     /// What the other rules report with `# noqa` ignored. Set by the engine
     /// only for rules that ask for it (see [`Rule::audits_noqa`]).
     pub noqa_audit: Option<Arc<NoqaAudit>>,
@@ -105,6 +108,7 @@ impl FileContext {
             fix_target: None,
             selection: RuleSelection::default(),
             fix_selection: RuleSelection::default(),
+            unsafe_fixes: false,
             noqa_audit: None,
             parsed: Arc::new(OnceLock::new()),
         }
@@ -291,6 +295,13 @@ pub trait Rule: Send + Sync {
     /// when `--unsafe-fixes` is also passed -- see [`crate::engine::run_fix`].
     fn is_unsafe_fix(&self) -> bool {
         false
+    }
+
+    /// Like [`Rule::is_unsafe_fix`], for one of the codes this rule emits.
+    /// Rules whose codes differ in fix safety (KST: per user rule) override
+    /// it and gate unsafe fixes on [`FileContext::unsafe_fixes`] themselves.
+    fn is_unsafe_fix_code(&self, _code: &str) -> bool {
+        self.is_unsafe_fix()
     }
 
     /// `true` for rules that need [`FileContext::noqa_audit`]: the engine

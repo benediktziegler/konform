@@ -4,12 +4,21 @@
 //! Built in code so the `kind` enum can't drift from [`Kind::NAMES`]; a test
 //! keeps the matcher properties in sync with [`RawMatcher`].
 
+use super::fix::placeholder_names;
 use super::node::Kind;
 use serde_json::{json, Value};
 
 /// The schema of a rules file: a table with a `rules` array.
 pub fn rules_schema() -> Value {
     let kinds: Vec<&str> = Kind::NAMES.iter().map(|(n, _)| *n).collect();
+    let placeholders: Vec<String> = placeholder_names()
+        .iter()
+        .map(|n| format!("{{{n}}}"))
+        .collect();
+    let replace_doc = format!(
+        "Template for the matched node's replacement. Placeholders: {}; `{{{{` / `}}}}` for literal braces.",
+        placeholders.join(", ")
+    );
     let names = json!([
         { "type": "string" },
         { "type": "array", "items": { "type": "string" }, "minItems": 1 },
@@ -42,6 +51,22 @@ pub fn rules_schema() -> Value {
                         "description": "Glob patterns; the rule only runs on matching files."
                     },
                     "match": { "$ref": "#/$defs/matcher" },
+                    "fix": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "description": "Autofix for each match: `replace` or `delete` (not both).",
+                        "properties": {
+                            "replace": { "type": "string", "description": replace_doc },
+                            "delete": {
+                                "type": "boolean",
+                                "description": "Delete the matched statement (or expression statement)."
+                            },
+                            "safe": {
+                                "type": "boolean",
+                                "description": "Apply with plain `--fix`; otherwise only with `--unsafe-fixes`."
+                            }
+                        }
+                    },
                     "test": {
                         "type": "object",
                         "additionalProperties": false,
@@ -56,6 +81,19 @@ pub fn rules_schema() -> Value {
                                 "type": "array",
                                 "items": { "type": "string" },
                                 "description": "Snippets the rule must flag."
+                            },
+                            "fixed": {
+                                "type": "array",
+                                "description": "Snippets and what the rule's fix must turn them into.",
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["input", "output"],
+                                    "properties": {
+                                        "input": { "type": "string" },
+                                        "output": { "type": "string" }
+                                    }
+                                }
                             }
                         }
                     }
@@ -179,14 +217,26 @@ help = "h"
 level = "error"
 files = ["a"]
 match = { kind = "assert" }
+fix = { delete = true, safe = true }
 [rules.test]
 valid = []
 invalid = []
+fixed = [{ input = "assert x\n", output = "" }]
 "#;
         let value: toml::Value = toml::from_str(toml).unwrap();
         let rule = value["rules"][0].as_table().unwrap();
         let mut a: Vec<&String> = props.keys().collect();
         let mut b: Vec<&String> = rule.keys().collect();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+        let fix_props = props["fix"]["properties"].as_object().unwrap();
+        let mut a: Vec<&String> = fix_props.keys().collect();
+        a.sort();
+        assert_eq!(a, ["delete", "replace", "safe"]);
+        let test_props = props["test"]["properties"].as_object().unwrap();
+        let mut a: Vec<&String> = test_props.keys().collect();
+        let mut b: Vec<&String> = rule["test"].as_table().unwrap().keys().collect();
         a.sort();
         b.sort();
         assert_eq!(a, b);

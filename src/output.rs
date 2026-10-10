@@ -97,7 +97,7 @@ fn rule_is_unsafe_fix(rules: &[Box<dyn Rule>], code: &str) -> bool {
         .iter()
         .find(|r| r.code() == code)
         .or_else(|| rules.iter().find(|r| code.starts_with(r.category())))
-        .is_some_and(|r| r.is_unsafe_fix())
+        .is_some_and(|r| r.is_unsafe_fix_code(code))
 }
 
 /// Whether `reported` contains any violation that's fixable only via

@@ -381,6 +381,35 @@ fn config_exclude_applies_to_explicit_files() {
         .stdout("a.py\n");
 }
 
+#[test]
+fn broken_extend_is_a_hard_error() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("konform.toml"), "extend = \"nope.toml\"\n").unwrap();
+    std::fs::write(dir.path().join("a.py"), GOOD).unwrap();
+    konform(dir.path())
+        .args(["check", "--no-cache", "a.py"])
+        .assert()
+        .code(2)
+        .stderr(contains("cannot read extended config"));
+}
+
+#[test]
+fn extend_pulls_settings_from_the_base_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("base.toml"),
+        "[lint]\nignore = [\"KIS001\"]\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("konform.toml"), "extend = \"base.toml\"\n").unwrap();
+    std::fs::write(dir.path().join("a.py"), BAD).unwrap();
+    konform(dir.path())
+        .args(["check", "--no-cache", "a.py"])
+        .assert()
+        .success()
+        .stderr(contains("KIS001").not());
+}
+
 // ---------------------------------------------------------------------------
 // check --statistics / --exit-zero / output formats / --output-file
 // ---------------------------------------------------------------------------

@@ -165,6 +165,15 @@ pub struct Config {
     /// neither is set, defaults to `[".", "src"]`.
     #[serde(skip)]
     pub src: Vec<String>,
+
+    // ── Inheritance ───────────────────────────────────────────────────────
+    /// Config files merged in through `extend`, nearest first.
+    #[serde(skip)]
+    pub extends: Vec<PathBuf>,
+    /// Problems with the config itself, such as a broken `extend` chain.
+    /// The CLI exits on them; the language server shows them.
+    #[serde(skip)]
+    pub errors: Vec<String>,
 }
 
 impl Default for Config {
@@ -179,6 +188,8 @@ impl Default for Config {
             config_dir: None,
             ignore_noqa: false,
             src: vec![".".to_owned(), "src".to_owned()],
+            extends: vec![],
+            errors: vec![],
         }
     }
 }
@@ -366,14 +377,7 @@ pub fn load_config(start: Option<&Path>, explicit_path: Option<&Path>) -> Config
         }
     };
 
-    // Extract [tool.konform] or top-level [konform] section.
-    let section = if path.file_name().is_some_and(|n| n == "pyproject.toml") {
-        raw.get("tool").and_then(|t| t.get("konform")).cloned()
-    } else {
-        raw.get("konform").cloned().or(Some(raw.clone()))
-    };
-
-    let section = match section {
+    let section = match konform_section(&raw, &path) {
         Some(s) => s,
         None => {
             return Config {
@@ -383,8 +387,17 @@ pub fn load_config(start: Option<&Path>, explicit_path: Option<&Path>) -> Config
         }
     };
 
+    // ── Inheritance: lay this file over the ones it `extend`s ──────────────
+    let mut chain = vec![path.canonicalize().unwrap_or_else(|_| path.clone())];
+    let (section, errors) = match resolve_extend(section.clone(), &path, &mut chain) {
+        Ok(merged) => (merged, vec![]),
+        Err(e) => (section, vec![e]),
+    };
+
     let mut cfg = Config::deserialize(section.clone()).unwrap_or_default();
     cfg.config_dir = config_dir;
+    cfg.extends = chain.split_off(1);
+    cfg.errors = errors;
 
     // ── Module-probe search roots (mirrors Ruff's `src` resolution order) ───
     // `src` is intentionally not part of the typed `Config` struct above: it
@@ -412,6 +425,94 @@ pub fn load_config(start: Option<&Path>, explicit_path: Option<&Path>) -> Config
     }
 
     cfg
+}
+
+/// The konform table of a parsed config file: `[tool.konform]` in a
+/// `pyproject.toml`, else `[konform]` or the whole file.
+fn konform_section(raw: &toml::Value, path: &Path) -> Option<toml::Value> {
+    if path.file_name().is_some_and(|n| n == "pyproject.toml") {
+        raw.get("tool").and_then(|t| t.get("konform")).cloned()
+    } else {
+        raw.get("konform").cloned().or(Some(raw.clone()))
+    }
+}
+
+/// Resolve `extend = "path"` in `section` (read from `path`): load that
+/// file's konform table, resolve its own `extend`, then lay `section` over
+/// it (see [`merge_toml`]). `chain` holds the files seen so far, starting
+/// with the root; each extended file is appended.
+fn resolve_extend(
+    mut section: toml::Value,
+    path: &Path,
+    chain: &mut Vec<PathBuf>,
+) -> Result<toml::Value, String> {
+    let Some(extend) = section.as_table_mut().and_then(|t| t.remove("extend")) else {
+        return Ok(section);
+    };
+    let Some(target) = extend.as_str() else {
+        return Err(format!("{}: `extend` must be a path", path.display()));
+    };
+    let base_path = expand_home(target);
+    let base_path = match path.parent() {
+        Some(dir) if base_path.is_relative() => dir.join(base_path),
+        _ => base_path,
+    };
+    let base_path = base_path.canonicalize().map_err(|e| {
+        format!(
+            "{}: cannot read extended config {}: {e}",
+            path.display(),
+            base_path.display()
+        )
+    })?;
+    if chain.contains(&base_path) {
+        return Err(format!(
+            "{}: `extend` cycle through {}",
+            path.display(),
+            base_path.display()
+        ));
+    }
+    chain.push(base_path.clone());
+
+    let content = std::fs::read_to_string(&base_path)
+        .map_err(|e| format!("cannot read extended config {}: {e}", base_path.display()))?;
+    let raw: toml::Value = toml::from_str(&content)
+        .map_err(|e| format!("{}: invalid TOML: {e}", base_path.display()))?;
+    let base =
+        konform_section(&raw, &base_path).unwrap_or_else(|| toml::Value::Table(Default::default()));
+    let mut merged = resolve_extend(base, &base_path, chain)?;
+    merge_toml(&mut merged, section);
+    Ok(merged)
+}
+
+/// Lay `over` onto `base`: tables merge key by key, anything else
+/// (strings, lists, arrays of tables) in `over` replaces `base`'s value.
+fn merge_toml(base: &mut toml::Value, over: toml::Value) {
+    match (base, over) {
+        (toml::Value::Table(base), toml::Value::Table(over)) => {
+            for (key, value) in over {
+                match base.get_mut(&key) {
+                    Some(existing) => merge_toml(existing, value),
+                    None => {
+                        base.insert(key, value);
+                    }
+                }
+            }
+        }
+        (base, over) => *base = over,
+    }
+}
+
+/// Expand a leading `~/` to the home directory.
+fn expand_home(path: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    expand_home_in(path, home)
+}
+
+fn expand_home_in(path: &str, home: Option<std::ffi::OsString>) -> PathBuf {
+    match (path.strip_prefix("~/"), home) {
+        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => PathBuf::from(path),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +573,163 @@ pub fn resolve_python(config: &Config) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── extend ───────────────────────────────────────────────────────────
+
+    fn write(dir: &Path, name: &str, content: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn extend_lays_the_child_over_the_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "shared/konform.toml",
+            "exclude = [\"gen/**\"]\n\
+             [lint]\nselect = [\"KIS\"]\nignore = [\"KIS002\"]\n\
+             [lint.module-only-imports]\nexceptions = [\"typing\"]\nlevel = \"warning\"\n",
+        );
+        let child = write(
+            tmp.path(),
+            "proj/pyproject.toml",
+            "[tool.konform]\nextend = \"../shared/konform.toml\"\n\
+             [tool.konform.lint]\nignore = []\n\
+             [tool.konform.lint.module-only-imports]\nlevel = \"error\"\n",
+        );
+        let cfg = load_config(None, Some(&child));
+        assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
+        assert_eq!(cfg.lint.select, ["KIS"]);
+        assert!(
+            cfg.lint.ignore.is_empty(),
+            "lists in the child replace the base's"
+        );
+        assert_eq!(cfg.exclude, ["gen/**"]);
+        let rule = cfg.rule_config("module-only-imports");
+        assert_eq!(rule["level"].as_str(), Some("error"));
+        assert_eq!(
+            rule["exceptions"][0].as_str(),
+            Some("typing"),
+            "tables merge"
+        );
+        // Paths stay relative to the project, not the shared file.
+        assert_eq!(cfg.config_dir.as_deref(), child.parent());
+        assert_eq!(
+            cfg.extends,
+            [tmp.path()
+                .join("shared/konform.toml")
+                .canonicalize()
+                .unwrap()]
+        );
+    }
+
+    #[test]
+    fn extend_chains_and_reads_pyproject_bases() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "org/pyproject.toml",
+            "[tool.konform.lint]\nselect = [\"KIS\"]\nlevel = \"warning\"\n",
+        );
+        write(
+            tmp.path(),
+            "team/konform.toml",
+            "extend = \"../org/pyproject.toml\"\n[lint]\nlevel = \"error\"\n",
+        );
+        let child = write(
+            tmp.path(),
+            "proj/konform.toml",
+            "extend = \"../team/konform.toml\"\n",
+        );
+        let cfg = load_config(None, Some(&child));
+        assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
+        assert_eq!(cfg.lint.select, ["KIS"]);
+        assert_eq!(cfg.lint.level, Level::Error);
+        assert_eq!(cfg.extends.len(), 2);
+        assert!(cfg.extends[0].ends_with("team/konform.toml"));
+    }
+
+    #[test]
+    fn extend_cycles_and_missing_files_are_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = write(
+            tmp.path(),
+            "a.toml",
+            "extend = \"b.toml\"\n[lint]\nselect = [\"KIS\"]\n",
+        );
+        write(tmp.path(), "b.toml", "extend = \"a.toml\"\n");
+        let cfg = load_config(None, Some(&a));
+        assert!(cfg.errors[0].contains("`extend` cycle"), "{:?}", cfg.errors);
+        // The file's own settings still apply.
+        assert_eq!(cfg.lint.select, ["KIS"]);
+
+        let c = write(tmp.path(), "c.toml", "extend = \"missing.toml\"\n");
+        let cfg = load_config(None, Some(&c));
+        assert!(
+            cfg.errors[0].contains("cannot read extended config"),
+            "{:?}",
+            cfg.errors
+        );
+    }
+
+    #[test]
+    fn extend_must_be_a_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write(tmp.path(), "konform.toml", "extend = 3\n");
+        let cfg = load_config(None, Some(&path));
+        assert!(
+            cfg.errors[0].contains("`extend` must be a path"),
+            "{:?}",
+            cfg.errors
+        );
+    }
+
+    #[test]
+    fn extend_accepts_an_absolute_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = write(
+            tmp.path(),
+            "shared/base.toml",
+            "[lint]\nselect = [\"KIS\"]\n",
+        );
+        let child = write(
+            tmp.path(),
+            "proj/konform.toml",
+            &format!("extend = {:?}\n", base.to_str().unwrap()),
+        );
+        let cfg = load_config(None, Some(&child));
+        assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
+        assert_eq!(cfg.lint.select, ["KIS"]);
+    }
+
+    #[test]
+    fn a_leading_tilde_means_the_home_directory() {
+        let home = Some(std::ffi::OsString::from("/home/me"));
+        assert_eq!(
+            expand_home_in("~/shared/konform.toml", home.clone()),
+            PathBuf::from("/home/me").join("shared/konform.toml")
+        );
+        // No home known, or no tilde: the path is used as written.
+        assert_eq!(expand_home_in("~/x.toml", None), PathBuf::from("~/x.toml"));
+        assert_eq!(
+            expand_home_in("../x.toml", home),
+            PathBuf::from("../x.toml")
+        );
+    }
+
+    #[test]
+    fn merge_toml_merges_tables_and_replaces_everything_else() {
+        let mut base: toml::Value =
+            toml::from_str("a = 1\nlist = [1, 2]\n[t]\nx = 1\ny = 2\n").unwrap();
+        let over: toml::Value = toml::from_str("list = [3]\n[t]\ny = 3\nz = 4\n").unwrap();
+        merge_toml(&mut base, over);
+        let want: toml::Value =
+            toml::from_str("a = 1\nlist = [3]\n[t]\nx = 1\ny = 3\nz = 4\n").unwrap();
+        assert_eq!(base, want);
+    }
 
     #[test]
     fn exclude_globs_match_relative_to_the_config_dir() {

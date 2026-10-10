@@ -48,6 +48,25 @@ Each rule's settings live in a table keyed by a stable *config name* (shown by
 [`noqa-aliases`](suppression.md#aliasing-noqa-codes) covering old comments)
 never forces a config rewrite.
 
+## Sharing configuration
+
+`extend` pulls in another config file and lays this one over it, so several projects can
+share a base:
+
+```toml
+[tool.konform]
+extend = "../shared/konform.toml"   # relative to this file; `~/` works too
+
+[tool.konform.lint]
+ignore = ["KIS002"]                 # replaces the base's `ignore`
+```
+
+The base is a `konform.toml` or a `pyproject.toml` and may `extend` another file in turn.
+Tables (like `[tool.konform.lint.module-only-imports]`) merge key by key; any other value,
+lists included, replaces the base's. Paths in the merged settings (`src`, `exclude`,
+`per-file-ignores`, `rules_file`) stay relative to **this** project, not to the base
+file. A missing base or an `extend` cycle is an error.
+
 ## Module search roots
 
 [KIS001](rules/kis001.md) must decide whether an imported name is a module or an

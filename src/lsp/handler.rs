@@ -686,7 +686,7 @@ fn show_config_errors(connection: &Connection, session: &Arc<RwLock<Session>>) {
     let params = ShowMessageParams {
         typ: MessageType::WARNING,
         message: format!(
-            "konform: {} invalid rule configuration(s), skipped:\n{}",
+            "konform: {} configuration problem(s):\n{}",
             errors.len(),
             errors.join("\n")
         ),
@@ -738,6 +738,13 @@ fn watch_globs(config: &crate::config::Config) -> Vec<String> {
             if !globs.contains(&glob) {
                 globs.push(glob);
             }
+        }
+    }
+    // Files pulled in through `extend` may live outside the workspace.
+    for file in &config.extends {
+        let glob = file.to_string_lossy().into_owned();
+        if !globs.contains(&glob) {
+            globs.push(glob);
         }
     }
     globs

@@ -166,12 +166,18 @@ impl Session {
         eprintln!("konform server: config reloaded");
     }
 
-    /// Configuration problems reported by the rules (e.g. invalid KST
-    /// rules). The valid remainder keeps running.
+    /// Configuration problems: a broken `extend` chain, or ones reported by
+    /// the rules (e.g. invalid KST rules). The valid remainder keeps running.
     pub fn config_errors(&self) -> Vec<String> {
-        self.rules
+        let rule_errors = self
+            .rules
             .iter()
-            .flat_map(|r| r.config_errors(self.config.rule_config(r.config_name())))
+            .flat_map(|r| r.config_errors(self.config.rule_config(r.config_name())));
+        self.config
+            .errors
+            .iter()
+            .cloned()
+            .chain(rule_errors)
             .collect()
     }
 

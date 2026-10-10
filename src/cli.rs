@@ -245,6 +245,11 @@ pub struct CheckArgs {
     #[arg(long, default_value_t = false)]
     pub show_files: bool,
 
+    /// Print the settings in effect (config file, `extend` chain, CLI
+    /// overrides applied, enabled rules) as TOML, then exit 0.
+    #[arg(long, default_value_t = false)]
+    pub show_settings: bool,
+
     /// Output serialisation format for violations.
     ///
     /// `json` writes a JSON array to stdout; all other formats write to stderr.

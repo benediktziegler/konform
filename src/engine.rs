@@ -128,21 +128,31 @@ fn noqa_audit(ctx: &FileContext, rules: &[Box<dyn Rule>], config: &Config) -> No
         .flat_map(|r| r.check(&raw, config.rule_config(r.config_name())))
         .collect();
     apply_per_file_ignores(&ctx.path, &mut violations, config);
-    let codes = audited
-        .iter()
+    let codes = enabled_codes(rules, config)
+        .into_iter()
+        .filter(|code| !code.starts_with("KNQ"))
+        .collect();
+    NoqaAudit { violations, codes }
+}
+
+/// Every code that `config` enables, KPT / KST ids included.
+pub fn enabled_codes(rules: &[Box<dyn Rule>], config: &Config) -> Vec<String> {
+    let selection = config.selection();
+    active_rules(rules, config)
         .flat_map(|r| {
             if r.gates_per_violation() {
+                // Without user rules the catalog holds only the umbrella
+                // entry (named like the rule itself), which reports nothing.
                 r.catalog(config.rule_config(r.config_name()))
                     .into_iter()
+                    .filter(|doc| doc.name != r.name() && selection.is_enabled(&doc.code))
                     .map(|doc| doc.code)
-                    .filter(|code| ctx.is_enabled(code))
                     .collect()
             } else {
                 vec![r.code().to_owned()]
             }
         })
-        .collect();
-    NoqaAudit { violations, codes }
+        .collect()
 }
 
 /// Drop the violations that `config.lint.per_file_ignores` suppresses for `path`.

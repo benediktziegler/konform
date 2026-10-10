@@ -410,6 +410,39 @@ fn extend_pulls_settings_from_the_base_file() {
         .stderr(contains("KIS001").not());
 }
 
+#[test]
+fn show_settings_prints_the_merged_settings_as_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("base.toml"),
+        "[lint]\nselect = [\"KIS\"]\nunfixable = [\"KIS002\"]\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("konform.toml"), "extend = \"base.toml\"\n").unwrap();
+    let out = konform(dir.path())
+        .args(["check", "--show-settings", "--ignore", "KIS002", "."])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let doc: toml::Value = toml::from_str(&String::from_utf8(out).unwrap()).unwrap();
+    let resolved = &doc["resolved"];
+    assert!(resolved["config-file"]
+        .as_str()
+        .unwrap()
+        .ends_with("konform.toml"));
+    assert!(resolved["extends"][0]
+        .as_str()
+        .unwrap()
+        .ends_with("base.toml"));
+    assert_eq!(resolved["enabled-rules"], toml::Value::from(vec!["KIS001"]));
+    let lint = &doc["konform"]["lint"];
+    assert_eq!(lint["select"], toml::Value::from(vec!["KIS"]));
+    assert_eq!(lint["ignore"], toml::Value::from(vec!["KIS002"]));
+    assert_eq!(lint["unfixable"], toml::Value::from(vec!["KIS002"]));
+}
+
 // ---------------------------------------------------------------------------
 // check --statistics / --exit-zero / output formats / --output-file
 // ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 ### Feat
 
+- **cli**: add check --show-settings
 - **config**: inherit settings from another file with extend
 - **kst**: add replace and delete autofixes to structural rules
 - **config**: add fixable and unfixable lint settings

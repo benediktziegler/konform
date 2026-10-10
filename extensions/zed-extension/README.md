@@ -6,17 +6,17 @@ Python linter and language server.
 ## Features
 
 * **Inline diagnostics** for every open `.py` file (push + pull, LSP 3.17)
-* **KIS001** — flags `from X import obj` imports that should be `import X`
-* **KIS002** — flags unnecessary import aliases (`from X import Y as Z` when the alias buys nothing)
-* **KNQ001** — requires a reason on every `# noqa` comment (`# noqa: CODE  # why`); opt-in via `extend-select`
-* **KNQ002** — requires the reason to be its own `# ...` comment, with a safe fix; opt-in via `extend-select`
-* **KPT** — user-defined regex pattern rules from `konform_patterns.toml`
-* **Code actions** — "Konform: Fix <rule-name> [<rule-code>]" per violation, and "Konform: Fix all auto-fixable problems" for the whole file
+* **KIS001**: flags `from X import obj` imports that should be `import X`
+* **KIS002**: flags unnecessary import aliases (`from X import Y as Z` when the alias buys nothing)
+* **KNQ001**: requires a reason on every `# noqa` comment (`# noqa: CODE  # why`); opt-in via `extend-select`
+* **KNQ002**: requires the reason to be its own `# ...` comment, with a safe fix; opt-in via `extend-select`
+* **KPT**: user-defined regex pattern rules from `konform_patterns.toml`
+* **Code actions**: "Konform: Fix <rule-name> [<rule-code>]" per violation, and "Konform: Fix all auto-fixable problems" for the whole file
 * **Auto-fix on save** via `textDocument/formatting`
 
 ## Installation
 
-No prerequisites — the extension auto-installs `konform` for you.
+No prerequisites: the extension auto-installs `konform` for you.
 
 From the Zed Extensions panel, click **Install Dev Extension** and select this
 directory. The extension is currently available as a dev extension only;
@@ -30,8 +30,8 @@ workspace and resolves the `konform` binary in this order:
 3. Otherwise, the extension downloads the standalone `konform` binary that
    matches your OS/architecture from the
    [GitHub releases](https://github.com/benediktziegler/konform/releases)
-   and caches it alongside the extension — no Python or Rust toolchain
-   required.
+   and caches it alongside the extension, so no Python or Rust toolchain
+   is needed.
 
 Prebuilt binaries are available for Linux (x86_64, aarch64, glibc), macOS
 (x86_64, aarch64) and Windows (x86_64). On other platforms, install `konform`

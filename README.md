@@ -6,7 +6,7 @@
 [![PyPI](https://img.shields.io/pypi/v/konform)](https://pypi.org/project/konform/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/benediktziegler/konform/blob/main/LICENSE)
 
-Multi-rule Python linter and language server — fast, configurable, and CI-ready.
+Multi-rule Python linter and language server: fast, configurable, and CI-ready.
 
 > **Work in progress.** konform is under active development. Rules,
 > configuration keys, CLI flags, and the LSP surface may change at any time,
@@ -24,9 +24,9 @@ encode a specific style (such as the
 module-only imports) rather than universal correctness, and the list keeps
 growing.
 
-- **Opinionated import rules** — enforce module-only imports (KIS001) and flag
+- **Opinionated import rules**: enforce module-only imports (KIS001) and flag
   needless `from X import Y as Z` aliases (KIS002).
-- **Project-specific rules** — define your own regex rules (KPT) in TOML, with
+- **Project-specific rules**: define your own regex rules (KPT) in TOML, with
   messages, file globs and optional replacements. No plugin code.
 - **Auto-fixes** with a Ruff-style safe/unsafe split.
 - **Built-in language server** that shares the CLI's engine.
@@ -54,7 +54,7 @@ uvx konform check src/
 pip install konform
 ```
 
-Wheels ship a pre-compiled Rust binary — no Rust installation needed at runtime.
+Wheels ship a pre-compiled Rust binary, so no Rust installation is needed at runtime.
 
 ## Example
 
@@ -137,7 +137,7 @@ releases are cut with [commitizen](https://commitizen-tools.github.io/commitizen
 ## Acknowledgements
 
 konform exists because [Ruff](https://github.com/astral-sh/ruff) doesn't (yet)
-cover rules like KIS001/KIS002 — konform was built to fill that gap, and
+cover rules like KIS001/KIS002; konform was built to fill that gap, and
 Ruff's design was a direct inspiration for how konform is configured, how it
 reports violations, and how it resolves `src` search roots.
 
@@ -145,7 +145,7 @@ konform is also built on top of several excellent open-source projects, especial
 
 - [`ruff_python_parser`](https://crates.io/crates/ruff_python_parser),
   [`ruff_python_ast`](https://crates.io/crates/ruff_python_ast), and
-  [`ruff_text_size`](https://crates.io/crates/ruff_text_size) — Ruff's own
+  [`ruff_text_size`](https://crates.io/crates/ruff_text_size): Ruff's own
   Python parser and AST, published standalone on crates.io.
 
 Thanks to all the maintainers of all used open-source projects.

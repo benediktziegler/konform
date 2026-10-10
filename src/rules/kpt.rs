@@ -1,4 +1,4 @@
-//! KPT001 — Konform Pattern: user-defined regex pattern violations.
+//! KPT001: Konform Pattern: user-defined regex pattern violations.
 //!
 //! Checks Python (and other) source files against a set of user-defined
 //! regular-expression patterns.  Patterns can be supplied from three sources,
@@ -10,18 +10,18 @@
 //!    `[tool.konform.lint.user-defined-patterns]`  (`.toml` or `.yaml`).
 //! 3. **Auto-discovered** `konform_patterns.toml` next to the config file.
 //! 4. **Auto-discovered** `konform_patterns.yaml` (legacy / migration compat).
-//! 5. **No patterns** — the rule runs but emits zero violations.
+//! 5. **No patterns**: the rule runs but emits zero violations.
 //!
 //! Each pattern entry carries:
-//! * `id`        — violation code used in output and `# noqa` suppression
-//! * `message`   — human-readable description
-//! * `pattern`   — regular expression matched against each line
-//! * `files`     — optional list of glob patterns; when absent the pattern
+//! * `id`:         violation code used in output and `# noqa` suppression
+//! * `message`:    human-readable description
+//! * `pattern`:    regular expression matched against each line
+//! * `files`:      optional list of glob patterns; when absent the pattern
 //!   applies to every file
-//! * `level`     — `"error"` or `"warning"`; falls back to
+//! * `level`:      `"error"` or `"warning"`; falls back to
 //!   `[tool.konform.lint.user-defined-patterns].level` (default: `"warning"`)
-//! * `help`      — optional guidance text surfaced alongside the violation
-//! * `sub_rules` — ordered list of refinements; the first sub-rule whose
+//! * `help`:       optional guidance text surfaced alongside the violation
+//! * `sub_rules`: ordered list of refinements; the first sub-rule whose
 //!   pattern(s) match the already-flagged line overrides `message` and `help`
 
 use super::docs::{DocSection, Example, RuleDocs, RuleOption};
@@ -73,7 +73,7 @@ where
 /// Sub-rules are tested in declaration order; the first match wins.
 #[derive(Debug, Clone, Deserialize)]
 struct RawSubRule {
-    /// One or more regexes — a match on **any** of them fires this sub-rule.
+    /// One or more regexes: a match on **any** of them fires this sub-rule.
     /// Accepts a bare string or a TOML / YAML list of strings.
     #[serde(deserialize_with = "deserialize_string_or_vec")]
     pattern: Vec<String>,
@@ -86,7 +86,7 @@ struct RawSubRule {
 struct RawPattern {
     id: String,
     message: String,
-    /// One or more regexes — a match on **any** of them fires this rule.
+    /// One or more regexes: a match on **any** of them fires this rule.
     /// Accepts a bare string or a TOML / YAML list of strings.
     #[serde(deserialize_with = "deserialize_string_or_vec")]
     pattern: Vec<String>,
@@ -97,7 +97,7 @@ struct RawPattern {
     /// Optional guidance shown alongside the violation message.
     #[serde(default)]
     help: Option<String>,
-    /// Ordered refinements — first match overrides `message` / `help`.
+    /// Ordered refinements: first match overrides `message` / `help`.
     #[serde(default)]
     sub_rules: Vec<RawSubRule>,
     /// When `true`, match against the whole file source with the DOTALL flag
@@ -148,7 +148,7 @@ struct CompiledPattern {
     raw_files: Vec<String>,
     message: String,
     help: Option<String>,
-    /// One or more compiled regexes — a match on any fires this rule.
+    /// One or more compiled regexes: a match on any fires this rule.
     regexes: Vec<Regex>,
     /// `None` → applies to every file; `Some` → only files matching any glob.
     files: Option<GlobSet>,
@@ -165,7 +165,7 @@ struct CompiledPattern {
 impl CompiledPattern {
     /// Markdown summary printed by `konform rule --explain <ID>`.
     fn explain(&self) -> String {
-        let mut out = format!("# {} — {}\n\n", self.id, self.message);
+        let mut out = format!("# {}: {}\n\n", self.id, self.message);
         out.push_str(&format!("- **Level:** {}\n", self.level));
         out.push_str(&format!("- **Source:** `{}`\n", self.source));
         let files = if self.raw_files.is_empty() {
@@ -237,7 +237,7 @@ pub(super) fn glob_matches(
 // Rule struct
 // ---------------------------------------------------------------------------
 
-/// KPT001 — user-defined regex pattern rule.
+/// KPT001: user-defined regex pattern rule.
 pub struct KptRule {
     /// Directory containing `pyproject.toml` / `konform.toml`.
     /// Used to resolve relative `rules_file` paths and to auto-discover
@@ -756,7 +756,7 @@ fn compile_patterns(
                         Ok(re) => Some(re),
                         Err(e) => {
                             eprintln!(
-                                "konform: skipping pattern '{}' — invalid regex '{}': {e}",
+                                "konform: skipping pattern '{}': invalid regex '{}': {e}",
                                 id, p
                             );
                             None
@@ -812,8 +812,8 @@ fn compile_patterns(
                             Ok(re) => Some(re),
                             Err(e) => {
                                 eprintln!(
-                                    "konform: skipping sub-rule pattern in '{}' \
-                                     — invalid regex '{}': {e}",
+                                    "konform: skipping sub-rule pattern in '{}': \
+                                     invalid regex '{}': {e}",
                                     id, p
                                 );
                                 None
@@ -1082,7 +1082,7 @@ files   = ["src/**/*.py"]
 "#,
         );
 
-        // Absolute path — should be stripped to `src/pkg/mod.py` and match.
+        // Absolute path: should be stripped to `src/pkg/mod.py` and match.
         let v = rule.check(
             &FileContext::from_source(abs_src, "print('x')\n".to_owned()),
             &cfg,
@@ -1093,7 +1093,7 @@ files   = ["src/**/*.py"]
             "absolute path under config_dir should match src/**/*.py"
         );
 
-        // Absolute path outside src/ — must not match.
+        // Absolute path outside src/: must not match.
         let abs_other = tmp.path().join("tests").join("test_mod.py");
         let v2 = rule.check(
             &FileContext::from_source(abs_other, "print('x')\n".to_owned()),
@@ -1380,7 +1380,7 @@ message = "hit."
 pattern = ['[', '(']
 "#,
         );
-        // All patterns invalid — rule is silently dropped, no violations, no panic.
+        // All patterns invalid: rule is silently dropped, no violations, no panic.
         let v = rule().check(&ctx("anything\n"), &cfg);
         assert!(v.is_empty());
     }
@@ -1950,7 +1950,7 @@ pattern     = 'print\(.*?\)'
 replacement = "logger.info()"
 "#,
         );
-        // Source has no match — fix should be a no-op.
+        // Source has no match: fix should be a no-op.
         let result = rule().fix(&ctx("x = 1\n"), &cfg).unwrap();
         assert!(result.is_none());
     }

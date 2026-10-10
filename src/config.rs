@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 // LintConfig
 // ---------------------------------------------------------------------------
 
-/// `[tool.konform.lint]` — rule selection, suppression, and per-rule settings.
+/// `[tool.konform.lint]`: rule selection, suppression, and per-rule settings.
 ///
 /// Mirrors Ruff's `[tool.ruff.lint]` split: project-wide settings
 /// (interpreter, cache, search roots) live directly under `[tool.konform]`,
@@ -353,10 +353,10 @@ pub fn load_config(start: Option<&Path>, explicit_path: Option<&Path>) -> Config
 /// by checking common virtual-environment locations under `project_root`.
 ///
 /// Discovery order:
-/// 1. `.venv/bin/python3`  — hatch (`path = ".venv"`), uv, plain `python -m venv`
-/// 2. `venv/bin/python3`   — common alternative name
-/// 3. `.env/bin/python3`   — another common name
-/// 4. `python3` on `$PATH` — system fallback
+/// 1. `.venv/bin/python3`:   hatch (`path = ".venv"`), uv, plain `python -m venv`
+/// 2. `venv/bin/python3`:    common alternative name
+/// 3. `.env/bin/python3`:    another common name
+/// 4. `python3` on `$PATH`: system fallback
 ///
 /// On Windows `bin/` is replaced by `Scripts/` and `python3` by `python.exe`.
 pub fn discover_python(project_root: &Path) -> PathBuf {
@@ -379,7 +379,7 @@ pub fn discover_python(project_root: &Path) -> PathBuf {
 /// Resolve the Python interpreter to use for module probing.
 ///
 /// Priority:
-/// 1. `[tool.konform] python = "…"` — explicit config
+/// 1. `[tool.konform] python = "…"`: explicit config
 /// 2. Auto-discovered venv in `config_dir` (see [`discover_python`])
 /// 3. `python3` / `python.exe` on `$PATH`
 pub fn resolve_python(config: &Config) -> PathBuf {

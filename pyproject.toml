@@ -8,7 +8,7 @@ version = "0.4.0"
 authors = [
   { name = "Benedikt Ziegler", email = "benediktziegler@gmail.com" },
 ]
-description     = "Multi-rule Python linter and language server — fast, configurable, CI-ready"
+description     = "Multi-rule Python linter and language server: fast, configurable, CI-ready"
 readme          = "README.md"
 requires-python = ">=3.10"
 keywords        = ["konform", "python", "linter", "imports", "language-server"]

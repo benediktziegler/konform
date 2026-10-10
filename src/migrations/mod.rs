@@ -97,7 +97,7 @@ fn konform_section_mut(doc: &mut DocumentMut, is_pyproject: bool) -> Option<&mut
 ///
 /// Returns `Some(new_content)` when at least one migration applied, `None`
 /// when the file is already current (or isn't valid TOML / has no konform
-/// section to migrate). Does not touch disk — callers decide whether/how to
+/// section to migrate). Does not touch disk: callers decide whether/how to
 /// persist the result.
 pub fn migrate_content(path: &Path, content: &str) -> Option<(String, Vec<MigrationReport>)> {
     let is_pyproject = path.file_name().is_some_and(|n| n == "pyproject.toml");

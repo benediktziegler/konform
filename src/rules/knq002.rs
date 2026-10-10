@@ -1,4 +1,4 @@
-//! KNQ002 — Konform NoQa style: put the reason in its own comment.
+//! KNQ002: Konform NoQa style: put the reason in its own comment.
 //!
 //! A reason glued onto the directive reads differently to every tool that
 //! parses suppression comments (mypy, for one, rejects stray text after
@@ -6,7 +6,7 @@
 //! same way everywhere, and it makes the reason easy to find:
 //!
 //! ```python
-//! # Bad — KNQ002
+//! # Bad: KNQ002
 //! from os.path import join  # noqa: KIS001 re-exported for plugins
 //! from os.path import join  # noqa: KIS001 - re-exported for plugins
 //!
@@ -18,7 +18,7 @@
 //! set of suppressed codes does not change. Comments that already carry a
 //! `#`-separated reason, or no reason at all (that is KNQ001's concern), are
 //! left alone. So is `# noqa: <non-code text>`, which may be a mistyped code
-//! such as `# noqa: kis001` — rewriting it would hide the typo.
+//! such as `# noqa: kis001`: rewriting it would hide the typo.
 //!
 //! Like KNQ001 the rule is **opt-in** and never consults
 //! [`super::has_noqa`]: a bare `# noqa` would otherwise suppress the very

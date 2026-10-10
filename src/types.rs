@@ -35,7 +35,7 @@ impl std::str::FromStr for Level {
 }
 
 // ---------------------------------------------------------------------------
-// Violation  (Step 3 — typed replacement for the serde_json::Value blobs)
+// Violation  (Step 3: typed replacement for the serde_json::Value blobs)
 // ---------------------------------------------------------------------------
 
 /// A single rule violation produced by a checker.

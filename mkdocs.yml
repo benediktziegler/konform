@@ -1,5 +1,5 @@
 site_name: konform
-site_description: Multi-rule Python linter and language server — fast, configurable, and CI-ready.
+site_description: Multi-rule Python linter and language server, fast, configurable, and CI-ready.
 site_url: https://benediktziegler.github.io/konform/
 repo_url: https://github.com/benediktziegler/konform
 repo_name: benediktziegler/konform

@@ -1,4 +1,4 @@
-# konform_patterns.toml — project-specific KPT pattern rules
+# konform_patterns.toml: project-specific KPT pattern rules
 #
 # This file is auto-discovered by konform when it sits alongside
 # pyproject.toml / konform.toml.  It can also be referenced explicitly:
@@ -9,14 +9,14 @@
 # Patterns are matched line-by-line against the source text using Rust
 # regular expressions (https://docs.rs/regex).  Every entry needs:
 #
-#   id      — violation code shown in output and used for `# noqa` suppression
-#   message — human-readable description of the violation
-#   pattern — regex matched against each source line
+#   id:       violation code shown in output and used for `# noqa` suppression
+#   message: human-readable description of the violation
+#   pattern: regex matched against each source line
 #
 # Optional per-entry fields:
 #
-#   files   — list of glob patterns; when omitted the rule applies to all files
-#   level   — "error" or "warning" (default: inherits [tool.konform.lint.user-defined-patterns].level)
+#   files:    list of glob patterns; when omitted the rule applies to all files
+#   level:    "error" or "warning" (default: inherits [tool.konform.lint.user-defined-patterns].level)
 #
 # Suppress a specific violation on a line:
 #   print(x)  # noqa: KPT001
@@ -28,20 +28,20 @@
 
 [[rules]]
 id      = "KPT001"
-message = "Remove bare print() — use the project logger instead."
+message = "Remove bare print(): use the project logger instead."
 pattern = '^\s*print\s*\('
 files   = ["python/**/*.py", "src/**/*.py"]
 level   = "warning"
 
 [[rules]]
 id      = "KPT002"
-message = "Remove breakpoint() — debugging artefact must not be committed."
+message = "Remove breakpoint(): debugging artefact must not be committed."
 pattern = '^\s*breakpoint\s*\(\s*\)'
 level   = "error"
 
 [[rules]]
 id      = "KPT003"
-message = "Remove pdb / ipdb trace — debugging artefact must not be committed."
+message = "Remove pdb / ipdb trace: debugging artefact must not be committed."
 pattern = '(pdb|ipdb)\s*\.\s*set_trace\s*\('
 level   = "error"
 
@@ -64,6 +64,6 @@ level   = "error"
 
 [[rules]]
 id      = "KPT012"
-message = "HACK comment detected — prefer a proper fix or a tracked issue."
+message = "HACK comment detected: prefer a proper fix or a tracked issue."
 pattern = '#\s*HACK'
 level   = "warning"

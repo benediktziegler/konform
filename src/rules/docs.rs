@@ -166,9 +166,9 @@ fn status<R: Rule + ?Sized>(rule: &R) -> String {
 const LEGEND: &str = "\
 ## Legend
 
-- ✅ — enabled by default
-- 🛠️ — the rule has an auto-fix (`--fix`)
-- ⚠️ — the fix is unsafe and needs `--unsafe-fixes`
+- ✅: enabled by default
+- 🛠️: the rule has an auto-fix (`--fix`)
+- ⚠️: the fix is unsafe and needs `--unsafe-fixes`
 ";
 
 /// The rules index: one table of every rule, ordered by prefix, then code.

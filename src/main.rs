@@ -28,7 +28,7 @@ use output::{
 };
 use owo_colors::OwoColorize;
 use rayon::prelude::*;
-use rules::{all_rules, merge_noqa};
+use rules::{all_rules, merge_noqa, FileContext};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -105,6 +105,15 @@ fn print_unified_diff(path: &Path, original: &str, modified: &str) {
     }
 }
 
+/// What [`add_noqa`] did to one file.
+#[derive(Debug, Default)]
+struct AddedNoqa {
+    /// The annotated source, or `None` if nothing changed.
+    source: Option<String>,
+    /// 1-based lines that could not take a `# noqa` comment.
+    skipped: Vec<usize>,
+}
+
 /// Appends `# noqa: CODE` suppressions to source lines that have violations.
 ///
 /// - Bare `# noqa` suppresses everything → left unchanged.
@@ -112,16 +121,19 @@ fn print_unified_diff(path: &Path, original: &str, modified: &str) {
 /// - No `# noqa` → `  # noqa: CODES` is appended.
 /// - With a `reason`, new comments get `  # REASON` appended, and existing
 ///   `# noqa` comments that KNQ001 flags for lacking one are given it.
-/// - Returns the modified source, or `None` if no changes were made.
-fn add_noqa_to_source(
+/// - A line that can't take a comment (it ends inside a multi-line string,
+///   or after a `\` continuation) is left alone and listed in `skipped`.
+/// - Line endings (`\n` / `\r\n`) are preserved.
+fn add_noqa(
+    path: &Path,
     source: &str,
     violations: &[serde_json::Value],
     reason: Option<&str>,
-) -> Option<String> {
-    use std::collections::BTreeSet;
+) -> AddedNoqa {
+    use std::collections::{BTreeMap, BTreeSet};
 
     if violations.is_empty() {
-        return None;
+        return AddedNoqa::default();
     }
 
     // Collect rule codes per 1-based line number.
@@ -150,29 +162,66 @@ fn add_noqa_to_source(
     }
 
     if by_line.is_empty() {
-        return None;
+        return AddedNoqa::default();
     }
 
-    let trailing_newline = source.ends_with('\n');
-    let mut out = String::with_capacity(source.len() + violations.len() * 24);
-    let mut changed = false;
-
-    for (idx, line) in source.lines().enumerate() {
-        let line_no = idx + 1;
-        if let Some(new_codes) = by_line.get(&line_no) {
-            out.push_str(&merge_noqa(line, new_codes, reason, &mut changed));
-        } else {
-            out.push_str(line);
+    // The new text of every changed line (0-based), with the codes it adds.
+    let segments: Vec<&str> = source.split_inclusive('\n').collect();
+    let mut changes: BTreeMap<usize, (String, &BTreeSet<String>)> = BTreeMap::new();
+    for (line_no, codes) in &by_line {
+        let Some(segment) = segments.get(line_no - 1) else {
+            continue;
+        };
+        let line = segment.trim_end_matches(['\n', '\r']);
+        let mut changed = false;
+        let new_line = merge_noqa(line, codes, reason, &mut changed);
+        if changed {
+            let eol = &segment[line.len()..];
+            changes.insert(line_no - 1, (format!("{new_line}{eol}"), codes));
         }
-        out.push('\n');
+    }
+    if changes.is_empty() {
+        return AddedNoqa::default();
     }
 
-    // Restore original trailing-newline state.
-    if !trailing_newline {
-        out.pop();
-    }
+    let render = |only: &dyn Fn(usize) -> bool| -> String {
+        segments
+            .iter()
+            .enumerate()
+            .map(|(idx, seg)| match changes.get(&idx) {
+                Some((new, _)) if only(idx) => new.as_str(),
+                _ => seg,
+            })
+            .collect()
+    };
+    let before = FileContext::from_source(path.to_path_buf(), source.to_owned());
+    let applies = |text: String, idxs: &[usize]| {
+        let after = FileContext::from_source(path.to_path_buf(), text);
+        rules::noqa_comments_apply(&before, &after, idxs.iter().map(|&i| (i, changes[&i].1)))
+    };
 
-    changed.then_some(out)
+    // Usually every line takes its comment; otherwise vet them one by one.
+    let all: Vec<usize> = changes.keys().copied().collect();
+    let (kept, skipped): (Vec<usize>, Vec<usize>) = if applies(render(&|_| true), &all) {
+        (all, vec![])
+    } else {
+        all.iter()
+            .partition(|&&idx| applies(render(&|i| i == idx), &[idx]))
+    };
+    AddedNoqa {
+        source: (!kept.is_empty()).then(|| render(&|i| kept.contains(&i))),
+        skipped: skipped.into_iter().map(|idx| idx + 1).collect(),
+    }
+}
+
+/// [`add_noqa`] for a Python snippet, returning only the new source.
+#[cfg(test)]
+fn add_noqa_to_source(
+    source: &str,
+    violations: &[serde_json::Value],
+    reason: Option<&str>,
+) -> Option<String> {
+    add_noqa(Path::new("x.py"), source, violations, reason).source
 }
 
 // ---------------------------------------------------------------------------
@@ -602,14 +651,23 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
     // ── --add-noqa: annotate violations in-place, then exit 0 ──────────────────
     if args.add_noqa {
         let stdin_key = stdin_display.to_string_lossy().into_owned();
+        let report_skipped = |path: &Path, skipped: &[usize]| {
+            for line in skipped {
+                eprintln!(
+                    "{} {}:{line}: cannot add `# noqa` here (the line ends inside a string or \
+after a `\\` continuation); suppress it on another line or fix it",
+                    "warning:".yellow().bold(),
+                    path.display()
+                );
+            }
+        };
         for (file_path_str, viols) in &violations {
             if wants_stdin && *file_path_str == stdin_key {
                 // stdin: write annotated source to stdout.
                 if let Some(ref src) = stdin_source {
-                    match add_noqa_to_source(src, viols, args.noqa_reason.as_deref()) {
-                        Some(modified) => print!("{modified}"),
-                        None => print!("{src}"),
-                    }
+                    let added = add_noqa(&stdin_display, src, viols, args.noqa_reason.as_deref());
+                    report_skipped(&stdin_display, &added.skipped);
+                    print!("{}", added.source.as_deref().unwrap_or(src));
                 }
             } else {
                 let path = PathBuf::from(file_path_str);
@@ -620,8 +678,9 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
                         continue;
                     }
                 };
-                if let Some(modified) = add_noqa_to_source(&src, viols, args.noqa_reason.as_deref())
-                {
+                let added = add_noqa(&path, &src, viols, args.noqa_reason.as_deref());
+                report_skipped(&path, &added.skipped);
+                if let Some(modified) = added.source {
                     if let Err(e) = std::fs::write(&path, &modified) {
                         eprintln!("error writing {}: {e}", path.display());
                     }
@@ -1445,6 +1504,78 @@ mod noqa_tests {
 
     fn viol(rule: &str, line: u64) -> serde_json::Value {
         serde_json::json!({"rule": rule, "line": line, "col": 1, "message": "test"})
+    }
+
+    // add_noqa: lines that can't take a comment ------------------------------
+
+    #[test]
+    fn add_noqa_skips_lines_ending_inside_a_string() {
+        let src = "x = f(\"\"\"a\nb\"\"\")\ny = 1\n";
+        let added = add_noqa(
+            Path::new("x.py"),
+            src,
+            &[viol("KPT001", 1), viol("KPT001", 3)],
+            None,
+        );
+        assert_eq!(added.skipped, [1]);
+        assert_eq!(
+            added.source.as_deref(),
+            Some("x = f(\"\"\"a\nb\"\"\")\ny = 1  # noqa: KPT001\n")
+        );
+    }
+
+    #[test]
+    fn add_noqa_ignores_violations_past_the_end_of_the_file() {
+        let src = "x = 1\n";
+        let added = add_noqa(Path::new("x.py"), src, &[viol("KPT001", 7)], None);
+        assert!(added.skipped.is_empty());
+        assert_eq!(added.source, None);
+    }
+
+    #[test]
+    fn add_noqa_leaves_lines_a_bare_noqa_already_covers() {
+        let src = "x = 1  # noqa\ny = 2\n";
+        let viols = [viol("KPT001", 1), viol("KPT001", 2)];
+        let added = add_noqa(Path::new("x.py"), src, &viols, None);
+        assert_eq!(
+            added.source.as_deref(),
+            Some("x = 1  # noqa\ny = 2  # noqa: KPT001\n")
+        );
+        // Nothing to do at all when the only line is already covered.
+        let added = add_noqa(Path::new("x.py"), "x = 1  # noqa\n", &viols[..1], None);
+        assert_eq!(added.source, None);
+        assert!(added.skipped.is_empty());
+    }
+
+    #[test]
+    fn add_noqa_skips_continuation_lines() {
+        let src = "x = 1 + \\\n    2\n";
+        let added = add_noqa(Path::new("x.py"), src, &[viol("KPT001", 1)], None);
+        assert_eq!(added.skipped, [1]);
+        assert_eq!(added.source, None);
+    }
+
+    #[test]
+    fn add_noqa_preserves_crlf_line_endings() {
+        let src = "from os.path import join\r\nx = 1\r\n";
+        let added = add_noqa(Path::new("x.py"), src, &[viol("KIS001", 1)], None);
+        assert_eq!(
+            added.source.as_deref(),
+            Some("from os.path import join  # noqa: KIS001\r\nx = 1\r\n")
+        );
+    }
+
+    #[test]
+    fn add_noqa_does_not_parse_non_python_files_as_python() {
+        // KPT can lint other file types; a plain text line always takes it.
+        let added = add_noqa(
+            Path::new("notes.txt"),
+            "TODO: x\n",
+            &[viol("KPT010", 1)],
+            None,
+        );
+        assert!(added.skipped.is_empty());
+        assert_eq!(added.source.as_deref(), Some("TODO: x  # noqa: KPT010\n"));
     }
 
     // merge_noqa ---------------------------------------------------------------

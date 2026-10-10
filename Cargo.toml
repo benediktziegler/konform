@@ -46,9 +46,9 @@ anyhow    = "1"
 
 # Python AST parsing — ruff's own parser, published on crates.io.
 # ruff_text_size provides TextRange / TextSize for source locations.
-ruff_python_parser = "0.0.15"
-ruff_python_ast    = "0.0.15"
-ruff_text_size     = "0.0.15"
+ruff_python_parser = "0.0.16"
+ruff_python_ast    = "0.0.16"
+ruff_text_size     = "0.0.16"
 
 # Lock-free concurrent HashMap for the in-process module-probe cache
 dashmap = "6"

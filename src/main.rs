@@ -572,9 +572,6 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
                 }
             }
         }
-        if fixed_any {
-            eprintln!("\nAuto-fixed files. Run hatch fmt to reformat.\n");
-        }
     }
 
     if fixed_any && args.exit_non_zero_on_fix {

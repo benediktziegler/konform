@@ -33,6 +33,24 @@ file. Falls back to `[tool.ruff] src`, then `[".", "src"]`.
 src = ["lib"]
 ```
 
+#### `exclude`
+Glob patterns of files to skip, matched relative to the config file or against the
+file name alone. Applies to explicitly named files too, so it also works from
+pre-commit.
+
+**Default:** `[]` · **Type:** `list[str]` · **CLI:** `--exclude` (replaces the list)
+
+```toml
+[tool.konform]
+exclude = ["gen/**", "*_pb2.py"]
+```
+
+#### `extend-exclude`
+Patterns to skip in addition to `exclude`. Use it to add to an `exclude` that
+`--exclude` would otherwise replace.
+
+**Default:** `[]` · **Type:** `list[str]` · **CLI:** `--extend-exclude`
+
 ## Linter: `[tool.konform.lint]`
 
 #### `select`
@@ -114,6 +132,7 @@ Keyed by config name under `[tool.konform.lint]`.
 cache-dir = ".konform_cache"
 workers   = 0
 src       = [".", "src"]
+exclude   = []
 
 [tool.konform.lint]
 select = []

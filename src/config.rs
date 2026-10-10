@@ -1,4 +1,5 @@
 use crate::types::Level;
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -115,6 +116,14 @@ pub struct Config {
     pub cache_dir: String,
     pub workers: usize,
 
+    // ── File selection ────────────────────────────────────────────────────
+    /// Glob patterns of files to skip when walking directories, matched
+    /// relative to the config file (or the file name alone). `--exclude`
+    /// replaces this list.
+    pub exclude: Vec<String>,
+    /// Patterns skipped in addition to `exclude`; `--extend-exclude` adds to it.
+    pub extend_exclude: Vec<String>,
+
     // ── Rule selection / configuration ──────────────────────────────────────
     pub lint: LintConfig,
 
@@ -155,6 +164,8 @@ impl Default for Config {
         Self {
             cache_dir: ".konform_cache".into(),
             workers: 0,
+            exclude: vec![],
+            extend_exclude: vec![],
             lint: LintConfig::default(),
             python: None,
             config_dir: None,
@@ -199,6 +210,33 @@ impl Config {
             extend_select: self.lint.extend_select.clone(),
             ignore: self.lint.ignore.clone(),
         }
+    }
+
+    /// The `exclude` and `extend-exclude` globs compiled into one set, or
+    /// `None` when there are none. Invalid globs are skipped.
+    pub fn exclude_set(&self) -> Option<GlobSet> {
+        let mut builder = GlobSetBuilder::new();
+        let mut any = false;
+        for pattern in self.exclude.iter().chain(&self.extend_exclude) {
+            if let Ok(glob) = Glob::new(pattern) {
+                builder.add(glob);
+                any = true;
+            }
+        }
+        if any {
+            builder.build().ok()
+        } else {
+            None
+        }
+    }
+
+    /// `true` when `path` matches `excluded` (see [`Self::exclude_set`]),
+    /// either relative to the config directory or the current directory, or
+    /// by file name alone.
+    pub fn is_excluded(&self, excluded: &GlobSet, path: &Path) -> bool {
+        let path = path.strip_prefix(".").unwrap_or(path);
+        let cwd = std::env::current_dir().ok();
+        crate::rules::kpt::glob_matches(excluded, path, self.config_dir.as_deref(), cwd.as_deref())
     }
 
     /// Return the raw TOML configuration blob for a rule, looked up by its
@@ -403,6 +441,34 @@ pub fn resolve_python(config: &Config) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exclude_globs_match_relative_to_the_config_dir() {
+        let cfg = Config {
+            exclude: vec!["gen/**".into()],
+            extend_exclude: vec!["*_pb2.py".into()],
+            config_dir: Some(PathBuf::from("/proj")),
+            ..Config::default()
+        };
+        let gs = cfg.exclude_set().unwrap();
+        assert!(cfg.is_excluded(&gs, Path::new("/proj/gen/a.py")));
+        assert!(cfg.is_excluded(&gs, Path::new("./gen/a.py")));
+        assert!(cfg.is_excluded(&gs, Path::new("pkg/msg_pb2.py")));
+        assert!(!cfg.is_excluded(&gs, Path::new("/proj/src/a.py")));
+    }
+
+    #[test]
+    fn no_exclude_globs_means_no_set() {
+        assert!(Config::default().exclude_set().is_none());
+    }
+
+    #[test]
+    fn exclude_keys_are_read_from_the_top_level_table() {
+        let cfg: Config = toml::from_str("exclude = [\"a\"]\nextend-exclude = [\"b\"]\n").unwrap();
+        assert_eq!(cfg.exclude, ["a"]);
+        assert_eq!(cfg.extend_exclude, ["b"]);
+        assert!(cfg.lint.rules.is_empty());
+    }
 
     #[test]
     fn default_all_rules_enabled() {

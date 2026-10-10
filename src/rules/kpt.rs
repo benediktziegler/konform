@@ -207,7 +207,7 @@ impl CompiledPattern {
 /// Does `gs` match `path`, trying the path as supplied, relative to
 /// `config_dir`, relative to `cwd`, and finally just the file name?
 /// Shared with KST's `files` filter.
-pub(super) fn glob_matches(
+pub(crate) fn glob_matches(
     gs: &GlobSet,
     path: &Path,
     config_dir: Option<&Path>,

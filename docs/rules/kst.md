@@ -8,7 +8,7 @@ This rule is enabled by default.
 
 ## What it does
 
-Matches **code structure** (the syntax tree) against rules you define, so a rule keeps working whatever the formatting, comments or import aliases. KPT matches text; KST matches nodes. Each rule has its own id (starting with `KST`) and is addressable in `select`, `ignore`, `per-file-ignores` and `# noqa`. KST rules are not auto-fixable.
+Matches **code structure** (the syntax tree) against rules you define, so a rule keeps working whatever the formatting, comments or import aliases. KPT matches text; KST matches nodes. Each rule has its own id (starting with `KST`) and is addressable in `select`, `ignore`, `per-file-ignores` and `# noqa`. A rule can carry a `fix` that rewrites or deletes each match.
 
 ## Why is this bad?
 
@@ -100,6 +100,23 @@ match   = { kind = "assert", inside = { kind = "function", decorated_with = "pyt
 valid   = ["import pytest\n@pytest.fixture\ndef f():\n    return 1\n"]
 invalid = ["import pytest\n@pytest.fixture\ndef f():\n    assert 1\n"]
 ```
+
+## Fixes
+
+Add a `fix` table to make a rule fixable. `replace` is a template for the matched node; `delete = true` removes the matched statement (an expression on its own line, like `breakpoint()`, counts), leaving `pass` when the block would be empty. Fixes are **unsafe** (applied only with `--unsafe-fixes`) unless the rule sets `safe = true`, since konform can't know what a hand-written rewrite does.
+
+```toml
+[[rules]]
+id      = "KST002"
+message = "Use the project logger instead of print()"
+match   = { callee = "print" }
+fix     = { replace = "logger.info({args})", safe = true }
+
+[rules.test]
+fixed = [{ input = "print(x)\n", output = "logger.info(x)\n" }]
+```
+
+Placeholders: `{text}` (the node's source), `{name}` (its identifier, as matched by `name`), `{args}` (a call's arguments without parentheses), `{callee}` (a call's function), `{receiver}` (the object in `obj.attr` or `obj.method()`). Write `{{` / `}}` for literal braces. A match lacking a placeholder (`{args}` on a name) is reported but not fixed, and so is a statement sharing its line with another (`a = 1; b = 2`). When matches overlap, the outermost is fixed first and the rest on the next pass. `fixed` self-tests run the fix until it settles.
 
 ## Editor support
 

@@ -245,6 +245,7 @@ pub fn run_fix(
             ctx.noqa_aliases = config.lint.noqa_aliases.clone();
             ctx.selection = config.selection();
             ctx.fix_selection = fix_selection.clone();
+            ctx.unsafe_fixes = unsafe_fixes;
             ctx.fix_target = input.fix_target.clone();
             if rule.audits_noqa() {
                 ctx.noqa_audit = Some(Arc::new(noqa_audit(&ctx, rules, config)));

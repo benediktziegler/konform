@@ -9,7 +9,7 @@
 //! (enforced by `no_parser_types_outside_adapter` in `mod.rs`).
 
 use ruff_python_ast::visitor::source_order::{SourceOrderVisitor, TraversalSignal};
-use ruff_python_ast::{AnyNodeRef, Expr, ModModule};
+use ruff_python_ast::{AnyNodeRef, Expr, ModModule, Stmt};
 use ruff_text_size::{Ranged, TextRange, TextSize};
 
 // ---------------------------------------------------------------------------
@@ -155,6 +155,79 @@ impl<'a> Node<'a> {
             },
             _ => None,
         }
+    }
+
+    /// The whole node (decorators included for functions and classes).
+    pub(super) fn span(self) -> Span {
+        self.0.range().into()
+    }
+
+    /// A call's arguments without the parentheses.
+    pub(super) fn call_args_span(self) -> Option<Span> {
+        let AnyNodeRef::ExprCall(c) = self.0 else {
+            return None;
+        };
+        let r = c.arguments.range();
+        Some(Span {
+            start: r.start().to_u32() + 1,
+            end: r.end().to_u32() - 1,
+        })
+    }
+
+    /// A call's function expression.
+    pub(super) fn callee_span(self) -> Option<Span> {
+        match self.0 {
+            AnyNodeRef::ExprCall(c) => Some(c.func.range().into()),
+            _ => None,
+        }
+    }
+
+    /// The object an attribute (or a method call) is looked up on: `a.b` in
+    /// `a.b.c` and `a.b.c()`.
+    pub(super) fn receiver_span(self) -> Option<Span> {
+        match self.0 {
+            AnyNodeRef::ExprAttribute(a) => Some(a.value.range().into()),
+            AnyNodeRef::ExprCall(c) => match &*c.func {
+                Expr::Attribute(a) => Some(a.value.range().into()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The statement this node is, if any: the node itself, or, for an
+    /// expression used as a statement (`print(x)` on its own), its `parent`.
+    pub(super) fn statement(self, parent: Option<Node<'a>>) -> Option<Node<'a>> {
+        if self.0.is_statement() {
+            return Some(self);
+        }
+        match parent?.0 {
+            AnyNodeRef::StmtExpr(e) if e.value.range() == self.0.range() => parent,
+            _ => None,
+        }
+    }
+
+    /// Is the statement `self` the only one in its block of `parent` (so
+    /// removing it would leave the block empty)? Always `false` at module
+    /// level, where an empty body is fine.
+    pub(super) fn is_sole_statement_in(self, parent: Node<'a>) -> bool {
+        let bodies: &[&[Stmt]] = match parent.0 {
+            AnyNodeRef::StmtFunctionDef(f) => &[&f.body],
+            AnyNodeRef::StmtClassDef(c) => &[&c.body],
+            AnyNodeRef::StmtIf(i) => &[&i.body],
+            AnyNodeRef::ElifElseClause(c) => &[&c.body],
+            AnyNodeRef::StmtFor(f) => &[&f.body, &f.orelse],
+            AnyNodeRef::StmtWhile(w) => &[&w.body, &w.orelse],
+            AnyNodeRef::StmtWith(w) => &[&w.body],
+            AnyNodeRef::StmtTry(t) => &[&t.body, &t.orelse, &t.finalbody],
+            AnyNodeRef::ExceptHandlerExceptHandler(h) => &[&h.body],
+            AnyNodeRef::MatchCase(c) => &[&c.body],
+            _ => &[],
+        };
+        let range = self.0.range();
+        bodies
+            .iter()
+            .any(|body| matches!(body, [only] if only.range() == range))
     }
 
     /// Where a violation for this node is reported: the name for functions

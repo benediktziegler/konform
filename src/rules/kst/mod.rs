@@ -13,6 +13,7 @@
 //! See [`KstRule::explain`] for the rule format and matcher vocabulary.
 
 mod dump;
+mod fix;
 mod matcher;
 mod node;
 mod resolve;
@@ -26,6 +27,8 @@ use super::kpt::{glob_matches, resolve_path};
 use super::scope::{build_line_starts, offset_to_line_col};
 use super::{has_noqa, FileContext, Rule, RuleDoc, SelfTestReport};
 use crate::types::{Level, Violation};
+use anyhow::Result;
+use fix::{Edit, Fix, RawFix};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use matcher::{Matcher, RawMatcher};
 use node::{walk, Flow, Node, Visitor};
@@ -50,6 +53,7 @@ struct RawRule {
     files: Vec<String>,
     level: Option<String>,
     help: Option<String>,
+    fix: Option<RawFix>,
     #[serde(default)]
     test: RawTests,
 }
@@ -65,6 +69,16 @@ struct RawTests {
     /// Snippets the rule must flag at least once.
     #[serde(default)]
     invalid: Vec<String>,
+    /// Snippets and what the rule's fix must turn them into.
+    #[serde(default)]
+    fixed: Vec<RawFixCase>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFixCase {
+    input: String,
+    output: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +98,8 @@ struct CompiledRule {
     raw_files: Vec<String>,
     raw: RawMatcher,
     matcher: Matcher,
+    raw_fix: Option<RawFix>,
+    fix: Option<Fix>,
     tests: RawTests,
 }
 
@@ -105,7 +121,24 @@ impl CompiledRule {
             out.push_str(&format!("- **Help:** {help}\n"));
         }
         out.push_str(&format!("- **Match:** `{}`\n", self.matcher_json()));
+        if let Some(raw) = &self.raw_fix {
+            let action = match &raw.replace {
+                Some(template) => format!("replace with `{template}`"),
+                None => "delete the statement".to_owned(),
+            };
+            let safety = if raw.safe {
+                "safe"
+            } else {
+                "unsafe, needs `--unsafe-fixes`"
+            };
+            out.push_str(&format!("- **Fix:** {action} ({safety})\n"));
+        }
         out
+    }
+
+    /// The fix as compact JSON, for cache fingerprints.
+    fn fix_json(&self) -> String {
+        serde_json::to_string(&self.raw_fix).unwrap_or_default()
     }
 }
 
@@ -218,6 +251,7 @@ fn compile_rules(
             files: raw_files,
             level,
             help,
+            fix: raw_fix,
             test,
         } = raw;
         let mut skip = |why: &str| errors.push(format!("{source}: rule '{id}': {why}"));
@@ -232,6 +266,13 @@ fn compile_rules(
         }
         let matcher = match Matcher::compile(&raw_matcher) {
             Ok(m) => m,
+            Err(e) => {
+                skip(&e);
+                continue;
+            }
+        };
+        let fix = match raw_fix.as_ref().map(Fix::compile).transpose() {
+            Ok(f) => f,
             Err(e) => {
                 skip(&e);
                 continue;
@@ -272,6 +313,8 @@ fn compile_rules(
             raw_files,
             raw: raw_matcher,
             matcher,
+            raw_fix,
+            fix,
             tests: test,
         });
     }
@@ -314,6 +357,76 @@ impl KstRule {
     fn rules(&self, cfg: &toml::Value) -> Arc<Vec<CompiledRule>> {
         Arc::clone(&self.loaded(cfg).rules)
     }
+
+    /// Matches of the enabled `rules` whose `files` cover `ctx`'s file.
+    fn hits<'a>(&self, ctx: &'a FileContext, rules: &'a [CompiledRule]) -> Vec<Hit<'a>> {
+        if rules.is_empty() || !ctx.is_python() {
+            return vec![];
+        }
+        let cwd = std::env::current_dir().ok();
+        let active: Vec<&CompiledRule> = rules
+            .iter()
+            .filter(|r| {
+                ctx.is_enabled(&r.id)
+                    && r.files.as_ref().is_none_or(|gs| {
+                        glob_matches(gs, &ctx.path, self.config_dir.as_deref(), cwd.as_deref())
+                    })
+            })
+            .collect();
+        if active.is_empty() || !ctx.has_valid_syntax() {
+            return vec![];
+        }
+        run_rules(ctx, active)
+    }
+}
+
+/// Apply `rule`'s fix to the snippet `src` until nothing changes (unsafe
+/// fixes included), for `fixed` self-tests.
+fn fix_snippet(rule: &CompiledRule, src: &str) -> Result<String, String> {
+    if rule.fix.is_none() {
+        return Err("the rule has no `fix`".to_owned());
+    }
+    let mut current = src.to_owned();
+    for _ in 0..10 {
+        let ctx = FileContext::from_source(PathBuf::from("snippet.py"), current.clone());
+        if !ctx.has_valid_syntax() {
+            return Err(if current == src {
+                "snippet does not parse".to_owned()
+            } else {
+                format!("fix produced invalid Python: {current:?}")
+            });
+        }
+        let mut edits: Vec<Edit> = run_rules(&ctx, vec![rule])
+            .into_iter()
+            .filter_map(|hit| hit.edit)
+            .collect();
+        match apply_edits(&current, &mut edits) {
+            Some(next) if next != current => current = next,
+            _ => return Ok(current),
+        }
+    }
+    Err("fix did not settle after 10 passes".to_owned())
+}
+
+/// Apply `edits` to `source`, outermost first; an edit overlapping one
+/// already taken is left for the engine's next fix pass. `None` when there is
+/// nothing to apply.
+fn apply_edits(source: &str, edits: &mut [Edit]) -> Option<String> {
+    if edits.is_empty() {
+        return None;
+    }
+    edits.sort_by_key(|e| (e.range.start, std::cmp::Reverse(e.range.end)));
+    let mut taken: Vec<&Edit> = Vec::new();
+    for edit in edits.iter() {
+        if taken.last().is_none_or(|t| edit.range.start >= t.range.end) {
+            taken.push(edit);
+        }
+    }
+    let mut out = source.to_owned();
+    for edit in taken.into_iter().rev() {
+        out.replace_range(edit.range.clone(), &edit.text);
+    }
+    Some(out)
 }
 
 /// One pass over the tree, testing every active rule at every node.
@@ -325,7 +438,15 @@ struct Walker<'a> {
     line_starts: Vec<u32>,
     /// Ancestors of the node being visited, outermost first.
     path: Vec<Node<'a>>,
-    out: Vec<Violation>,
+    out: Vec<Hit<'a>>,
+}
+
+/// One match: the violation, plus the edit that fixes it (when the rule has a
+/// fix that applies to this node).
+struct Hit<'a> {
+    rule: &'a CompiledRule,
+    violation: Violation,
+    edit: Option<Edit>,
 }
 
 impl<'a> Visitor<'a> for Walker<'a> {
@@ -341,16 +462,25 @@ impl<'a> Visitor<'a> for Walker<'a> {
             if !self.ctx.ignore_noqa && has_noqa(noqa, &rule.id, &self.ctx.noqa_aliases) {
                 continue;
             }
-            self.out.push(Violation {
-                rule: rule.id.clone(),
-                line,
-                col,
-                end_line,
-                end_col,
-                message: format!("{}: {}", rule.id, rule.message),
-                help: rule.help.clone(),
-                level: rule.level,
-                fixable: false,
+            let edit = rule.fix.as_ref().and_then(|fix| {
+                let mut ancestors = self.path.iter().rev().copied();
+                let parent = ancestors.next();
+                fix.edit(node, parent, ancestors.next(), &self.ctx.source)
+            });
+            self.out.push(Hit {
+                rule,
+                violation: Violation {
+                    rule: rule.id.clone(),
+                    line,
+                    col,
+                    end_line,
+                    end_col,
+                    message: format!("{}: {}", rule.id, rule.message),
+                    help: rule.help.clone(),
+                    level: rule.level,
+                    fixable: edit.is_some(),
+                },
+                edit,
             });
         }
         self.path.push(node);
@@ -363,7 +493,7 @@ impl<'a> Visitor<'a> for Walker<'a> {
 }
 
 /// Run `active` over the (valid-syntax) tree of `ctx` in a single traversal.
-fn run_rules(ctx: &FileContext, active: Vec<&CompiledRule>) -> Vec<Violation> {
+fn run_rules<'a>(ctx: &'a FileContext, active: Vec<&'a CompiledRule>) -> Vec<Hit<'a>> {
     let root = Node::root(ctx.parsed().syntax());
     let mut walker = Walker {
         ctx,
@@ -409,29 +539,39 @@ impl Rule for KstRule {
 
     fn check(&self, ctx: &FileContext, cfg: &toml::Value) -> Vec<Violation> {
         let rules = self.rules(cfg);
-        if rules.is_empty()
-            || !ctx
-                .path
-                .extension()
-                .is_some_and(|e| e == "py" || e == "pyi")
-        {
-            return vec![];
-        }
-        let cwd = std::env::current_dir().ok();
-        let active: Vec<&CompiledRule> = rules
-            .iter()
-            .filter(|r| {
-                ctx.is_enabled(&r.id)
-                    && r.files.as_ref().is_none_or(|gs| {
-                        glob_matches(gs, &ctx.path, self.config_dir.as_deref(), cwd.as_deref())
-                    })
-            })
-            .collect();
-        if active.is_empty() || !ctx.has_valid_syntax() {
-            return vec![];
-        }
+        self.hits(ctx, &rules)
+            .into_iter()
+            .map(|hit| hit.violation)
+            .collect()
+    }
 
-        run_rules(ctx, active)
+    fn fix(&self, ctx: &FileContext, cfg: &toml::Value) -> Result<Option<String>> {
+        let rules = self.rules(cfg);
+        let mut edits: Vec<Edit> = self
+            .hits(ctx, &rules)
+            .into_iter()
+            .filter(|hit| {
+                let v = &hit.violation;
+                let safe = hit.rule.fix.as_ref().is_some_and(|f| f.safe);
+                (safe || ctx.unsafe_fixes)
+                    && ctx.can_fix(&v.rule)
+                    && ctx.wants_fix(&v.rule, v.line, v.col)
+            })
+            .filter_map(|hit| hit.edit)
+            .collect();
+        Ok(apply_edits(&ctx.source, &mut edits))
+    }
+
+    fn is_unsafe_fix_code(&self, code: &str) -> bool {
+        // The rules compiled for the config last seen, which is the one the
+        // violations being reported came from.
+        let slot = self.compiled.lock().unwrap_or_else(|e| e.into_inner());
+        slot.as_ref().is_some_and(|(_, loaded)| {
+            loaded
+                .rules
+                .iter()
+                .any(|r| r.id == code && r.fix.as_ref().is_some_and(|f| !f.safe))
+        })
     }
 
     fn self_tests(&self, cfg: &toml::Value) -> Vec<SelfTestReport> {
@@ -474,6 +614,16 @@ impl Rule for KstRule {
                         Err(why) => report.failures.push(format!("{label}: {why}")),
                     }
                 }
+                for (i, case) in rule.tests.fixed.iter().enumerate() {
+                    match fix_snippet(rule, &case.input) {
+                        Ok(out) if out == case.output => report.passed += 1,
+                        Ok(out) => report.failures.push(format!(
+                            "fixed[{i}]: expected {:?}, got {:?}",
+                            case.output, out
+                        )),
+                        Err(why) => report.failures.push(format!("fixed[{i}]: {why}")),
+                    }
+                }
                 report
             })
             .collect()
@@ -488,7 +638,7 @@ impl Rule for KstRule {
         let mut h = seahash::SeaHasher::new();
         for r in self.rules(cfg).iter() {
             (&r.id, &r.message, &r.help, r.level.to_string()).hash(&mut h);
-            (&r.raw_files, r.matcher_json()).hash(&mut h);
+            (&r.raw_files, r.matcher_json(), r.fix_json()).hash(&mut h);
         }
         h.finish()
     }
@@ -517,7 +667,7 @@ impl Rule for KstRule {
                 so a rule keeps working whatever the formatting, comments or import aliases. \
                 KPT matches text; KST matches nodes. Each rule has its own id (starting with \
                 `KST`) and is addressable in `select`, `ignore`, `per-file-ignores` and \
-                `# noqa`. KST rules are not auto-fixable.",
+                `# noqa`. A rule can carry a `fix` that rewrites or deletes each match.",
             why_bad: "Some conventions are about structure, which a regex cannot express reliably: \
                 no `assert` inside pytest fixtures, no call to X from within Y, no function with \
                 a given decorator. A structural rule states that directly.",
@@ -592,6 +742,33 @@ impl Rule for KstRule {
                         valid   = [\"import pytest\\n@pytest.fixture\\ndef f():\\n    return 1\\n\"]\n\
                         invalid = [\"import pytest\\n@pytest.fixture\\ndef f():\\n    assert 1\\n\"]\n\
                         ```",
+                },
+                DocSection {
+                    title: "Fixes",
+                    body: "Add a `fix` table to make a rule fixable. `replace` is a template for the \
+                        matched node; `delete = true` removes the matched statement (an expression \
+                        on its own line, like `breakpoint()`, counts), leaving `pass` when the \
+                        block would be empty. Fixes are **unsafe** (applied only with \
+                        `--unsafe-fixes`) unless the rule sets `safe = true`, since konform can't \
+                        know what a hand-written rewrite does.\n\n\
+                        ```toml\n\
+                        [[rules]]\n\
+                        id      = \"KST002\"\n\
+                        message = \"Use the project logger instead of print()\"\n\
+                        match   = { callee = \"print\" }\n\
+                        fix     = { replace = \"logger.info({args})\", safe = true }\n\
+                        \n\
+                        [rules.test]\n\
+                        fixed = [{ input = \"print(x)\\n\", output = \"logger.info(x)\\n\" }]\n\
+                        ```\n\n\
+                        Placeholders: `{text}` (the node's source), `{name}` (its identifier, as \
+                        matched by `name`), `{args}` (a call's arguments without parentheses), \
+                        `{callee}` (a call's function), `{receiver}` (the object in `obj.attr` or \
+                        `obj.method()`). Write `{{` / `}}` for literal braces. A match lacking a \
+                        placeholder (`{args}` on a name) is reported but not fixed, and so is a \
+                        statement sharing its line with another (`a = 1; b = 2`). When matches \
+                        overlap, the outermost is fixed first and the rest on the next pass. \
+                        `fixed` self-tests run the fix until it settles.",
                 },
                 DocSection {
                     title: "Editor support",
@@ -713,6 +890,291 @@ match = { kind = "assert", inside = { kind = "function", decorated_with = "pytes
             .into_iter()
             .map(|(id, _)| id)
             .collect()
+    }
+
+    // ── fixes ─────────────────────────────────────────────────────────────
+
+    /// One rule matching `print(...)` calls with the given `fix` table.
+    fn print_rule(fix: &str) -> String {
+        format!(
+            "[[rules]]\nid = \"KST001\"\nmessage = \"no print\"\nmatch = {{ callee = \"print\" }}\nfix = {fix}\n"
+        )
+    }
+
+    /// Apply the rules' fix once, with unsafe fixes allowed.
+    fn fixed(rules_toml: &str, source: &str) -> Option<String> {
+        let mut ctx = ctx(source);
+        ctx.unsafe_fixes = true;
+        rule().fix(&ctx, &cfg(rules_toml)).unwrap()
+    }
+
+    #[test]
+    fn replace_fills_in_placeholders() {
+        let rules = print_rule(r#"{ replace = "log.info({args})" }"#);
+        assert_eq!(
+            fixed(&rules, "print('a', b)\nx = 1\n").as_deref(),
+            Some("log.info('a', b)\nx = 1\n")
+        );
+        let rules = print_rule(r#"{ replace = "{{{callee}}}: {name} / {text}" }"#);
+        assert_eq!(
+            fixed(&rules, "print(1)\n").as_deref(),
+            Some("{print}: print / print(1)\n")
+        );
+    }
+
+    #[test]
+    fn receiver_is_the_object_of_a_method_call() {
+        let rules = "[[rules]]\nid = \"KST001\"\nmessage = \"m\"\nmatch = { kind = \"call\", name = \"^warn$\" }\nfix = { replace = \"{receiver}.warning({args})\" }\n";
+        assert_eq!(
+            fixed(rules, "self.log.warn('x')\n").as_deref(),
+            Some("self.log.warning('x')\n")
+        );
+    }
+
+    #[test]
+    fn a_missing_placeholder_makes_only_that_match_unfixable() {
+        let rules = "[[rules]]\nid = \"KST001\"\nmessage = \"m\"\nmatch = { name = \"^foo$\" }\nfix = { replace = \"bar({args})\" }\n";
+        let violations = rule().check(&ctx("foo(1)\nfoo\n"), &cfg(rules));
+        let fixable: Vec<bool> = violations.iter().map(|v| v.fixable).collect();
+        // The call, its callee name, and the bare name.
+        assert_eq!(fixable, [true, false, false]);
+    }
+
+    #[test]
+    fn delete_removes_statements_and_keeps_blocks_valid() {
+        let rules = print_rule("{ delete = true }");
+        assert_eq!(
+            fixed(&rules, "a = 1\nprint(a)\nb = 2\n").as_deref(),
+            Some("a = 1\nb = 2\n")
+        );
+        assert_eq!(
+            fixed(&rules, "def f():\n    print(1)\n").as_deref(),
+            Some("def f():\n    pass\n")
+        );
+        assert_eq!(
+            fixed(&rules, "def f():\n    print(1)\n    return 2\n").as_deref(),
+            Some("def f():\n    return 2\n")
+        );
+        assert_eq!(
+            fixed(&rules, "if x:\n    pass\nelse:\n    print(1)\n").as_deref(),
+            Some("if x:\n    pass\nelse:\n    pass\n")
+        );
+    }
+
+    #[test]
+    fn delete_skips_expressions_that_are_not_statements() {
+        let rules = print_rule("{ delete = true }");
+        let violations = rule().check(&ctx("x = print(1)\n"), &cfg(&rules));
+        assert!(!violations[0].fixable);
+        assert_eq!(fixed(&rules, "x = print(1)\n"), None);
+    }
+
+    #[test]
+    fn overlapping_matches_fix_the_outermost_first() {
+        let rules = print_rule(r#"{ replace = "log({args})" }"#);
+        let once = fixed(&rules, "print(print(1))\n").unwrap();
+        assert_eq!(once, "log(print(1))\n");
+        assert_eq!(fixed(&rules, &once).as_deref(), Some("log(log(1))\n"));
+    }
+
+    #[test]
+    fn unsafe_fixes_need_the_flag_and_safe_ones_do_not() {
+        let unsafe_rules = print_rule(r#"{ replace = "log({args})" }"#);
+        let safe_rules = print_rule(r#"{ replace = "log({args})", safe = true }"#);
+        let plain = ctx("print(1)\n");
+        assert_eq!(rule().fix(&plain, &cfg(&unsafe_rules)).unwrap(), None);
+        assert!(rule().fix(&plain, &cfg(&safe_rules)).unwrap().is_some());
+
+        let r = rule();
+        r.check(&plain, &cfg(&unsafe_rules));
+        assert!(r.is_unsafe_fix_code("KST001"));
+        r.check(&plain, &cfg(&safe_rules));
+        assert!(!r.is_unsafe_fix_code("KST001"));
+    }
+
+    #[test]
+    fn fixes_honour_unfixable_targets_and_noqa() {
+        let rules = print_rule(r#"{ replace = "log({args})", safe = true }"#);
+        let mut c = ctx("print(1)\n");
+        c.fix_selection.ignore = vec!["KST001".into()];
+        assert_eq!(rule().fix(&c, &cfg(&rules)).unwrap(), None);
+
+        let mut c = ctx("print(1)\nprint(2)\n");
+        c.fix_target = Some(crate::rules::FixTarget {
+            rule: "KST001".into(),
+            line: 2,
+            col: 0,
+        });
+        assert_eq!(
+            rule().fix(&c, &cfg(&rules)).unwrap().as_deref(),
+            Some("print(1)\nlog(2)\n")
+        );
+
+        assert_eq!(fixed(&rules, "print(1)  # noqa: KST001\n"), None);
+    }
+
+    #[test]
+    fn invalid_fix_tables_are_config_errors() {
+        for (fix, why) in [
+            (r#"{ replace = "{nope}" }"#, "unknown placeholder '{nope}'"),
+            (r#"{ replace = "x", delete = true }"#, "not both"),
+            ("{ safe = true }", "needs `replace` or `delete = true`"),
+        ] {
+            let errors = rule().config_errors(&cfg(&print_rule(fix)));
+            assert!(errors.iter().any(|e| e.contains(why)), "{fix}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn explain_and_fingerprint_include_the_fix() {
+        let a = cfg(&print_rule(r#"{ replace = "log({args})" }"#));
+        let b = cfg(&print_rule(r#"{ replace = "log({args})", safe = true }"#));
+        assert_ne!(rule().fingerprint(&a), rule().fingerprint(&b));
+        let explain = &rule().catalog(&a)[0].explain;
+        assert!(
+            explain.contains("- **Fix:** replace with `log({args})` (unsafe"),
+            "{explain}"
+        );
+    }
+
+    #[test]
+    fn fixed_self_tests_check_the_output() {
+        let toml = r#"
+[[rules]]
+id = "KST001"
+message = "m"
+match = { callee = "print" }
+fix = { replace = "log({args})" }
+
+[rules.test]
+fixed = [
+    { input = "print(print(1))\n", output = "log(log(1))\n" },
+    { input = "print(1)\n", output = "print(1)\n" },
+]
+"#;
+        let r = &rule().self_tests(&cfg(toml))[0];
+        assert_eq!(r.passed, 1, "{r:?}");
+        assert_eq!(
+            r.failures,
+            ["fixed[1]: expected \"print(1)\\n\", got \"log(1)\\n\""]
+        );
+    }
+
+    /// One rule matching `kind` nodes with the given `fix` table.
+    fn kind_fix_rule(kind: &str, fix: &str) -> String {
+        format!(
+            "[[rules]]\nid = \"KST002\"\nmessage = \"m\"\nmatch = {{ kind = \"{kind}\" }}\nfix = {fix}\n"
+        )
+    }
+
+    #[test]
+    fn deleting_the_only_statement_of_any_block_leaves_pass() {
+        let rules = kind_fix_rule("assert", "{ delete = true }");
+        for (src, want) in [
+            ("assert x\nprint(1)\n", "print(1)\n"),
+            ("class A:\n    assert x\n", "class A:\n    pass\n"),
+            ("if a:\n    assert x\n", "if a:\n    pass\n"),
+            (
+                "if a:\n    pass\nelif b:\n    assert x\nelse:\n    assert y\n",
+                "if a:\n    pass\nelif b:\n    pass\nelse:\n    pass\n",
+            ),
+            (
+                "for i in r:\n    assert x\nelse:\n    assert y\n",
+                "for i in r:\n    pass\nelse:\n    pass\n",
+            ),
+            (
+                "while a:\n    assert x\nelse:\n    assert y\n",
+                "while a:\n    pass\nelse:\n    pass\n",
+            ),
+            ("with a:\n    assert x\n", "with a:\n    pass\n"),
+            (
+                "try:\n    assert x\nexcept E:\n    assert y\nelse:\n    assert z\nfinally:\n    assert w\n",
+                "try:\n    pass\nexcept E:\n    pass\nelse:\n    pass\nfinally:\n    pass\n",
+            ),
+            (
+                "match v:\n    case 1:\n        assert x\n",
+                "match v:\n    case 1:\n        pass\n",
+            ),
+            // Not alone in the block: the line just goes away.
+            ("class A:\n    assert x\n    y = 1\n", "class A:\n    y = 1\n"),
+        ] {
+            assert_eq!(fixed(&rules, src).as_deref(), Some(want), "{src}");
+        }
+    }
+
+    #[test]
+    fn receiver_replaces_an_attribute_with_its_object() {
+        let rules = "[[rules]]\nid = \"KST002\"\nmessage = \"m\"\nmatch = { kind = \"attribute\", name = \"^b$\" }\nfix = { replace = \"{receiver}.c\" }\n";
+        assert_eq!(fixed(rules, "x = a.b\n").as_deref(), Some("x = a.c\n"));
+    }
+
+    #[test]
+    fn placeholders_a_node_does_not_have_leave_it_unfixable() {
+        let unfixable = |match_: &str, template: &str, src: &str| {
+            let rules = format!(
+                "[[rules]]\nid = \"KST002\"\nmessage = \"m\"\nmatch = {match_}\nfix = {{ replace = \"{template}\" }}\n"
+            );
+            let violations = rule().check(&ctx(src), &cfg(&rules));
+            assert_eq!(violations.len(), 1, "{match_} on {src}");
+            !violations[0].fixable
+        };
+        // A plain function call has no receiver; a bare name has no callee.
+        assert!(unfixable(
+            r#"{ kind = "call", name = "^foo$" }"#,
+            "{receiver}",
+            "foo(1)\n"
+        ));
+        assert!(unfixable(
+            r#"{ kind = "name", name = "^foo$" }"#,
+            "{callee}",
+            "x = foo\n"
+        ));
+        assert!(unfixable(
+            r#"{ kind = "name", name = "^foo$" }"#,
+            "{receiver}",
+            "x = foo\n"
+        ));
+        assert!(!unfixable(
+            r#"{ kind = "call", name = "^foo$" }"#,
+            "{callee}",
+            "foo(1)\n"
+        ));
+    }
+
+    #[test]
+    fn explain_says_what_the_fix_does_and_how_safe_it_is() {
+        let explain = |fix: &str| rule().catalog(&cfg(&print_rule(fix)))[0].explain.clone();
+        assert!(explain("{ delete = true }")
+            .contains("- **Fix:** delete the statement (unsafe, needs `--unsafe-fixes`)"));
+        assert!(explain("{ delete = true, safe = true }")
+            .contains("- **Fix:** delete the statement (safe)"));
+    }
+
+    #[test]
+    fn fixed_self_tests_report_why_a_case_could_not_run() {
+        let run = |rule_extra: &str, input: &str| {
+            let toml = format!(
+                "[[rules]]\nid = \"KST001\"\nmessage = \"m\"\nmatch = {{ callee = \"print\" }}\n{rule_extra}\n[rules.test]\nfixed = [{{ input = {input:?}, output = \"\" }}]\n"
+            );
+            rule().self_tests(&cfg(&toml))[0].failures.clone()
+        };
+        assert_eq!(run("", "print(1)\n"), ["fixed[0]: the rule has no `fix`"]);
+        assert_eq!(
+            run("fix = { delete = true }", "def (:\n"),
+            ["fixed[0]: snippet does not parse"]
+        );
+        // A template that leaves broken Python behind.
+        let failures = run("fix = { replace = \"(\" }", "print(1)\n");
+        assert_eq!(failures.len(), 1);
+        assert!(
+            failures[0].starts_with("fixed[0]: fix produced invalid Python"),
+            "{failures:?}"
+        );
+        // A template whose output matches again, forever.
+        assert_eq!(
+            run("fix = { replace = \"print(print({args}))\" }", "print(1)\n"),
+            ["fixed[0]: fix did not settle after 10 passes"]
+        );
     }
 
     // ── the motivating example ────────────────────────────────────────────

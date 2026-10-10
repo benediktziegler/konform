@@ -95,6 +95,10 @@ pub fn run_check(
         .flat_map(|r| r.check(&ctx, config.rule_config(r.config_name())))
         .collect();
     apply_per_file_ignores(input.path, &mut violations, config);
+    let fix_selection = config.fix_selection();
+    for v in &mut violations {
+        v.fixable &= fix_selection.is_enabled(&v.rule);
+    }
     violations
 }
 
@@ -216,6 +220,7 @@ pub fn run_fix(
 ) -> Result<Option<String>> {
     let mut src = input.source.to_owned();
     let mut changed = false;
+    let fix_selection = config.fix_selection();
 
     let max_passes = if input.fix_target.is_some() {
         1
@@ -230,11 +235,16 @@ pub fn run_fix(
         // `fixable()` can't see inline `pyproject.toml` patterns. Rules whose
         // fix is unsafe (`Rule::is_unsafe_fix`) are skipped unless the caller
         // opted in via `unsafe_fixes` -- Ruff's `--unsafe-fixes` separation.
-        for rule in active_rules(rules, config).filter(|r| unsafe_fixes || !r.is_unsafe_fix()) {
+        // Rules emitting several codes check `fixable` per code themselves.
+        for rule in active_rules(rules, config).filter(|r| {
+            (unsafe_fixes || !r.is_unsafe_fix())
+                && (r.gates_per_violation() || fix_selection.is_enabled(r.code()))
+        }) {
             let mut ctx = FileContext::from_source(input.path.to_path_buf(), src.clone());
             ctx.ignore_noqa = input.ignore_noqa || config.ignore_noqa;
             ctx.noqa_aliases = config.lint.noqa_aliases.clone();
             ctx.selection = config.selection();
+            ctx.fix_selection = fix_selection.clone();
             ctx.fix_target = input.fix_target.clone();
             if rule.audits_noqa() {
                 ctx.noqa_audit = Some(Arc::new(noqa_audit(&ctx, rules, config)));
@@ -974,6 +984,58 @@ mod tests {
         let result = run_fix(&input, &rules, &Config::default(), true).unwrap();
         let fixed = result.expect("unsafe fix should be applied when opted in");
         assert!(fixed.contains("# fixed by UnsafeFixRule"), "got: {fixed:?}");
+    }
+
+    // ── fixable / unfixable ────────────────────────────────────────────
+
+    #[test]
+    fn unfixable_codes_are_reported_unfixable_and_left_alone() {
+        let rules = all_rules(probe(), None);
+        let p = path();
+        let src = "from os.path import join\n";
+        let mut config = Config::default();
+        config.lint.unfixable = vec!["KIS".into()];
+        let input = CheckInput::new(&p, src);
+        let violations = run_check(&input, &rules, &config);
+        assert_eq!(violations.len(), 1);
+        assert!(!violations[0].fixable);
+        assert!(run_fix(&input, &rules, &config, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn fixable_limits_fixes_to_the_listed_codes() {
+        let rules = all_rules(probe(), None);
+        let p = path();
+        let input = CheckInput::new(&p, "from os.path import join\n");
+        let mut config = Config::default();
+        config.lint.fixable = vec!["KNQ".into()];
+        assert!(!run_check(&input, &rules, &config)[0].fixable);
+        assert!(run_fix(&input, &rules, &config, true).unwrap().is_none());
+        config.lint.fixable = vec!["KIS001".into()];
+        assert!(run_check(&input, &rules, &config)[0].fixable);
+        assert!(run_fix(&input, &rules, &config, true).unwrap().is_some());
+    }
+
+    #[test]
+    fn unfixable_applies_per_pattern_id() {
+        let rules = all_rules(probe(), None);
+        let p = PathBuf::from("a.py");
+        let src = "print(1)\nbreakpoint()\n";
+        let mut config = kpt_config(&["KPT"], &[]);
+        config.lint.unfixable = vec!["KPT002".into()];
+        let input = CheckInput::new(&p, src);
+        let fixable: Vec<(String, bool)> = run_check(&input, &rules, &config)
+            .into_iter()
+            .map(|v| (v.rule, v.fixable))
+            .collect();
+        assert_eq!(
+            fixable,
+            [("KPT001".to_owned(), true), ("KPT002".to_owned(), false)]
+        );
+        assert_eq!(
+            run_fix(&input, &rules, &config, false).unwrap().as_deref(),
+            Some("log(1)\nbreakpoint()\n")
+        );
     }
 
     // ── per-pattern select / ignore (KPT) ─────────────────────────────────

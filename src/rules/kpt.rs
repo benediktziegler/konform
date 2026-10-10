@@ -441,7 +441,10 @@ impl Rule for KptRule {
             let Some(replacement) = &pattern.replacement else {
                 continue;
             };
-            if !ctx.is_enabled(&pattern.id) || target.is_some_and(|t| t.rule != pattern.id) {
+            if !ctx.is_enabled(&pattern.id)
+                || !ctx.can_fix(&pattern.id)
+                || target.is_some_and(|t| t.rule != pattern.id)
+            {
                 continue;
             }
             if !pattern.matches_file(&ctx.path, self.config_dir.as_deref(), cwd.as_deref()) {

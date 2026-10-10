@@ -181,6 +181,10 @@ pub fn rules_fingerprint(config: &Config, rules: &[Box<dyn Rule>]) -> u64 {
         codes.hash(&mut h);
     }
 
+    // `fixable` / `unfixable` decide the cached `fixable` flags.
+    config.lint.fixable.hash(&mut h);
+    config.lint.unfixable.hash(&mut h);
+
     let mut aliases: Vec<_> = config.lint.noqa_aliases.iter().collect();
     aliases.sort();
     aliases.hash(&mut h);

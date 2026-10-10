@@ -60,6 +60,8 @@ pub struct FileContext {
     /// [`Rule::gates_per_violation`]) use [`FileContext::is_enabled`] to skip
     /// the codes the user turned off.
     pub selection: RuleSelection,
+    /// `fixable` / `unfixable` lists; see [`FileContext::can_fix`].
+    pub fix_selection: RuleSelection,
     /// What the other rules report with `# noqa` ignored. Set by the engine
     /// only for rules that ask for it (see [`Rule::audits_noqa`]).
     pub noqa_audit: Option<Arc<NoqaAudit>>,
@@ -102,6 +104,7 @@ impl FileContext {
             noqa_aliases: HashMap::new(),
             fix_target: None,
             selection: RuleSelection::default(),
+            fix_selection: RuleSelection::default(),
             noqa_audit: None,
             parsed: Arc::new(OnceLock::new()),
         }
@@ -136,6 +139,13 @@ impl FileContext {
     /// Is the violation code `code` enabled by `select` / `ignore`?
     pub fn is_enabled(&self, code: &str) -> bool {
         self.selection.is_enabled(code)
+    }
+
+    /// May violations of `code` be auto-fixed (`fixable` / `unfixable`)?
+    /// Rules emitting several codes check this per code in [`Rule::fix`];
+    /// the engine handles all other rules.
+    pub fn can_fix(&self, code: &str) -> bool {
+        self.fix_selection.is_enabled(code)
     }
 
     /// `true` for `.py` / `.pyi` files (KPT can also target other file types).

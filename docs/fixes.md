@@ -22,6 +22,18 @@ safe and unsafe-only counts separately and suggests the right command.
 Fixes are skipped (the violation is still reported) when applying one would cause
 a name collision; see each rule page for the conditions.
 
+## Choosing which rules fix
+
+`fixable` and `unfixable` in `[tool.konform.lint]` limit which codes are fixed, by code or
+prefix like `select` / `ignore`. Violations of other codes are still reported, just not
+marked `[*]` or fixed:
+
+```toml
+[tool.konform.lint]
+fixable   = ["KIS", "KNQ"]  # empty (the default) means every code
+unfixable = ["KPT010"]      # never fixed, even if `fixable` matches
+```
+
 ## Editors
 
 The language server offers per-violation quickfixes plus *Fix all* code actions;

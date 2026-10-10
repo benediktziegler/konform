@@ -25,6 +25,12 @@ pub struct LintConfig {
     pub extend_select: Vec<String>,
     pub ignore: Vec<String>,
 
+    // ── Fix selection (prefix-matched, empty `fixable` = every code) ──────
+    /// Codes / prefixes whose violations may be auto-fixed.
+    pub fixable: Vec<String>,
+    /// Codes / prefixes that are never auto-fixed, even if `fixable` matches.
+    pub unfixable: Vec<String>,
+
     // ── Global default level ───────────────────────────────────────────────
     pub level: Level,
 
@@ -58,6 +64,8 @@ impl Default for LintConfig {
             select: vec![],
             extend_select: vec![],
             ignore: vec![],
+            fixable: vec![],
+            unfixable: vec![],
             level: Level::Error,
             per_file_ignores: HashMap::new(),
             noqa_aliases: HashMap::new(),
@@ -249,6 +257,16 @@ impl Config {
                 .any(matches),
             // Outside the project: only the path itself and its file name.
             Err(_) => matches(path.strip_prefix(".").unwrap_or(path)),
+        }
+    }
+
+    /// The `fixable` / `unfixable` lists as a selection: a code may be fixed
+    /// when [`RuleSelection::is_enabled`] says so.
+    pub fn fix_selection(&self) -> RuleSelection {
+        RuleSelection {
+            select: self.lint.fixable.clone(),
+            extend_select: vec![],
+            ignore: self.lint.unfixable.clone(),
         }
     }
 

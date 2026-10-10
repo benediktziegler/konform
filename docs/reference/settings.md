@@ -70,6 +70,18 @@ Rule codes or prefixes to disable (prefix-matched).
 
 **Default:** `[]` · **Type:** `list[str]` · **CLI:** `--ignore`, `--extend-ignore`
 
+#### `fixable`
+Rule codes or prefixes whose violations may be auto-fixed. Empty means every code. See
+[Fixes](../fixes.md#choosing-which-rules-fix).
+
+**Default:** `[]` · **Type:** `list[str]`
+
+#### `unfixable`
+Rule codes or prefixes that are never auto-fixed, even if `fixable` matches. Their
+violations are still reported.
+
+**Default:** `[]` · **Type:** `list[str]`
+
 #### `level`
 Minimum severity that causes a non-zero exit.
 
@@ -136,9 +148,11 @@ src       = [".", "src"]
 exclude   = []
 
 [tool.konform.lint]
-select = []
-ignore = []
-level  = "error"
+select    = []
+ignore    = []
+fixable   = []
+unfixable = []
+level     = "error"
 
 [tool.konform.lint.module-only-imports]
 exceptions = ["__future__", "typing", "typing_extensions", "collections.abc", "mycompany.compat"]

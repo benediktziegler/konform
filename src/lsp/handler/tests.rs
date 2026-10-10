@@ -1105,6 +1105,40 @@ fn watch_globs_cover_config_pattern_and_rules_files() {
 }
 
 #[test]
+fn excluded_documents_are_not_formatted_but_others_are() {
+    let dir = tempfile::tempdir().unwrap();
+    let excluded = file_uri(&dir.path().join("gen/mod.py"));
+    let included = file_uri(&dir.path().join("src/mod.py"));
+    let config = Config {
+        exclude: vec!["gen/**".into()],
+        config_dir: Some(dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    let mut server = TestServer::new(dir.path().to_path_buf(), config);
+    server.initialize();
+
+    let format = |server: &mut TestServer, uri: &Uri| {
+        server.request(
+            "textDocument/formatting",
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "options": { "tabSize": 4, "insertSpaces": true },
+            }),
+        )
+    };
+    server.open(&excluded, KIS001_SOURCE);
+    server.next_diagnostics(&excluded);
+    assert!(format(&mut server, &excluded).is_null());
+
+    server.open(&included, KIS001_SOURCE);
+    server.next_diagnostics(&included);
+    let edits: Vec<TextEdit> = serde_json::from_value(format(&mut server, &included)).unwrap();
+    assert_eq!(edits.len(), 1, "the KIS001 fix is applied outside gen/");
+
+    server.shutdown();
+}
+
+#[test]
 fn unknown_request_returns_method_not_found() {
     let dir = tempfile::tempdir().unwrap();
     let mut server = TestServer::with_default_config(dir.path().to_path_buf());

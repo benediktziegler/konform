@@ -8,10 +8,26 @@ use crate::config::{load_config, Config};
 use crate::module_probe::ModuleProbe;
 use crate::rules::{all_rules, Rule};
 use crate::types::Violation;
+use globset::GlobSet;
 use lsp_types::{TextDocumentContentChangeEvent, Uri};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// The file path behind the path part of a `file://` URI. On Windows that
+/// part is `/D:/a/b`, with a slash in front of the drive letter.
+fn file_path(uri_path: &str) -> PathBuf {
+    file_path_for(uri_path, cfg!(windows))
+}
+
+fn file_path_for(uri_path: &str, windows: bool) -> PathBuf {
+    match uri_path.as_bytes() {
+        [b'/', drive, b':', ..] if windows && drive.is_ascii_alphabetic() => {
+            PathBuf::from(&uri_path[1..])
+        }
+        _ => PathBuf::from(uri_path),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Per-document state
@@ -40,6 +56,9 @@ pub struct Session {
     /// recompiled) only when they change, not on every request.
     pub rules: Arc<Vec<Box<dyn Rule>>>,
     pub probe: Arc<ModuleProbe>,
+    /// `config`'s compiled `exclude` / `extend-exclude` globs; matching
+    /// documents get no diagnostics or fixes.
+    excluded: Option<GlobSet>,
     /// Working directory used for config discovery and relative path display.
     pub root: PathBuf,
 }
@@ -49,6 +68,7 @@ impl Session {
         let rules = Arc::new(all_rules(Arc::clone(&probe), config.config_dir.clone()));
         Self {
             documents: HashMap::new(),
+            excluded: config.exclude_set(),
             config: Arc::new(config),
             rules,
             probe,
@@ -110,6 +130,13 @@ impl Session {
         self.documents.get(uri).map(|d| d.source.as_str())
     }
 
+    /// `true` when the file behind `uri` matches the configured `exclude`.
+    pub fn is_excluded(&self, uri: &Uri) -> bool {
+        self.excluded
+            .as_ref()
+            .is_some_and(|gs| self.config.is_excluded(gs, &file_path(uri.path().as_str())))
+    }
+
     /// Store the most recently computed diagnostics for `codeAction` lookup.
     pub fn set_diagnostics(&mut self, uri: &Uri, diags: Vec<Violation>) {
         if let Some(doc) = self.documents.get_mut(uri) {
@@ -131,6 +158,7 @@ impl Session {
     /// Called when `workspace/didChangeWatchedFiles` fires.
     pub fn reload_config(&mut self) {
         self.config = Arc::new(load_config(Some(&self.root), None));
+        self.excluded = self.config.exclude_set();
         self.rules = Arc::new(all_rules(
             Arc::clone(&self.probe),
             self.config.config_dir.clone(),
@@ -189,5 +217,29 @@ impl Session {
             }
         }
         eprintln!("konform server: applied editor workspace settings");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_file_uris_lose_the_slash_before_the_drive() {
+        assert_eq!(
+            file_path_for("/D:/a/b.py", true),
+            PathBuf::from("D:/a/b.py")
+        );
+        assert_eq!(file_path_for("/d:/a", true), PathBuf::from("d:/a"));
+        // Unix paths, and anything that isn't a drive, are left alone.
+        assert_eq!(
+            file_path_for("/D:/a/b.py", false),
+            PathBuf::from("/D:/a/b.py")
+        );
+        assert_eq!(
+            file_path_for("/home/me/b.py", true),
+            PathBuf::from("/home/me/b.py")
+        );
+        assert_eq!(file_path_for("/", true), PathBuf::from("/"));
     }
 }

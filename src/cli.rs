@@ -174,7 +174,8 @@ pub struct CommonArgs {
     // ── File selection ────────────────────────────────────────────────────
     /// Exclude files matching these glob patterns.
     ///
-    /// Comma-separated. Example: `--exclude "tests/**,**/migrations/**"`
+    /// Comma-separated. Replaces the `exclude` list in `[tool.konform]`.
+    /// Example: `--exclude "tests/**,**/migrations/**"`
     #[arg(long, value_delimiter = ',', help_heading = "File selection")]
     pub exclude: Vec<String>,
 

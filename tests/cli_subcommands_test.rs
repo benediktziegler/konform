@@ -276,9 +276,11 @@ fn show_files_honours_exclude() {
     std::fs::create_dir(dir.path().join("sub")).unwrap();
     std::fs::write(dir.path().join("sub/x.py"), GOOD).unwrap();
 
-    // NOTE: documents existing behaviour: when walking `.`, a root-relative
-    // glob such as `sub/**` does not match (the walked path is `./sub/x.py`),
-    // so a `**/` prefix is needed.
+    // Root-relative globs match when walking `.` (the leading `./` is ignored).
+    check(dir.path(), &["--show-files", "--exclude", "sub/**", "."])
+        .assert()
+        .success()
+        .stdout("a.py\n");
     check(dir.path(), &["--show-files", "--exclude", "**/sub/**", "."])
         .assert()
         .success()
@@ -292,6 +294,71 @@ fn show_files_honours_exclude() {
     .assert()
     .success()
     .stdout("a.py\n");
+}
+
+/// `a.py`, `gen/x.py` and `vendor/y.py` plus a `konform.toml` with `config`.
+fn exclude_project(config: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("konform.toml"), config).unwrap();
+    std::fs::write(dir.path().join("a.py"), GOOD).unwrap();
+    for sub in ["gen", "vendor"] {
+        std::fs::create_dir(dir.path().join(sub)).unwrap();
+    }
+    std::fs::write(dir.path().join("gen/x.py"), GOOD).unwrap();
+    std::fs::write(dir.path().join("vendor/y.py"), GOOD).unwrap();
+    dir
+}
+
+fn shown_files(dir: &Path, extra: &[&str]) -> Vec<String> {
+    let out = konform(dir)
+        .args(["check", "--no-cache", "--show-files"])
+        .args(extra)
+        .arg(".")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|l| l.replace('\\', "/"))
+        .collect()
+}
+
+#[test]
+fn config_exclude_and_extend_exclude_skip_files() {
+    let dir = exclude_project("exclude = [\"gen/**\"]\nextend-exclude = [\"vendor/**\"]\n");
+    assert_eq!(shown_files(dir.path(), &[]), ["a.py"]);
+}
+
+#[test]
+fn cli_exclude_replaces_config_exclude_but_keeps_extend_exclude() {
+    let dir = exclude_project("exclude = [\"gen/**\"]\nextend-exclude = [\"vendor/**\"]\n");
+    assert_eq!(
+        shown_files(dir.path(), &["--exclude", "a.py"]),
+        ["gen/x.py"]
+    );
+}
+
+#[test]
+fn cli_extend_exclude_adds_to_config_exclude() {
+    let dir = exclude_project("exclude = [\"gen/**\"]\n");
+    assert_eq!(
+        shown_files(dir.path(), &["--extend-exclude", "vendor/**"]),
+        ["a.py"]
+    );
+}
+
+/// pre-commit passes file names explicitly; the config exclude must still apply.
+#[test]
+fn config_exclude_applies_to_explicit_files() {
+    let dir = exclude_project("exclude = [\"gen/**\"]\n");
+    konform(dir.path())
+        .args(["check", "--no-cache", "--show-files", "a.py", "gen/x.py"])
+        .assert()
+        .success()
+        .stdout("a.py\n");
 }
 
 // ---------------------------------------------------------------------------

@@ -65,7 +65,7 @@ konform check [OPTIONS] <FILE_PATHS>...
 
 | Option | Description |
 | ------ | ----------- |
-| `--exclude <EXCLUDE>` | Exclude files matching these glob patterns.<br><br>Comma-separated. Example: `--exclude "tests/**,**/migrations/**"` |
+| `--exclude <EXCLUDE>` | Exclude files matching these glob patterns.<br><br>Comma-separated. Replaces the `exclude` list in `[tool.konform]`. Example: `--exclude "tests/**,**/migrations/**"` |
 | `--extend-exclude <EXTEND_EXCLUDE>` | Like `--exclude`, but adds patterns on top of those already configured |
 | `--per-file-ignores <PER_FILE_IGNORES>` | Suppress specific rules for files matching a glob pattern.<br><br>Format: `GLOB:CODE[,CODE,...]`. The glob is matched against the file path relative to the project root. Codes support the same prefix matching as `--ignore`. Overrides the `per-file-ignores` table from the config file.<br><br>Example: `--per-file-ignores "tests/**:KIS001,KPT"` |
 | `--extend-per-file-ignores <EXTEND_PER_FILE_IGNORES>` | Like `--per-file-ignores`, but merges with the configured list instead of replacing it |

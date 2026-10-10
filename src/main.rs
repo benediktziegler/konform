@@ -39,40 +39,23 @@ use types::Level;
 // File walking
 // ---------------------------------------------------------------------------
 
-/// Compile a list of glob patterns into an optional [`globset::GlobSet`].
-///
-/// Returns `None` when `patterns` is empty so callers can short-circuit.
-fn build_glob_set(patterns: &[String]) -> Option<globset::GlobSet> {
-    use globset::{Glob, GlobSetBuilder};
-    if patterns.is_empty() {
-        return None;
-    }
-    let mut builder = GlobSetBuilder::new();
-    for p in patterns {
-        if let Ok(g) = Glob::new(p) {
-            builder.add(g);
-        }
-    }
-    builder.build().ok()
-}
-
-fn walk_python_files(path: &Path, exclude: &[String]) -> Vec<PathBuf> {
+fn walk_python_files(path: &Path, config: &config::Config) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    let exclude_set = build_glob_set(exclude);
+    let exclude_set = config.exclude_set();
 
     let walker = WalkBuilder::new(path).standard_filters(true).build();
     for entry in walker.flatten() {
-        let p = entry.path().to_path_buf();
+        let p = strip_leading_curdir(entry.path().to_path_buf());
         if p.extension().is_none_or(|e| e != "py") {
             continue;
         }
-        if let Some(gs) = &exclude_set {
-            let path_str = p.to_string_lossy();
-            if gs.is_match(path_str.as_ref()) || p.file_name().is_some_and(|n| gs.is_match(n)) {
-                continue;
-            }
+        if exclude_set
+            .as_ref()
+            .is_some_and(|gs| config.is_excluded(gs, &p))
+        {
+            continue;
         }
-        files.push(strip_leading_curdir(p));
+        files.push(p);
     }
     files
 }
@@ -293,19 +276,27 @@ fn inject_default_subcommand(args: &mut Vec<std::ffi::OsString>) {
 // CLI → Config integration
 // ---------------------------------------------------------------------------
 
-/// Merge `--select` / `--ignore` CLI flags into `config`.
+/// Merge the rule- and file-selection CLI flags into `config`.
 ///
 /// `--select` completely overrides the config-file list (explicit intent).
 /// `--ignore` extends the config-file list (additive suppression).
-fn apply_cli_overrides(
-    config: &mut config::Config,
-    select: &[String],
-    ignore: &[String],
-    extend_select: &[String],
-    extend_ignore: &[String],
-    per_file_ignores: &[String],
-    extend_per_file_ignores: &[String],
-) {
+fn apply_cli_overrides(config: &mut config::Config, args: &cli::CommonArgs) {
+    let cli::CommonArgs {
+        select,
+        ignore,
+        extend_select,
+        extend_ignore,
+        per_file_ignores,
+        extend_per_file_ignores,
+        exclude,
+        extend_exclude,
+        ..
+    } = args;
+    // --exclude replaces the configured list; --extend-exclude adds to it.
+    if !exclude.is_empty() {
+        config.exclude = exclude.to_vec();
+    }
+    config.extend_exclude.extend(extend_exclude.iter().cloned());
     // --select fully replaces the config list (explicit override intent).
     if !select.is_empty() {
         config.lint.select = select.to_vec();
@@ -384,23 +375,7 @@ fn run_check(args: CheckArgs, isolated: bool) {
     if let Some(ref cd) = args.cache_dir {
         config.cache_dir = cd.to_string_lossy().into_owned();
     }
-    apply_cli_overrides(
-        &mut config,
-        &args.common.select,
-        &args.common.ignore,
-        &args.common.extend_select,
-        &args.common.extend_ignore,
-        &args.common.per_file_ignores,
-        &args.common.extend_per_file_ignores,
-    );
-
-    let exclude: Vec<String> = args
-        .common
-        .exclude
-        .iter()
-        .chain(args.common.extend_exclude.iter())
-        .cloned()
-        .collect();
+    apply_cli_overrides(&mut config, &args.common);
 
     // Walk only real (non-stdin) paths; "-" is not a filesystem path.
     let all_file_paths: Vec<PathBuf> = args
@@ -408,7 +383,7 @@ fn run_check(args: CheckArgs, isolated: bool) {
         .file_paths
         .iter()
         .filter(|p| p.as_os_str() != "-")
-        .flat_map(|p| walk_python_files(p, &exclude))
+        .flat_map(|p| walk_python_files(p, &config))
         .collect();
 
     // Read stdin once here so every code path below (--show-files, --diff,
@@ -755,7 +730,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
             output_format: args.output_format,
             no_cache: args.no_cache || args.ignore_noqa,
         };
-        run_watch_loop(&args.common.file_paths, &exclude, &ctx, cache);
+        run_watch_loop(&args.common.file_paths, &ctx, cache);
     }
 
     if args.exit_zero {
@@ -781,18 +756,13 @@ struct RecheckContext<'a> {
 /// Enter the file-watching loop.  Called after the initial check pass when
 /// `-w` / `--watch` is set.  This function never returns; the process exits
 /// when Ctrl-C delivers SIGINT or the watcher backend disconnects.
-fn run_watch_loop(
-    watch_paths: &[PathBuf],
-    exclude: &[String],
-    ctx: &RecheckContext<'_>,
-    mut cache: Cache,
-) -> ! {
+fn run_watch_loop(watch_paths: &[PathBuf], ctx: &RecheckContext<'_>, mut cache: Cache) -> ! {
     use notify::{Config as WatchConfig, RecommendedWatcher, RecursiveMode, Watcher};
     use std::collections::HashSet;
     use std::sync::mpsc;
     use std::time::Duration;
 
-    let exclude_set = build_glob_set(exclude);
+    let exclude_set = ctx.config.exclude_set();
 
     // Channel that receives raw notify events.
     let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
@@ -829,15 +799,8 @@ fn run_watch_loop(
         match rx.recv_timeout(debounce) {
             Ok(Ok(event)) => {
                 for path in event.paths {
-                    if path.extension().is_some_and(|e| e == "py") && path.is_file() {
-                        let excluded = exclude_set.as_ref().is_some_and(|gs| {
-                            let s = path.to_string_lossy();
-                            gs.is_match(s.as_ref())
-                                || path.file_name().is_some_and(|n| gs.is_match(n))
-                        });
-                        if !excluded {
-                            pending.insert(path);
-                        }
+                    if is_watched_file(&path, exclude_set.as_ref(), ctx.config) {
+                        pending.insert(path);
                     }
                 }
             }
@@ -854,6 +817,18 @@ fn run_watch_loop(
             }
         }
     }
+}
+
+/// Should a change to `path` trigger a re-check in watch mode: a Python file
+/// that still exists and is not excluded.
+fn is_watched_file(
+    path: &Path,
+    exclude: Option<&globset::GlobSet>,
+    config: &config::Config,
+) -> bool {
+    path.extension().is_some_and(|e| e == "py")
+        && path.is_file()
+        && !exclude.is_some_and(|gs| config.is_excluded(gs, path))
 }
 
 /// Re-check a batch of changed files and print incremental output to stderr.
@@ -1436,6 +1411,34 @@ fn main() {
 // ---------------------------------------------------------------------------
 // Unit tests for add_noqa helpers
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+
+    #[test]
+    fn watch_mode_rechecks_existing_python_files_that_are_not_excluded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("gen")).unwrap();
+        for name in ["a.py", "gen/b.py", "notes.txt"] {
+            std::fs::write(dir.path().join(name), "x = 1\n").unwrap();
+        }
+        let config = config::Config {
+            exclude: vec!["gen".into()],
+            config_dir: Some(dir.path().to_path_buf()),
+            ..config::Config::default()
+        };
+        let exclude = config.exclude_set();
+        let watched =
+            |name: &str| is_watched_file(&dir.path().join(name), exclude.as_ref(), &config);
+        assert!(watched("a.py"));
+        assert!(!watched("gen/b.py"), "excluded directory");
+        assert!(!watched("notes.txt"), "not Python");
+        assert!(!watched("gone.py"), "deleted files have nothing to check");
+        // Without any exclude everything Python counts.
+        assert!(is_watched_file(&dir.path().join("gen/b.py"), None, &config));
+    }
+}
 
 #[cfg(test)]
 mod noqa_tests {

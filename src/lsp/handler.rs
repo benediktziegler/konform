@@ -74,7 +74,7 @@ pub fn server_capabilities() -> ServerCapabilities {
             work_done_progress_options: Default::default(),
         })),
 
-        // Whole-document and range formatting (runs the IS001 fixer).
+        // Whole-document and range formatting (runs every enabled fixer).
         document_formatting_provider: Some(OneOf::Left(true)),
         document_range_formatting_provider: Some(OneOf::Left(true)),
 
@@ -466,6 +466,9 @@ fn handle_formatting(
     let uri = &params.text_document.uri;
 
     let sess = session.read().unwrap();
+    if sess.is_excluded(uri) {
+        return Ok(serde_json::Value::Null);
+    }
     let source = match sess.source(uri) {
         Some(s) => s.to_owned(),
         None => return Ok(serde_json::Value::Null),
@@ -640,6 +643,9 @@ fn run_diagnostics(
     uri: &Uri,
 ) -> (Vec<Violation>, Vec<lsp_types::Diagnostic>) {
     let sess = session.read().unwrap();
+    if sess.is_excluded(uri) {
+        return (vec![], vec![]);
+    }
     let source = match sess.source(uri) {
         Some(s) => s.to_owned(),
         None => return (vec![], vec![]),

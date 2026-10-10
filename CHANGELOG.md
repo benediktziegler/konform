@@ -2,6 +2,7 @@
 
 ### Feat
 
+- **lsp**: add noqa hover and a disable-for-this-line quick fix
 - **cli**: add check --show-settings
 - **config**: inherit settings from another file with extend
 - **kst**: add replace and delete autofixes to structural rules
@@ -30,6 +31,7 @@
 
 ### Fix
 
+- **noqa**: keep --add-noqa comments out of strings and continuations
 - **config**: let exclude match parent directories like Ruff
 - **docs**: list each environment variable once
 - **rules**: warn on invalid KNQ settings

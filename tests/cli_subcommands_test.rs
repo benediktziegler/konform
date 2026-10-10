@@ -443,6 +443,35 @@ fn show_settings_prints_the_merged_settings_as_toml() {
     assert_eq!(lint["unfixable"], toml::Value::from(vec!["KIS002"]));
 }
 
+#[test]
+fn add_noqa_warns_about_lines_that_cannot_take_a_comment() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("konform.toml"),
+        "[lint.user-defined-patterns]\n[[lint.user-defined-patterns.rules]]\n\
+         id = \"KPT901\"\nmessage = \"m\"\npattern = 'secret'\n",
+    )
+    .unwrap();
+    let src = "x = \"\"\"secret\nend\"\"\"\nsecret = 1\n";
+    std::fs::write(dir.path().join("a.py"), src).unwrap();
+    konform(dir.path())
+        .args([
+            "check",
+            "--no-cache",
+            "--select",
+            "KPT901",
+            "--add-noqa",
+            "a.py",
+        ])
+        .assert()
+        .success()
+        .stderr(contains("a.py:1: cannot add `# noqa` here"));
+    assert_eq!(
+        read(dir.path().join("a.py")),
+        "x = \"\"\"secret\nend\"\"\"\nsecret = 1  # noqa: KPT901\n"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // check --statistics / --exit-zero / output formats / --output-file
 // ---------------------------------------------------------------------------

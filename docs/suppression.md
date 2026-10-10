@@ -25,7 +25,9 @@ $ konform check --add-noqa src/
 ```
 
 Appends `# noqa: CODE` to each violating line. Codes merge into an existing list
-(sorted, deduplicated); a bare `# noqa` is left untouched.
+(sorted, deduplicated); a bare `# noqa` is left untouched. A line that can't take a comment
+(it ends inside a multi-line string, or after a `\` continuation) is left alone with a
+warning naming it, since the text would otherwise end up inside the string.
 
 ### Baselining with `--add-noqa`
 

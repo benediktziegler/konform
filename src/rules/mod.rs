@@ -509,6 +509,28 @@ pub fn parse_noqa(text: &str) -> Option<Noqa<'_>> {
     })
 }
 
+/// Did adding `# noqa` comments to the 0-based `lines` of `before` work?
+/// In `after` each of those lines must carry a real `# noqa` comment (not
+/// text inside a multi-line string) that suppresses its codes, and a file
+/// that parsed before must still parse (a comment after a `\` continuation
+/// would break it).
+pub fn noqa_comments_apply<'a>(
+    before: &FileContext,
+    after: &FileContext,
+    lines: impl IntoIterator<Item = (usize, &'a std::collections::BTreeSet<String>)>,
+) -> bool {
+    if after.is_python() && before.has_valid_syntax() && !after.has_valid_syntax() {
+        return false;
+    }
+    let comments = after.noqa_lines();
+    let none = HashMap::new();
+    lines.into_iter().all(|(idx, codes)| {
+        comments.get(idx).is_some_and(|comment| {
+            parse_noqa(comment).is_some() && codes.iter().all(|c| has_noqa(comment, c, &none))
+        })
+    })
+}
+
 /// Merge `new_codes` into any existing `# noqa` comment on `line`.
 ///
 /// Cases:

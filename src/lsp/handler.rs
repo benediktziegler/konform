@@ -18,7 +18,9 @@ use super::convert::{
 };
 use super::session::Session;
 use crate::engine::{run_check, run_fix, CheckInput};
-use crate::rules::{has_noqa, merge_noqa, parse_noqa, FileContext, FixTarget, Rule, RuleDoc};
+use crate::rules::{
+    merge_noqa, noqa_comments_apply, parse_noqa, FileContext, FixTarget, Rule, RuleDoc,
+};
 use crate::types::Violation;
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::*;
@@ -443,11 +445,7 @@ fn noqa_line_edit(source: &str, violation: &Violation) -> Option<TextEdit> {
     lines[idx] = &new_line;
     let after = FileContext::from_source("x.py".into(), lines.join("\n"));
     let before = FileContext::from_source("x.py".into(), source.to_owned());
-    let suppresses = after
-        .noqa_lines()
-        .get(idx)
-        .is_some_and(|comment| has_noqa(comment, &violation.rule, &HashMap::new()));
-    if !suppresses || (before.has_valid_syntax() && !after.has_valid_syntax()) {
+    if !noqa_comments_apply(&before, &after, [(idx, &codes)]) {
         return None;
     }
     let line_no = idx as u32;

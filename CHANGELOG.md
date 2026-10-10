@@ -2,6 +2,7 @@
 
 ### Feat
 
+- **pre-commit**: add konform and konform-fix hooks
 - **action**: add a GitHub Action that runs konform check
 - **cli**: add completions subcommand for shell completion scripts
 - **rules**: reject weak KNQ001 reasons

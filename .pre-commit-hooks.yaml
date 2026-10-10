@@ -1,0 +1,18 @@
+# Hooks for using konform from other repositories' `.pre-commit-config.yaml`.
+# `language: rust` makes pre-commit build the binary with cargo (bootstrapping
+# a toolchain if none is installed), so the first run takes a minute.
+- id: konform
+  name: konform
+  description: Lint Python files with konform.
+  entry: konform check
+  language: rust
+  types_or: [python, pyi]
+  require_serial: true
+
+- id: konform-fix
+  name: konform (fix)
+  description: Lint Python files with konform and apply safe auto-fixes.
+  entry: konform check --fix --exit-non-zero-on-fix
+  language: rust
+  types_or: [python, pyi]
+  require_serial: true

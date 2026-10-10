@@ -40,6 +40,9 @@ to ignore all configuration files.
     ```
 
 The complete list of options is in the [settings reference](reference/settings.md).
+A config file that can't be read or parsed, or whose settings have the wrong type, is an
+error: `check` and `rule --test` exit with code 2, other commands warn and the language
+server shows it. konform never silently falls back to the defaults.
 `konform check --show-settings .` prints the settings in effect, after `extend` and any
 CLI flags, along with the config file used and the enabled rules.
 
@@ -92,4 +95,6 @@ in the project.
 
 When the config shape changes (as in 0.3.0), konform auto-migrates an outdated
 file in place the first time you run any command (comments and other
-`[tool.*]` sections are preserved) and prints a summary to stderr.
+`[tool.*]` sections are preserved) and prints a summary to stderr. Files pulled in
+through `extend` are migrated the same way; one that can't be written (say, a read-only
+shared file) is upgraded in memory each run, with a note saying so.

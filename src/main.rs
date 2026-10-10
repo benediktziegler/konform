@@ -424,6 +424,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
     }
     let active_rules = all_rules(Arc::clone(&probe), config.config_dir.clone());
     if args.show_settings {
+        warn_config_errors(&config);
         print!("{}", settings_toml(&config, &active_rules, &python));
         std::process::exit(0);
     }
@@ -936,6 +937,14 @@ fn settings_toml(config: &config::Config, rules: &[Box<dyn rules::Rule>], python
         .join("\n")
 }
 
+/// Print problems with the config file itself as warnings, for commands
+/// that can still do their job on the defaults.
+fn warn_config_errors(config: &config::Config) {
+    for e in &config.errors {
+        eprintln!("{} {e}", "warning:".yellow().bold());
+    }
+}
+
 fn exit_on_config_errors(config: &config::Config, rules: &[Box<dyn rules::Rule>]) {
     let errors: Vec<String> = config
         .errors
@@ -1028,6 +1037,9 @@ fn run_rule(args: RuleArgs, isolated: bool) {
         let cwd = std::env::current_dir().unwrap_or_default();
         load_config(Some(&cwd), None)
     };
+    if !args.test {
+        warn_config_errors(&config);
+    }
     let probe = Arc::new(ModuleProbe::default());
     let all = all_rules(probe, config.config_dir.clone());
     let docs: Vec<rules::RuleDoc> = all
@@ -1411,6 +1423,7 @@ fn patch_ruff_config(
 fn run_clean(args: CleanArgs) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let config = load_config(Some(&cwd), args.config.as_deref());
+    warn_config_errors(&config);
     let cache_path = std::path::Path::new(&config.cache_dir);
     if cache_path.exists() {
         match std::fs::remove_dir_all(cache_path) {

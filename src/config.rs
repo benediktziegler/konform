@@ -340,61 +340,32 @@ pub fn load_config(start: Option<&Path>, explicit_path: Option<&Path>) -> Config
     }
 }
 
-/// Load the config at `path`; on any problem reading it, the defaults.
+/// Load the config at `path`. A file that can't be read or parsed, or
+/// whose settings don't fit, yields the defaults plus an entry in
+/// [`Config::errors`], so callers can refuse to run on a broken config
+/// instead of silently ignoring it.
 fn load_config_file(path: PathBuf) -> Config {
     let config_dir = path.parent().map(Path::to_path_buf);
+    let broken = |error: String| Config {
+        config_dir: config_dir.clone(),
+        errors: vec![error],
+        ..Config::default()
+    };
 
-    let content = match std::fs::read_to_string(&path) {
+    let content = match read_migrated(&path) {
         Ok(c) => c,
-        Err(_) => {
-            return Config {
-                config_dir,
-                ..Config::default()
-            }
-        }
+        Err(e) => return broken(e),
     };
-
-    // ── Config migration ────────────────────────────────────────────────────
-    // Auto-upgrade an outdated config shape (e.g. the pre-0.3 flat/category
-    // format) before parsing. Rewritten with `toml_edit` so comments and
-    // formatting elsewhere in the file (other `[tool.*]` sections) survive.
-    let content = match crate::migrations::migrate_content(&path, &content) {
-        Some((migrated, reports)) => {
-            if std::fs::write(&path, &migrated).is_ok() {
-                eprintln!(
-                    "konform: migrated {} to the current config format:",
-                    path.display()
-                );
-                for report in &reports {
-                    eprintln!("  [{}] {}", report.id, report.description);
-                    for note in &report.notes {
-                        eprintln!("    - {note}");
-                    }
-                }
-            }
-            migrated
-        }
-        None => content,
-    };
-
     let raw: toml::Value = match toml::from_str(&content) {
         Ok(v) => v,
-        Err(_) => {
-            return Config {
-                config_dir,
-                ..Config::default()
-            }
-        }
+        Err(e) => return broken(format!("{}: invalid TOML: {e}", path.display())),
     };
-
-    let section = match konform_section(&raw, &path) {
-        Some(s) => s,
-        None => {
-            return Config {
-                config_dir,
-                ..Config::default()
-            }
-        }
+    // A pyproject.toml without `[tool.konform]` simply means "defaults".
+    let Some(section) = konform_section(&raw, &path) else {
+        return Config {
+            config_dir,
+            ..Config::default()
+        };
     };
 
     // ── Inheritance: lay this file over the ones it `extend`s ──────────────
@@ -404,7 +375,14 @@ fn load_config_file(path: PathBuf) -> Config {
         Err(e) => (section, vec![e]),
     };
 
-    let mut cfg = Config::deserialize(section.clone()).unwrap_or_default();
+    let mut cfg = match Config::deserialize(section.clone()) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let mut cfg = broken(format!("{}: invalid settings: {e}", path.display()));
+            cfg.errors.splice(0..0, errors);
+            return cfg;
+        }
+    };
     cfg.config_dir = config_dir;
     cfg.extends = chain.split_off(1);
     cfg.errors = errors;
@@ -435,6 +413,37 @@ fn load_config_file(path: PathBuf) -> Config {
     }
 
     cfg
+}
+
+/// Read the config file at `path`, upgrading an outdated config shape (e.g.
+/// the pre-0.3 flat/category format) first. The upgrade is written back with
+/// `toml_edit`, so comments and other `[tool.*]` sections survive; if the
+/// file can't be written (say, a read-only shared base), the upgraded text
+/// is still used and a note says so.
+fn read_migrated(path: &Path) -> Result<String, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read config {}: {e}", path.display()))?;
+    let Some((migrated, reports)) = crate::migrations::migrate_content(path, &content) else {
+        return Ok(content);
+    };
+    match std::fs::write(path, &migrated) {
+        Ok(()) => eprintln!(
+            "konform: migrated {} to the current config format:",
+            path.display()
+        ),
+        Err(e) => eprintln!(
+            "konform: {} uses an old config format; using an upgraded copy \
+(could not rewrite it: {e}):",
+            path.display()
+        ),
+    }
+    for report in &reports {
+        eprintln!("  [{}] {}", report.id, report.description);
+        for note in &report.notes {
+            eprintln!("    - {note}");
+        }
+    }
+    Ok(migrated)
 }
 
 /// The konform table of a parsed config file: `[tool.konform]` in a
@@ -483,8 +492,7 @@ fn resolve_extend(
     }
     chain.push(base_path.clone());
 
-    let content = std::fs::read_to_string(&base_path)
-        .map_err(|e| format!("cannot read extended config {}: {e}", base_path.display()))?;
+    let content = read_migrated(&base_path)?;
     let raw: toml::Value = toml::from_str(&content)
         .map_err(|e| format!("{}: invalid TOML: {e}", base_path.display()))?;
     let base =
@@ -683,6 +691,90 @@ mod tests {
             "{:?}",
             cfg.errors
         );
+    }
+
+    #[test]
+    fn extended_files_in_an_old_format_are_migrated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = write(tmp.path(), "base.toml", "select = [\"KIS\"]\n");
+        let child = write(tmp.path(), "konform.toml", "extend = \"base.toml\"\n");
+        let cfg = load_config(None, Some(&child));
+        assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
+        assert_eq!(cfg.lint.select, ["KIS"]);
+        assert!(
+            std::fs::read_to_string(&base).unwrap().contains("[lint]"),
+            "the base is rewritten in the current format"
+        );
+    }
+
+    #[test]
+    fn a_read_only_base_in_an_old_format_is_upgraded_in_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = write(tmp.path(), "base.toml", "select = [\"KIS\"]\n");
+        let original = std::fs::metadata(&base).unwrap().permissions();
+        let mut read_only = original.clone();
+        read_only.set_readonly(true);
+        std::fs::set_permissions(&base, read_only).unwrap();
+        // Root can write through the read-only flag; nothing to test then.
+        let writable = std::fs::OpenOptions::new().append(true).open(&base).is_ok();
+
+        let child = write(tmp.path(), "konform.toml", "extend = \"base.toml\"\n");
+        let cfg = load_config(None, Some(&child));
+        // Back to how it was, so the temp dir can be removed on Windows too.
+        std::fs::set_permissions(&base, original).unwrap();
+
+        assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
+        assert_eq!(cfg.lint.select, ["KIS"]);
+        if !writable {
+            assert!(
+                !std::fs::read_to_string(&base).unwrap().contains("[lint]"),
+                "the read-only file stays as it was"
+            );
+        }
+    }
+
+    // ── broken config files ──────────────────────────────────────────────
+
+    #[test]
+    fn invalid_toml_is_an_error_not_silent_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write(tmp.path(), "pyproject.toml", "[tool.konform\nselect = \n");
+        let cfg = load_config(None, Some(&path));
+        assert_eq!(cfg.errors.len(), 1);
+        assert!(cfg.errors[0].contains("invalid TOML"), "{:?}", cfg.errors);
+        assert_eq!(cfg.config_dir.as_deref(), Some(tmp.path()));
+    }
+
+    #[test]
+    fn settings_of_the_wrong_type_are_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write(tmp.path(), "konform.toml", "[lint]\nselect = \"KIS\"\n");
+        let cfg = load_config(None, Some(&path));
+        assert!(
+            cfg.errors[0].contains("invalid settings"),
+            "{:?}",
+            cfg.errors
+        );
+        assert!(cfg.lint.select.is_empty());
+    }
+
+    #[test]
+    fn a_missing_explicit_config_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = load_config(None, Some(&tmp.path().join("nope.toml")));
+        assert!(
+            cfg.errors[0].contains("cannot read config"),
+            "{:?}",
+            cfg.errors
+        );
+    }
+
+    #[test]
+    fn a_pyproject_without_a_konform_table_is_fine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write(tmp.path(), "pyproject.toml", "[project]\nname = \"x\"\n");
+        let cfg = load_config(None, Some(&path));
+        assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
     }
 
     #[test]

@@ -382,6 +382,23 @@ fn config_exclude_applies_to_explicit_files() {
 }
 
 #[test]
+fn an_unparsable_config_is_a_hard_error_for_check_and_a_warning_for_rule_list() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform\n").unwrap();
+    std::fs::write(dir.path().join("a.py"), BAD).unwrap();
+    konform(dir.path())
+        .args(["check", "--no-cache", "a.py"])
+        .assert()
+        .code(2)
+        .stderr(contains("invalid TOML"));
+    konform(dir.path())
+        .args(["rule", "--list"])
+        .assert()
+        .success()
+        .stderr(contains("warning:").and(contains("invalid TOML")));
+}
+
+#[test]
 fn broken_extend_is_a_hard_error() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("konform.toml"), "extend = \"nope.toml\"\n").unwrap();

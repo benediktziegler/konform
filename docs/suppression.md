@@ -15,7 +15,8 @@ from os.path import join   # noqa           everything on this line
 Text after the codes is a free-form explanation and never changes what is suppressed:
 `# noqa: KIS001  # re-exported for plugins` suppresses `KIS001` only.
 [KNQ001](rules/knq001.md) can require that explanation, and [KNQ002](rules/knq002.md)
-wants it in its own `# ...` comment.
+wants it in its own `# ...` comment. [KNQ003](rules/knq003.md) flags (and removes) codes that no
+longer suppress anything.
 
 ## Adding `noqa` automatically
 

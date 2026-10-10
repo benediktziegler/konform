@@ -26,6 +26,7 @@ pub mod kis001;
 pub mod kis002;
 pub mod knq001;
 pub mod knq002;
+pub mod knq003;
 pub mod kpt;
 pub mod kst;
 mod scope;
@@ -59,9 +60,22 @@ pub struct FileContext {
     /// [`Rule::gates_per_violation`]) use [`FileContext::is_enabled`] to skip
     /// the codes the user turned off.
     pub selection: RuleSelection,
+    /// What the other rules report with `# noqa` ignored. Set by the engine
+    /// only for rules that ask for it (see [`Rule::audits_noqa`]).
+    pub noqa_audit: Option<Arc<NoqaAudit>>,
     /// Lazily parsed AST, shared by every rule and by clones of this context.
     /// Always derived from `source`; see [`FileContext::parsed`].
     parsed: Arc<OnceLock<Parsed<ModModule>>>,
+}
+
+/// Input for rules that judge `# noqa` comments by what they suppress (KNQ003).
+#[derive(Debug, Clone, Default)]
+pub struct NoqaAudit {
+    /// Violations of every other enabled rule, with `# noqa` ignored and
+    /// `per-file-ignores` applied.
+    pub violations: Vec<Violation>,
+    /// Every enabled code those rules can report (KPT / KST ids included).
+    pub codes: Vec<String>,
 }
 
 /// Identifies one violation by its rule code and 1-based line / 0-based
@@ -88,6 +102,7 @@ impl FileContext {
             noqa_aliases: HashMap::new(),
             fix_target: None,
             selection: RuleSelection::default(),
+            noqa_audit: None,
             parsed: Arc::new(OnceLock::new()),
         }
     }
@@ -265,6 +280,12 @@ pub trait Rule: Send + Sync {
     /// a renamed binding apart from an unrelated one) and is only applied
     /// when `--unsafe-fixes` is also passed -- see [`crate::engine::run_fix`].
     fn is_unsafe_fix(&self) -> bool {
+        false
+    }
+
+    /// `true` for rules that need [`FileContext::noqa_audit`]: the engine
+    /// then runs the other rules with `# noqa` ignored before this one.
+    fn audits_noqa(&self) -> bool {
         false
     }
 
@@ -542,6 +563,7 @@ pub fn all_rules(
         Box::new(kis002::Kis002Rule::new()),
         Box::new(knq001::Knq001Rule::new()),
         Box::new(knq002::Knq002Rule::new()),
+        Box::new(knq003::Knq003Rule::new()),
         Box::new(kpt::KptRule::new(config_dir.clone())),
         Box::new(kst::KstRule::new(config_dir)),
     ]

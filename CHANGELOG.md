@@ -2,6 +2,7 @@
 
 ### Feat
 
+- **rules**: add opt-in KNQ003 for unused noqa codes
 - **config**: add exclude and extend-exclude settings
 - **pre-commit**: add konform and konform-fix hooks
 - **action**: add a GitHub Action that runs konform check

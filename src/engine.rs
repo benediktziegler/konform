@@ -17,12 +17,13 @@
 //! ```
 
 use crate::config::Config;
-use crate::rules::{FileContext, FixTarget, Rule};
+use crate::rules::{FileContext, FixTarget, NoqaAudit, Rule};
 use crate::types::Violation;
 use anyhow::Result;
 use globset::{Glob, GlobMatcher};
 use ruff_python_parser::parse_module;
 use std::path::Path;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // CheckInput
@@ -85,34 +86,82 @@ pub fn run_check(
     }
     ctx.noqa_aliases = config.lint.noqa_aliases.clone();
     ctx.selection = config.selection();
-    let mut violations: Vec<Violation> = rules
+    let active: Vec<&dyn Rule> = active_rules(rules, config).collect();
+    if active.iter().any(|r| r.audits_noqa()) {
+        ctx.noqa_audit = Some(Arc::new(noqa_audit(&ctx, rules, config)));
+    }
+    let mut violations: Vec<Violation> = active
         .iter()
-        .filter(|r| r.gates_per_violation() || config.runs_rule(r.code(), r.opt_in()))
         .flat_map(|r| r.check(&ctx, config.rule_config(r.config_name())))
         .collect();
-
-    // Apply per-file-ignores: build GlobMatchers once, then filter.
-    if !config.lint.per_file_ignores.is_empty() && !violations.is_empty() {
-        let matchers: Vec<(GlobMatcher, Vec<String>)> = config
-            .lint
-            .per_file_ignores
-            .iter()
-            .filter_map(|(pat, codes)| {
-                Glob::new(pat)
-                    .ok()
-                    .map(|g| (g.compile_matcher(), codes.clone()))
-            })
-            .collect();
-        if !matchers.is_empty() {
-            let config_dir = config.config_dir.as_deref();
-            let cwd = std::env::current_dir().ok();
-            violations.retain(|v| {
-                !per_file_ignored(input.path, &v.rule, &matchers, config_dir, cwd.as_deref())
-            });
-        }
-    }
-
+    apply_per_file_ignores(input.path, &mut violations, config);
     violations
+}
+
+/// The rules of `rules` that `config` turns on (rules emitting several codes
+/// always run and gate each code themselves).
+fn active_rules<'a>(
+    rules: &'a [Box<dyn Rule>],
+    config: &'a Config,
+) -> impl Iterator<Item = &'a dyn Rule> {
+    rules
+        .iter()
+        .map(|r| &**r)
+        .filter(|r| r.gates_per_violation() || config.runs_rule(r.code(), r.opt_in()))
+}
+
+/// What the enabled non-KNQ rules report for `ctx` with `# noqa` ignored,
+/// for rules that judge the suppression comments (see [`Rule::audits_noqa`]).
+fn noqa_audit(ctx: &FileContext, rules: &[Box<dyn Rule>], config: &Config) -> NoqaAudit {
+    let mut raw = ctx.clone();
+    raw.ignore_noqa = true;
+    raw.noqa_audit = None;
+    let audited: Vec<&dyn Rule> = active_rules(rules, config)
+        .filter(|r| r.category() != "KNQ")
+        .collect();
+    let mut violations: Vec<Violation> = audited
+        .iter()
+        .flat_map(|r| r.check(&raw, config.rule_config(r.config_name())))
+        .collect();
+    apply_per_file_ignores(&ctx.path, &mut violations, config);
+    let codes = audited
+        .iter()
+        .flat_map(|r| {
+            if r.gates_per_violation() {
+                r.catalog(config.rule_config(r.config_name()))
+                    .into_iter()
+                    .map(|doc| doc.code)
+                    .filter(|code| ctx.is_enabled(code))
+                    .collect()
+            } else {
+                vec![r.code().to_owned()]
+            }
+        })
+        .collect();
+    NoqaAudit { violations, codes }
+}
+
+/// Drop the violations that `config.lint.per_file_ignores` suppresses for `path`.
+fn apply_per_file_ignores(path: &Path, violations: &mut Vec<Violation>, config: &Config) {
+    if config.lint.per_file_ignores.is_empty() || violations.is_empty() {
+        return;
+    }
+    let matchers: Vec<(GlobMatcher, Vec<String>)> = config
+        .lint
+        .per_file_ignores
+        .iter()
+        .filter_map(|(pat, codes)| {
+            Glob::new(pat)
+                .ok()
+                .map(|g| (g.compile_matcher(), codes.clone()))
+        })
+        .collect();
+    if matchers.is_empty() {
+        return;
+    }
+    let config_dir = config.config_dir.as_deref();
+    let cwd = std::env::current_dir().ok();
+    violations.retain(|v| !per_file_ignored(path, &v.rule, &matchers, config_dir, cwd.as_deref()));
 }
 
 // ---------------------------------------------------------------------------
@@ -181,15 +230,15 @@ pub fn run_fix(
         // `fixable()` can't see inline `pyproject.toml` patterns. Rules whose
         // fix is unsafe (`Rule::is_unsafe_fix`) are skipped unless the caller
         // opted in via `unsafe_fixes` -- Ruff's `--unsafe-fixes` separation.
-        for rule in rules.iter().filter(|r| {
-            (r.gates_per_violation() || config.runs_rule(r.code(), r.opt_in()))
-                && (unsafe_fixes || !r.is_unsafe_fix())
-        }) {
+        for rule in active_rules(rules, config).filter(|r| unsafe_fixes || !r.is_unsafe_fix()) {
             let mut ctx = FileContext::from_source(input.path.to_path_buf(), src.clone());
             ctx.ignore_noqa = input.ignore_noqa || config.ignore_noqa;
             ctx.noqa_aliases = config.lint.noqa_aliases.clone();
             ctx.selection = config.selection();
             ctx.fix_target = input.fix_target.clone();
+            if rule.audits_noqa() {
+                ctx.noqa_audit = Some(Arc::new(noqa_audit(&ctx, rules, config)));
+            }
             if let Some(fixed) = rule.fix(&ctx, config.rule_config(rule.config_name()))? {
                 if fixed == src {
                     continue; // no-op fix; nothing to apply or loop on
@@ -368,6 +417,19 @@ mod tests {
     }
 
     #[test]
+    fn invalid_per_file_ignore_globs_suppress_nothing() {
+        let p = PathBuf::from("mod.py");
+        let input = CheckInput::new(&p, "from os.path import join\n");
+        let mut config = Config::default();
+        config
+            .lint
+            .per_file_ignores
+            .insert("[".into(), vec!["KIS001".into()]);
+        let violations = run_check(&input, &all_rules(probe(), None), &config);
+        assert_eq!(violations.len(), 1, "a bad glob must not hide violations");
+    }
+
+    #[test]
     fn per_file_ignores_category_prefix_suppresses() {
         let rules = all_rules(probe(), None);
         let p = PathBuf::from("tests/test_foo.py");
@@ -503,6 +565,63 @@ mod tests {
         let mut config = knq_config();
         config.lint.ignore = vec!["KNQ001".into()];
         assert!(rule_ids("x = 1  # noqa\n", &config).is_empty());
+    }
+
+    // ── KNQ003: unused noqa ─────────────────────────────────────────────
+
+    fn knq003_config() -> Config {
+        let mut config = Config::default();
+        config.lint.extend_select = vec!["KNQ003".into()];
+        config
+    }
+
+    #[test]
+    fn knq003_flags_codes_that_suppress_nothing() {
+        let config = knq003_config();
+        assert_eq!(rule_ids("import os  # noqa: KIS001\n", &config), ["KNQ003"]);
+        // KIS001 fires here with noqa ignored, so the code is used.
+        assert!(rule_ids("from os.path import join  # noqa: KIS001\n", &config).is_empty());
+        // Other tools' codes and disabled rules are not konform's to judge.
+        assert!(rule_ids("import os  # noqa: E501\n", &config).is_empty());
+        let mut ignored = knq003_config();
+        ignored.lint.ignore = vec!["KIS001".into()];
+        assert!(rule_ids("import os  # noqa: KIS001\n", &ignored).is_empty());
+        // Off by default.
+        assert!(rule_ids("import os  # noqa: KIS001\n", &Config::default()).is_empty());
+    }
+
+    #[test]
+    fn knq003_cannot_be_suppressed_by_noqa() {
+        let config = knq003_config();
+        assert_eq!(
+            rule_ids("import os  # noqa: KIS001, KNQ003\n", &config),
+            ["KNQ003"]
+        );
+    }
+
+    #[test]
+    fn knq003_counts_per_file_ignored_violations_as_unused() {
+        let mut config = knq003_config();
+        config
+            .lint
+            .per_file_ignores
+            .insert("**/*.py".into(), vec!["KIS001".into()]);
+        assert_eq!(
+            rule_ids("from os.path import join  # noqa: KIS001\n", &config),
+            ["KNQ003"]
+        );
+    }
+
+    #[test]
+    fn run_fix_removes_unused_noqa_codes() {
+        let rules = all_rules(probe(), None);
+        let p = path();
+        let src = "import os  # noqa: KIS001, E501\nfrom os.path import join  # noqa: KIS001\n";
+        let fixed = run_fix(&CheckInput::new(&p, src), &rules, &knq003_config(), false).unwrap();
+        assert_eq!(
+            fixed.as_deref(),
+            Some("import os  # noqa: E501\nfrom os.path import join  # noqa: KIS001\n")
+        );
     }
 
     // ── KNQ002: noqa style ──────────────────────────────────────────────

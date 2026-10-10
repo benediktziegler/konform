@@ -40,6 +40,8 @@ to ignore all configuration files.
     ```
 
 The complete list of options is in the [settings reference](reference/settings.md).
+`konform check --show-settings .` prints the settings in effect, after `extend` and any
+CLI flags, along with the config file used and the enabled rules.
 
 ## Per-rule tables
 

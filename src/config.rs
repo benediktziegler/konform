@@ -1,6 +1,6 @@
 use crate::types::Level;
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 /// Mirrors Ruff's `[tool.ruff.lint]` split: project-wide settings
 /// (interpreter, cache, search roots) live directly under `[tool.konform]`,
 /// while everything about *which rules run and how* lives here.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct LintConfig {
     // ── Rule selection (prefix-matched, empty = all rules enabled) ────────
@@ -117,7 +117,7 @@ impl RuleSelection {
 // Config
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Config {
     // ── Global defaults ───────────────────────────────────────────────────
@@ -146,6 +146,9 @@ pub struct Config {
     /// relative to the project root (e.g. `konform_patterns.toml`).
     #[serde(skip)]
     pub config_dir: Option<PathBuf>,
+    /// The config file that was loaded, if any.
+    #[serde(skip)]
+    pub config_file: Option<PathBuf>,
 
     // ── Runtime overrides (set from CLI flags, never from config file) ────
     /// When `true`, all `# noqa` suppression comments are ignored.
@@ -186,6 +189,7 @@ impl Default for Config {
             lint: LintConfig::default(),
             python: None,
             config_dir: None,
+            config_file: None,
             ignore_noqa: false,
             src: vec![".".to_owned(), "src".to_owned()],
             extends: vec![],
@@ -327,11 +331,17 @@ pub fn load_config(start: Option<&Path>, explicit_path: Option<&Path>) -> Config
         .map(|p| p.to_path_buf())
         .or_else(|| start.and_then(find_config_file));
 
-    let path = match path {
-        Some(p) => p,
-        None => return Config::default(),
-    };
+    match path {
+        Some(path) => Config {
+            config_file: Some(path.clone()),
+            ..load_config_file(path)
+        },
+        None => Config::default(),
+    }
+}
 
+/// Load the config at `path`; on any problem reading it, the defaults.
+fn load_config_file(path: PathBuf) -> Config {
     let config_dir = path.parent().map(Path::to_path_buf);
 
     let content = match std::fs::read_to_string(&path) {

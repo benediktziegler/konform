@@ -437,6 +437,10 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
         );
     }
     let active_rules = all_rules(Arc::clone(&probe), config.config_dir.clone());
+    if args.show_settings {
+        print!("{}", settings_toml(&config, &active_rules, &python));
+        std::process::exit(0);
+    }
     exit_on_config_errors(&config, &active_rules);
 
     let level_str = args.level.to_string();
@@ -902,6 +906,43 @@ fn recheck_batch(files: &[PathBuf], ctx: &RecheckContext<'_>, cache: &mut Cache)
 
 /// Invalid user rule definitions are a hard error (exit 2): silently skipping
 /// them would give false greens in CI.
+/// The settings in effect for `check --show-settings`, as a TOML document:
+/// where they came from, then the merged `[konform]` settings.
+fn settings_toml(config: &config::Config, rules: &[Box<dyn rules::Rule>], python: &Path) -> String {
+    use toml::Value;
+    let path = |p: &Path| Value::String(p.display().to_string());
+    let strings =
+        |items: &[String]| Value::Array(items.iter().cloned().map(Value::String).collect());
+
+    let mut origin = toml::Table::new();
+    if let Some(file) = &config.config_file {
+        origin.insert("config-file".into(), path(file));
+    }
+    origin.insert(
+        "extends".into(),
+        Value::Array(config.extends.iter().map(|p| path(p)).collect()),
+    );
+    origin.insert("python".into(), path(python));
+    origin.insert("src".into(), strings(&config.src));
+    origin.insert(
+        "enabled-rules".into(),
+        strings(&engine::enabled_codes(rules, config)),
+    );
+
+    // Two documents so `[resolved]` comes first (tables print sorted).
+    let mut resolved = toml::Table::new();
+    resolved.insert("resolved".into(), Value::Table(origin));
+    let mut settings = toml::Table::new();
+    if let Ok(value) = Value::try_from(config) {
+        settings.insert("konform".into(), value);
+    }
+    [resolved, settings]
+        .iter()
+        .map(|doc| toml::to_string_pretty(doc).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn exit_on_config_errors(config: &config::Config, rules: &[Box<dyn rules::Rule>]) {
     let errors: Vec<String> = config
         .errors

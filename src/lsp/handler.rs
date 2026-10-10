@@ -13,10 +13,12 @@
 //! after every `didOpen` and `didChange` so editors that don't support pull
 //! diagnostics still receive results.
 
-use super::convert::{full_document_edit, violation_to_diagnostic};
+use super::convert::{
+    byte_offset_to_lsp_pos, full_document_edit, lsp_pos_to_byte_offset, violation_to_diagnostic,
+};
 use super::session::Session;
 use crate::engine::{run_check, run_fix, CheckInput};
-use crate::rules::{FixTarget, Rule};
+use crate::rules::{has_noqa, merge_noqa, parse_noqa, FileContext, FixTarget, Rule, RuleDoc};
 use crate::types::Violation;
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::*;
@@ -73,6 +75,9 @@ pub fn server_capabilities() -> ServerCapabilities {
             resolve_provider: Some(false),
             work_done_progress_options: Default::default(),
         })),
+
+        // Rule docs when hovering a code in a `# noqa` comment.
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
 
         // Whole-document and range formatting (runs every enabled fixer).
         document_formatting_provider: Some(OneOf::Left(true)),
@@ -143,6 +148,7 @@ fn handle_request(connection: &Connection, session: &Arc<RwLock<Session>>, req: 
     let result: anyhow::Result<serde_json::Value> = match method {
         "textDocument/diagnostic" => handle_diagnostic(session, req.params),
         "textDocument/codeAction" => handle_code_action(session, req.params),
+        "textDocument/hover" => handle_hover(session, req.params),
         "textDocument/formatting" => handle_formatting(session, req.params),
         "textDocument/rangeFormatting" => handle_range_formatting(session, req.params),
         _ => {
@@ -290,6 +296,37 @@ fn handle_code_action(
         }
     }
 
+    // ── Per-violation "disable for this line" ─────────────────────────────
+    // After the fixes, so a real fix stays the first suggestion.
+    let mut offered: Vec<(usize, &str)> = Vec::new();
+    for violation in quickfix_candidates {
+        let viol_line = violation.line.saturating_sub(1) as u32;
+        if viol_line < req_range.start.line
+            || viol_line > req_range.end.line
+            || offered.contains(&(violation.line, violation.rule.as_str()))
+        {
+            continue;
+        }
+        offered.push((violation.line, violation.rule.as_str()));
+        if let Some(edit) = noqa_line_edit(&source, violation) {
+            #[allow(clippy::mutable_key_type)]
+            let mut changes = HashMap::new();
+            changes.insert(uri.clone(), vec![edit]);
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: format!("Konform: Disable {} for this line", violation.rule),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![violation_to_diagnostic(violation)]),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    document_changes: None,
+                    change_annotations: None,
+                }),
+                is_preferred: Some(false),
+                ..Default::default()
+            }));
+        }
+    }
+
     // ── Tier 2: "Fix All" (safe) ──────────────────────────────────────────
     let fix_all_kind = CodeActionKind::new("source.fixAll.konform");
     let safe_fixed = if wants(&fix_all_kind) {
@@ -382,6 +419,132 @@ fn rule_name<'a>(rules: &'a [Box<dyn Rule>], code: &'a str) -> &'a str {
         .find(|r| r.code() == code)
         .or_else(|| rules.iter().find(|r| code.starts_with(r.category())))
         .map_or(code, |r| r.name())
+}
+
+/// The edit adding `# noqa: CODE` for `violation` to its line (merged into an
+/// existing `# noqa`), or `None` when that can't help: KNQ rules ignore
+/// `# noqa`, a bare `# noqa` already covers everything, and a line ending
+/// inside a multi-line string can't take a comment.
+fn noqa_line_edit(source: &str, violation: &Violation) -> Option<TextEdit> {
+    if violation.rule.starts_with("KNQ") {
+        return None;
+    }
+    let idx = violation.line.checked_sub(1)?;
+    let line = source.lines().nth(idx)?;
+    let codes = std::collections::BTreeSet::from([violation.rule.clone()]);
+    let mut changed = false;
+    let new_line = merge_noqa(line, &codes, None, &mut changed);
+    if !changed {
+        return None;
+    }
+    // The new text must be a real comment that suppresses the code, not
+    // text inside a string literal, and must not break the file.
+    let mut lines: Vec<&str> = source.lines().collect();
+    lines[idx] = &new_line;
+    let after = FileContext::from_source("x.py".into(), lines.join("\n"));
+    let before = FileContext::from_source("x.py".into(), source.to_owned());
+    let suppresses = after
+        .noqa_lines()
+        .get(idx)
+        .is_some_and(|comment| has_noqa(comment, &violation.rule, &HashMap::new()));
+    if !suppresses || (before.has_valid_syntax() && !after.has_valid_syntax()) {
+        return None;
+    }
+    let line_no = idx as u32;
+    Some(TextEdit {
+        range: Range {
+            start: Position::new(line_no, 0),
+            end: byte_offset_to_lsp_pos(source, line_start(source, idx) + line.len()),
+        },
+        new_text: new_line,
+    })
+}
+
+/// Byte offset of the start of 0-based line `idx`.
+fn line_start(source: &str, idx: usize) -> usize {
+    source.split_inclusive('\n').take(idx).map(str::len).sum()
+}
+
+/// `textDocument/hover`: on a code in a `# noqa` comment, show that rule's
+/// documentation (or, for a prefix like `KIS`, the rules it covers).
+fn handle_hover(
+    session: &Arc<RwLock<Session>>,
+    params: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let params: HoverParams = serde_json::from_value(params)?;
+    let pos = params.text_document_position_params.position;
+    let uri = &params.text_document_position_params.text_document.uri;
+    let (source, config, rules) = {
+        let sess = session.read().unwrap();
+        let Some(source) = sess.source(uri) else {
+            return Ok(serde_json::Value::Null);
+        };
+        (
+            source.to_owned(),
+            Arc::clone(&sess.config),
+            Arc::clone(&sess.rules),
+        )
+    };
+    let hover = noqa_hover(&source, pos, &config, &rules);
+    Ok(serde_json::to_value(hover)?)
+}
+
+/// The hover for position `pos` in `source`, if it is on a `# noqa` code.
+fn noqa_hover(
+    source: &str,
+    pos: Position,
+    config: &crate::config::Config,
+    rules: &[Box<dyn Rule>],
+) -> Option<Hover> {
+    let idx = pos.line as usize;
+    let line = source.lines().nth(idx)?;
+    let start = line_start(source, idx);
+    let col = lsp_pos_to_byte_offset(source, pos).checked_sub(start)?;
+    let noqa = parse_noqa(line)?;
+    let code = noqa.codes?.into_iter().find(|c| {
+        let from = c.as_ptr() as usize - line.as_ptr() as usize;
+        (from..=from + c.len()).contains(&col)
+    })?;
+    let from = code.as_ptr() as usize - line.as_ptr() as usize;
+
+    let target = config
+        .lint
+        .noqa_aliases
+        .get(code)
+        .map_or(code, String::as_str);
+    let docs: Vec<RuleDoc> = rules
+        .iter()
+        .flat_map(|r| r.catalog(config.rule_config(r.config_name())))
+        .collect();
+    let markdown = match docs.iter().find(|d| d.code == target) {
+        Some(doc) => doc.explain.clone(),
+        None => {
+            let covered: Vec<String> = docs
+                .iter()
+                .filter(|d| d.code.starts_with(target))
+                .map(|d| format!("- **{}**: {}", d.code, d.description))
+                .collect();
+            if covered.is_empty() {
+                return None; // another tool's code
+            }
+            format!("`{code}` covers:\n\n{}", covered.join("\n"))
+        }
+    };
+    let markdown = if target == code {
+        markdown
+    } else {
+        format!("`{code}` is an alias for `{target}`.\n\n{markdown}")
+    };
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: markdown,
+        }),
+        range: Some(Range {
+            start: byte_offset_to_lsp_pos(source, start + from),
+            end: byte_offset_to_lsp_pos(source, start + from + code.len()),
+        }),
+    })
 }
 
 /// Build the [`TextEdit`]s that fix exactly `violation` and nothing else.

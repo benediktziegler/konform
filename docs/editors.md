@@ -15,11 +15,17 @@ KIS002, since editing one open document is an explicit, reviewable action), plus
 - **Fix all auto-fixable problems**: safe fixes only (`source.fixAll.konform`).
 - **Fix all problems (including unsafe fixes)** (`source.fixAll.konform.unsafe`):
   only offered when it changes something beyond the safe pass.
+- **Disable CODE for this line**: adds `# noqa: CODE` (merged into an existing
+  `# noqa`). Not offered for the KNQ rules, which `# noqa` can't suppress, or on a line
+  that ends inside a multi-line string.
+
+Hovering a code in a `# noqa` comment shows that rule's documentation; a prefix such as
+`KIS` lists the rules it covers. Files matching `exclude` get no diagnostics or fixes.
 
 The server reloads rules when `pyproject.toml`, `konform.toml`,
-`konform_patterns.toml`/`.yaml`, `konform_rules.toml` or the configured `rules_file`
-(of either rule) changes. If you
-point `rules_file` at a new path, restart the server.
+`konform_patterns.toml`/`.yaml`, `konform_rules.toml`, the configured `rules_file`
+(of either rule) or a file pulled in through `extend` changes. If you
+point `rules_file` or `extend` at a new path, restart the server.
 
 ## Neovim
 

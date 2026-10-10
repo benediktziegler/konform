@@ -498,11 +498,14 @@ fn code_action_offers_quickfix_only_for_the_fixable_alias_in_a_collision() {
         }),
     );
     let actions: Vec<CodeActionOrCommand> = serde_json::from_value(result).unwrap();
+    // "Disable for this line" is offered either way; only real fixes count.
     let kinds: Vec<Option<CodeActionKind>> = actions
         .iter()
-        .map(|a| match a {
-            CodeActionOrCommand::CodeAction(ca) => ca.kind.clone(),
-            CodeActionOrCommand::Command(_) => None,
+        .filter_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) if !ca.title.contains("Disable") => {
+                Some(ca.kind.clone())
+            }
+            _ => None,
         })
         .collect();
     // KIS002's fix is unsafe, so the safe-only tier is a no-op here and only
@@ -921,9 +924,10 @@ fn code_action_honours_context_only() {
         )),
         ["source.fixAll.konform.unsafe"]
     );
+    // The fix, then "disable for this line".
     assert_eq!(
         kinds(code_actions_at(&mut server, &uri, 0, Some(&["quickfix"]))),
-        ["quickfix"]
+        ["quickfix", "quickfix"]
     );
     assert!(code_actions_at(&mut server, &uri, 0, Some(&["refactor"])).is_empty());
 
@@ -1158,8 +1162,8 @@ fn unknown_request_returns_method_not_found() {
     server.initialize();
 
     let err = server
-        .try_request("textDocument/hover", serde_json::json!({}))
-        .expect_err("hover is not implemented");
+        .try_request("textDocument/definition", serde_json::json!({}))
+        .expect_err("definition is not implemented");
     assert_eq!(err.code, lsp_server::ErrorCode::MethodNotFound as i32);
 
     server.shutdown();
@@ -1200,4 +1204,200 @@ fn editor_settings_can_extend_the_selection() {
     }));
     assert_eq!(session.config.lint.extend_select, ["KNQ001", "KNQ002"]);
     assert_eq!(session.config.lint.select, ["KIS"]);
+}
+
+// ---------------------------------------------------------------------------
+// "Disable for this line", hover, exclude
+// ---------------------------------------------------------------------------
+
+#[test]
+fn disable_action_appends_or_merges_a_noqa_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    server.initialize();
+
+    for (source, want) in [
+        (KIS001_SOURCE, "from os.path import join  # noqa: KIS001\n"),
+        (
+            "from os.path import join  # noqa: E501  # long\n",
+            "from os.path import join  # noqa: E501, KIS001  # long\n",
+        ),
+    ] {
+        server.open(&uri, source);
+        server.next_diagnostics(&uri);
+        let actions = code_actions_at(&mut server, &uri, 0, Some(&["quickfix"]));
+        let action = find_action(&actions, "Konform: Disable KIS001 for this line");
+        assert_eq!(apply_action(source, action, &uri), want);
+        server.close(&uri);
+    }
+
+    server.shutdown();
+}
+
+#[test]
+fn disable_action_is_not_offered_for_knq_rules() {
+    let violation = Violation {
+        rule: "KNQ001".into(),
+        line: 1,
+        col: 7,
+        end_line: 1,
+        end_col: 13,
+        message: String::new(),
+        help: None,
+        level: crate::types::Level::Error,
+        fixable: false,
+    };
+    assert!(noqa_line_edit("x = 1  # noqa\n", &violation).is_none());
+}
+
+#[test]
+fn disable_action_is_not_offered_where_a_bare_noqa_already_covers_the_line() {
+    let violation = Violation {
+        rule: "KPT001".into(),
+        line: 1,
+        col: 0,
+        end_line: 1,
+        end_col: 5,
+        message: String::new(),
+        help: None,
+        level: crate::types::Level::Error,
+        fixable: false,
+    };
+    assert!(noqa_line_edit("x = 1  # noqa\n", &violation).is_none());
+    // Nothing to edit when the violation's line does not exist.
+    assert!(noqa_line_edit(
+        "x = 1\n",
+        &Violation {
+            line: 9,
+            ..violation
+        }
+    )
+    .is_none());
+}
+
+#[test]
+fn hover_on_a_document_the_server_does_not_know_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("never_opened.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    server.initialize();
+    let result = server.request(
+        "textDocument/hover",
+        serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": 0 },
+        }),
+    );
+    assert!(result.is_null());
+    server.shutdown();
+}
+
+#[test]
+fn disable_action_skips_lines_ending_inside_a_string() {
+    let source = "x = f(\"\"\"a\nb\"\"\")\n";
+    let violation = Violation {
+        rule: "KPT001".into(),
+        line: 1,
+        col: 0,
+        end_line: 2,
+        end_col: 0,
+        message: String::new(),
+        help: None,
+        level: crate::types::Level::Error,
+        fixable: false,
+    };
+    assert!(noqa_line_edit(source, &violation).is_none());
+}
+
+fn hover_at(source: &str, line: u32, character: u32, config: &Config) -> Option<Hover> {
+    let rules = crate::rules::all_rules(Arc::new(ModuleProbe::default()), None);
+    noqa_hover(source, Position::new(line, character), config, &rules)
+}
+
+fn hover_text(hover: Option<Hover>) -> String {
+    match hover.expect("expected a hover").contents {
+        HoverContents::Markup(m) => m.value,
+        other => panic!("unexpected hover contents: {other:?}"),
+    }
+}
+
+#[test]
+fn hover_on_a_noqa_code_shows_the_rule_docs() {
+    let source = "import os\nfrom os.path import join  # noqa: E501, KIS001\n";
+    let config = Config::default();
+    // On `KIS001` (columns 40..46), including its end.
+    let hover = hover_at(source, 1, 42, &config).unwrap();
+    assert_eq!(
+        hover.range,
+        Some(Range::new(Position::new(1, 40), Position::new(1, 46)))
+    );
+    assert!(hover_text(Some(hover)).contains("KIS001"));
+    assert!(hover_at(source, 1, 46, &config).is_some());
+    // Another tool's code, plain code and a line without noqa: nothing.
+    assert!(hover_at(source, 1, 35, &config).is_none());
+    assert!(hover_at(source, 1, 5, &config).is_none());
+    assert!(hover_at(source, 0, 3, &config).is_none());
+}
+
+#[test]
+fn hover_on_a_prefix_lists_the_covered_rules_and_resolves_aliases() {
+    let config = Config::default();
+    let text = hover_text(hover_at("x = 1  # noqa: KIS\n", 0, 16, &config));
+    assert!(
+        text.contains("**KIS001**") && text.contains("**KIS002**"),
+        "{text}"
+    );
+
+    let mut config = Config::default();
+    config
+        .lint
+        .noqa_aliases
+        .insert("IS001".into(), "KIS001".into());
+    let text = hover_text(hover_at("x = 1  # noqa: IS001\n", 0, 16, &config));
+    assert!(
+        text.starts_with("`IS001` is an alias for `KIS001`."),
+        "{text}"
+    );
+}
+
+#[test]
+fn hover_capability_is_advertised_and_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    let caps = server.initialize();
+    assert!(caps.hover_provider.is_some());
+
+    server.open(&uri, "from os.path import join  # noqa: KIS001\n");
+    server.next_diagnostics(&uri);
+    let result = server.request(
+        "textDocument/hover",
+        serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": 37 },
+        }),
+    );
+    let hover: Hover = serde_json::from_value(result).unwrap();
+    assert!(hover_text(Some(hover)).contains("KIS001"));
+
+    server.shutdown();
+}
+
+#[test]
+fn excluded_documents_get_no_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("gen/mod.py"));
+    let config = Config {
+        exclude: vec!["gen/**".into()],
+        config_dir: Some(dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    let mut server = TestServer::new(dir.path().to_path_buf(), config);
+    server.initialize();
+
+    server.open(&uri, KIS001_SOURCE);
+    assert!(server.next_diagnostics(&uri).diagnostics.is_empty());
+
+    server.shutdown();
 }

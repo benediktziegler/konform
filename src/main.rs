@@ -28,7 +28,7 @@ use output::{
 };
 use owo_colors::OwoColorize;
 use rayon::prelude::*;
-use rules::all_rules;
+use rules::{all_rules, merge_noqa};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -173,69 +173,6 @@ fn add_noqa_to_source(
     }
 
     changed.then_some(out)
-}
-
-/// Merge `new_codes` into any existing `# noqa` comment on `line`.
-///
-/// Cases:
-/// 1. No `# noqa` at all: `  # noqa: CODES` (plus `  # REASON`) is appended.
-///    Without codes there is nothing to add and the line stays as is.
-/// 2. `# noqa: CODES`: codes from `new_codes` absent from `CODES` are merged
-///    in, sorted.  Any trailing reason after the code list is preserved.
-/// 3. Bare `# noqa`: suppresses everything; the codes are left unchanged.
-///
-/// With a `reason`, an existing comment that has none gets it appended.
-/// An existing reason is never overwritten.
-fn merge_noqa(
-    line: &str,
-    new_codes: &std::collections::BTreeSet<String>,
-    reason: Option<&str>,
-    changed: &mut bool,
-) -> String {
-    use std::collections::BTreeSet;
-
-    let Some(noqa) = rules::parse_noqa(line) else {
-        if new_codes.is_empty() {
-            return line.to_owned();
-        }
-        // No existing noqa: append one.
-        let codes_str = new_codes.iter().cloned().collect::<Vec<_>>().join(", ");
-        *changed = true;
-        return match reason {
-            Some(r) => format!("{line}  # noqa: {codes_str}  # {r}"),
-            None => format!("{line}  # noqa: {codes_str}"),
-        };
-    };
-
-    let existing: Option<BTreeSet<String>> = noqa
-        .codes
-        .as_ref()
-        .map(|codes| codes.iter().map(|c| (*c).to_owned()).collect());
-    // A bare `# noqa` already suppresses everything.
-    let missing = existing
-        .as_ref()
-        .is_some_and(|have| new_codes.iter().any(|c| !have.contains(c)));
-    let new_reason = reason.filter(|_| !noqa.has_reason());
-
-    if !missing && new_reason.is_none() {
-        return line.to_owned();
-    }
-
-    let directive = match existing {
-        Some(mut all) if missing => {
-            all.extend(new_codes.iter().cloned());
-            format!("# noqa: {}", all.into_iter().collect::<Vec<_>>().join(", "))
-        }
-        _ => line[noqa.start..noqa.end].to_owned(),
-    };
-    // Keep the original tail unless it is only separators that the new
-    // reason replaces.
-    let tail = match new_reason {
-        Some(r) => format!("  # {r}"),
-        None => line[noqa.end..].to_owned(),
-    };
-    *changed = true;
-    format!("{}{directive}{tail}", &line[..noqa.start])
 }
 
 // ---------------------------------------------------------------------------

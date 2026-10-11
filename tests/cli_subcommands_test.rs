@@ -350,6 +350,26 @@ fn cli_extend_exclude_adds_to_config_exclude() {
     );
 }
 
+#[test]
+fn a_bare_directory_name_excludes_everything_below_it() {
+    let dir = exclude_project("exclude = [\"vendor\"]\n");
+    std::fs::create_dir(dir.path().join("vendor/deep")).unwrap();
+    std::fs::write(dir.path().join("vendor/deep/z.py"), GOOD).unwrap();
+    assert_eq!(shown_files(dir.path(), &[]), ["a.py", "gen/x.py"]);
+    // Also for files named explicitly, as pre-commit does.
+    konform(dir.path())
+        .args([
+            "check",
+            "--no-cache",
+            "--show-files",
+            "a.py",
+            "vendor/deep/z.py",
+        ])
+        .assert()
+        .success()
+        .stdout("a.py\n");
+}
+
 /// pre-commit passes file names explicitly; the config exclude must still apply.
 #[test]
 fn config_exclude_applies_to_explicit_files() {

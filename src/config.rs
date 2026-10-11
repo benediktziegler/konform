@@ -307,10 +307,13 @@ impl Config {
 
 /// Walk upward from `start` looking for `konform.toml` first, then `pyproject.toml`.
 pub fn find_config_file(start: &Path) -> Option<PathBuf> {
+    // Absolute, so a relative start like `.` or `a.py` can walk up to its
+    // parents (`Path::new(".").ancestors()` stops at `.`).
+    let start = std::path::absolute(start).ok()?;
     let start = if start.is_file() {
         start.parent()?
     } else {
-        start
+        &start
     };
     for dir in start.ancestors() {
         for name in ["konform.toml", "pyproject.toml"] {

@@ -230,13 +230,26 @@ impl Config {
         }
     }
 
-    /// `true` when `path` matches `excluded` (see [`Self::exclude_set`]),
-    /// either relative to the config directory or the current directory, or
-    /// by file name alone.
+    /// `true` when `path` matches `excluded` (see [`Self::exclude_set`]):
+    /// its path relative to the project root (the config directory, else the
+    /// current one), or any parent directory below that root, matches either
+    /// as a path or by name. So `gen/**`, `*_pb2.py` and a bare directory
+    /// name such as `build` all work, while directories above the project
+    /// (a checkout under `/home/me/build/`) are never consulted.
     pub fn is_excluded(&self, excluded: &GlobSet, path: &Path) -> bool {
-        let path = path.strip_prefix(".").unwrap_or(path);
-        let cwd = std::env::current_dir().ok();
-        crate::rules::kpt::glob_matches(excluded, path, self.config_dir.as_deref(), cwd.as_deref())
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let root = cwd.join(self.config_dir.as_deref().unwrap_or(Path::new("")));
+        let absolute = cwd.join(path);
+        let matches =
+            |p: &Path| excluded.is_match(p) || p.file_name().is_some_and(|n| excluded.is_match(n));
+        match absolute.strip_prefix(&root) {
+            Ok(relative) => relative
+                .ancestors()
+                .filter(|a| !a.as_os_str().is_empty())
+                .any(matches),
+            // Outside the project: only the path itself and its file name.
+            Err(_) => matches(path.strip_prefix(".").unwrap_or(path)),
+        }
     }
 
     /// Return the raw TOML configuration blob for a rule, looked up by its
@@ -455,6 +468,20 @@ mod tests {
         assert!(cfg.is_excluded(&gs, Path::new("./gen/a.py")));
         assert!(cfg.is_excluded(&gs, Path::new("pkg/msg_pb2.py")));
         assert!(!cfg.is_excluded(&gs, Path::new("/proj/src/a.py")));
+    }
+
+    #[test]
+    fn exclude_matches_parent_directories_but_only_inside_the_project() {
+        let cfg = Config {
+            exclude: vec!["build".into()],
+            config_dir: Some(PathBuf::from("/home/me/build/proj")),
+            ..Config::default()
+        };
+        let gs = cfg.exclude_set().unwrap();
+        assert!(cfg.is_excluded(&gs, Path::new("/home/me/build/proj/build/sub/x.py")));
+        assert!(cfg.is_excluded(&gs, Path::new("/home/me/build/proj/src/build")));
+        // `build` above the project root must not exclude everything.
+        assert!(!cfg.is_excluded(&gs, Path::new("/home/me/build/proj/src/a.py")));
     }
 
     #[test]

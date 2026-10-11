@@ -2,6 +2,7 @@
 
 ### Feat
 
+- **config**: add exclude and extend-exclude settings
 - **pre-commit**: add konform and konform-fix hooks
 - **action**: add a GitHub Action that runs konform check
 - **cli**: add completions subcommand for shell completion scripts
@@ -24,6 +25,7 @@
 
 ### Fix
 
+- **config**: let exclude match parent directories like Ruff
 - **docs**: list each environment variable once
 - **rules**: warn on invalid KNQ settings
 - **output**: make the CI writers schema-correct and escape user data

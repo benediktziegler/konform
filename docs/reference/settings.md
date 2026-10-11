@@ -34,15 +34,16 @@ src = ["lib"]
 ```
 
 #### `exclude`
-Glob patterns of files to skip, matched relative to the config file or against the
-file name alone. Applies to explicitly named files too, so it also works from
-pre-commit.
+Glob patterns of files to skip. A file is skipped when its path relative to the config
+file, or any of its parent directories inside the project, matches as a path or by name,
+so `gen/**`, `*_pb2.py` and a bare directory name such as `build` all work. Applies to
+explicitly named files too, so it also works from pre-commit.
 
 **Default:** `[]` · **Type:** `list[str]` · **CLI:** `--exclude` (replaces the list)
 
 ```toml
 [tool.konform]
-exclude = ["gen/**", "*_pb2.py"]
+exclude = ["build", "gen/**", "*_pb2.py"]
 ```
 
 #### `extend-exclude`

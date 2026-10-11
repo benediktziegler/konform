@@ -43,7 +43,22 @@ fn walk_python_files(path: &Path, config: &config::Config) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let exclude_set = config.exclude_set();
 
-    let walker = WalkBuilder::new(path).standard_filters(true).build();
+    // Don't descend into excluded directories (`build`, `gen/**`); the file
+    // check below still applies to the files given or walked.
+    let walker = WalkBuilder::new(path)
+        .standard_filters(true)
+        .filter_entry({
+            let exclude_set = exclude_set.clone();
+            let config = config.clone();
+            move |entry| {
+                entry.depth() == 0
+                    || !entry.file_type().is_some_and(|t| t.is_dir())
+                    || !exclude_set
+                        .as_ref()
+                        .is_some_and(|gs| config.is_excluded(gs, entry.path()))
+            }
+        })
+        .build();
     for entry in walker.flatten() {
         let p = strip_leading_curdir(entry.path().to_path_buf());
         if p.extension().is_none_or(|e| e != "py") {

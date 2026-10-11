@@ -12,7 +12,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  rust_version: "1.96"
+  rust_version: "1.97"
 
 jobs:
   test:
@@ -64,7 +64,7 @@ jobs:
         with:
           shared-key: "ci-pre-commit"
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
 
       # Runs every hook from .pre-commit-config.yaml on the whole repository,
       # including `generate-docs`, so stale generated docs fail the build.

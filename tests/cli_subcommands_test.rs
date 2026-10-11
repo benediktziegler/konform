@@ -398,6 +398,31 @@ fn an_unparsable_config_is_a_hard_error_for_check_and_a_warning_for_rule_list() 
         .stderr(contains("warning:").and(contains("invalid TOML")));
 }
 
+/// From a subdirectory, `.`, a relative file and stdin all find the
+/// project's config above it.
+#[test]
+fn config_is_found_above_the_current_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[tool.konform.lint]\nignore = [\"KIS001\"]\n",
+    )
+    .unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("a.py"), BAD).unwrap();
+    for args in [&["."][..], &["a.py"], &["-"]] {
+        konform(&sub)
+            .args(["check", "--no-cache"])
+            .args(args)
+            .write_stdin(BAD)
+            .assert()
+            .success()
+            .stderr(contains("KIS001").not());
+    }
+}
+
 #[test]
 fn broken_extend_is_a_hard_error() {
     let dir = tempfile::tempdir().unwrap();
@@ -458,6 +483,45 @@ fn show_settings_prints_the_merged_settings_as_toml() {
     assert_eq!(lint["select"], toml::Value::from(vec!["KIS"]));
     assert_eq!(lint["ignore"], toml::Value::from(vec!["KIS002"]));
     assert_eq!(lint["unfixable"], toml::Value::from(vec!["KIS002"]));
+}
+
+#[test]
+fn add_noqa_from_stdin_also_skips_lines_ending_inside_a_string() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("konform.toml"),
+        "[lint.user-defined-patterns]\n[[lint.user-defined-patterns.rules]]\n\
+         id = \"KPT901\"\nmessage = \"m\"\npattern = 'secret'\n",
+    )
+    .unwrap();
+    let src = "x = \"\"\"secret\nend\"\"\"\n";
+    konform(dir.path())
+        .args([
+            "check",
+            "--no-cache",
+            "--select",
+            "KPT901",
+            "--add-noqa",
+            "--stdin-filename",
+            "a.py",
+            "-",
+        ])
+        .write_stdin(src)
+        .assert()
+        .success()
+        .stdout(src)
+        .stderr(contains("cannot add `# noqa` here"));
+}
+
+#[test]
+fn add_noqa_from_stdin_echoes_clean_input() {
+    let dir = tempfile::tempdir().unwrap();
+    konform(dir.path())
+        .args(["check", "--isolated", "--no-cache", "--add-noqa", "-"])
+        .write_stdin(GOOD)
+        .assert()
+        .success()
+        .stdout(GOOD);
 }
 
 #[test]

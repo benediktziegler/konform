@@ -358,12 +358,16 @@ fn run_check(args: CheckArgs, isolated: bool) {
         .clone()
         .unwrap_or_else(|| PathBuf::from("<stdin>"));
 
-    // Use the first real (non-stdin) path for config anchor.
+    // Use the first real (non-stdin) path for config anchor; for stdin
+    // alone, `--stdin-filename` or else the current directory.
+    let cwd = PathBuf::from(".");
     let anchor = args
         .common
         .file_paths
         .iter()
         .find(|p| p.as_os_str() != "-")
+        .or(args.stdin_filename.as_ref())
+        .or(wants_stdin.then_some(&cwd))
         .map(|p| p.as_path());
     let mut config = if isolated {
         config::Config::default()
@@ -659,14 +663,23 @@ after a `\\` continuation); suppress it on another line or fix it",
                 );
             }
         };
+        // stdin: always echo the source, annotated where it has violations.
+        if let Some(ref src) = stdin_source {
+            let viols = violations.get(&stdin_key).map_or(&[][..], Vec::as_slice);
+            // Without `--stdin-filename` the input is Python; give it a
+            // `.py` path so the comment check parses it as such.
+            let noqa_path = if stdin_display.extension().is_some() {
+                stdin_display.clone()
+            } else {
+                stdin_display.with_extension("py")
+            };
+            let added = add_noqa(&noqa_path, src, viols, args.noqa_reason.as_deref());
+            report_skipped(&stdin_display, &added.skipped);
+            print!("{}", added.source.as_deref().unwrap_or(src));
+        }
         for (file_path_str, viols) in &violations {
             if wants_stdin && *file_path_str == stdin_key {
-                // stdin: write annotated source to stdout.
-                if let Some(ref src) = stdin_source {
-                    let added = add_noqa(&stdin_display, src, viols, args.noqa_reason.as_deref());
-                    report_skipped(&stdin_display, &added.skipped);
-                    print!("{}", added.source.as_deref().unwrap_or(src));
-                }
+                continue;
             } else {
                 let path = PathBuf::from(file_path_str);
                 let src = match std::fs::read_to_string(&path) {

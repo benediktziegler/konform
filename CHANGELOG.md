@@ -2,6 +2,7 @@
 
 ### Feat
 
+- **output**: print "All checks passed!" in bold green like ruff
 - **lsp**: add noqa hover and a disable-for-this-line quick fix
 - **cli**: add check --show-settings
 - **config**: inherit settings from another file with extend

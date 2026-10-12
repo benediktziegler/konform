@@ -310,7 +310,7 @@ pub fn print_violations(
                 (false, false) => {}
             }
         } else {
-            eprintln!("All checks passed.");
+            eprintln!("{}", pal.success("All checks passed!"));
         }
     }
 

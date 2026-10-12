@@ -178,6 +178,13 @@ impl Palette {
         })
     }
 
+    /// "All checks passed!" success line: bold green (matches ruff).
+    pub fn success(&self, s: &str) -> String {
+        self.p(s, |s| match self.theme {
+            Theme::Ruff => s.green().bold().to_string(),
+        })
+    }
+
     /// Flag names like `--all-files`: bold.
     #[allow(dead_code)]
     pub fn flag(&self, s: &str) -> String {

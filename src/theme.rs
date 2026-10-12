@@ -269,3 +269,17 @@ pub fn is_quiet() -> bool {
 pub fn is_silent() -> bool {
     log_level() >= LogLevel::Silent
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn success_is_bold_green_with_colours_and_plain_without() {
+        assert_eq!(
+            palette(true).success("ok"),
+            "\x1b[1m\x1b[32mok\x1b[39m\x1b[0m"
+        );
+        assert_eq!(palette(false).success("ok"), "ok");
+    }
+}

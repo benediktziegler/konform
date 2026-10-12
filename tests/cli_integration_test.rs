@@ -1345,3 +1345,34 @@ fn rule_without_an_action_prints_usage() {
             "Use --list, --explain <CODE>, --test or --schema.",
         ));
 }
+
+/// A clean run ends with ruff's "All checks passed!" line, plain when colour
+/// is off.
+#[test]
+fn check_clean_file_reports_all_checks_passed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    std::fs::write(&file, "x = 1\n").unwrap();
+
+    let mut cmd = Command::cargo_bin("konform").unwrap();
+    cmd.args(["check", "--isolated", "--color", "never"])
+        .arg(&file)
+        .assert()
+        .success()
+        .stderr(contains("All checks passed!").and(contains("\x1b[").not()));
+}
+
+/// With colour forced on, the success line is bold green.
+#[test]
+fn check_clean_file_prints_success_line_in_bold_green() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    std::fs::write(&file, "x = 1\n").unwrap();
+
+    let mut cmd = Command::cargo_bin("konform").unwrap();
+    cmd.args(["check", "--isolated", "--color", "always"])
+        .arg(&file)
+        .assert()
+        .success()
+        .stderr(contains("\x1b[1m\x1b[32mAll checks passed!"));
+}

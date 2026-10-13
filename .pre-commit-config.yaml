@@ -38,7 +38,7 @@ repos:
         name: Changelog Unreleased section
         language: python
         additional_dependencies: ["commitizen==4.19.2"]
-        entry: cz changelog
+        entry: python scripts/changelog_hook.py
         pass_filenames: false
         always_run: true
         verbose: false

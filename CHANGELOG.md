@@ -1,3 +1,9 @@
+## Unreleased
+
+### Fix
+
+- **config**: resolve relative python against config dir
+
 ## v0.5.0 (2026-10-13)
 
 ### Feat

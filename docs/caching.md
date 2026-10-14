@@ -1,7 +1,7 @@
 # Caching
 
 Results are cached per file, keyed by mtime and permissions, in `cache-dir`
-(default `.konform_cache`).
+(default `.konform_cache`). Entries not used (hit or re-linted) for 30 days are evicted.
 
 The cache is also keyed by every setting that affects results: `select`,
 `extend-select`, `ignore`, the Python environment, rule config tables, `per-file-ignores`,

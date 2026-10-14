@@ -6,6 +6,7 @@
 
 ### Fix
 
+- **cache**: use unique temp files when persisting
 - **cache**: cap bincode decode size
 - **config**: prefer project venvs, bound the parent walk at the repo root
 - **config**: resolve relative python against config dir

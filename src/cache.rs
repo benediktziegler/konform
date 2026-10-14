@@ -21,11 +21,12 @@ use crate::rules::Rule;
 use anyhow::Result;
 use bincode::{Decode, Encode};
 use seahash::SeaHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::{fs, io};
 
 /// Cache sub-directory name equals the konform version string, so upgrading
@@ -314,6 +315,9 @@ pub struct Cache {
     package: PackageCache,
     /// Pending updates applied to disk in [`Cache::persist`].
     pending: Vec<(String, u64, Vec<CachedViolation>)>,
+    /// Keys of entries hit via [`Cache::get`]; their `last_seen` is refreshed
+    /// in [`Cache::persist`].
+    touched: Mutex<HashSet<String>>,
 }
 
 impl Cache {
@@ -369,6 +373,7 @@ impl Cache {
                             no_cache,
                             package: pkg,
                             pending: vec![],
+                            touched: Mutex::new(HashSet::new()),
                         }
                     }
                     Err(_) => Self::empty(path, root_str, no_cache), // corrupt
@@ -388,6 +393,7 @@ impl Cache {
                 files: HashMap::new(),
             },
             pending: vec![],
+            touched: Mutex::new(HashSet::new()),
         }
     }
 
@@ -406,6 +412,10 @@ impl Cache {
             return None; // mtime / permissions changed
         }
         // Record the hit so persist() refreshes last_seen (get is shared
+        // across lint threads, hence the Mutex).
+        if let Ok(mut t) = self.touched.lock() {
+            t.insert(k);
+        }
         Some(entry.violations.iter().map(|v| v.to_json()).collect())
     }
 
@@ -451,6 +461,18 @@ impl Cache {
                     violations,
                 },
             );
+        }
+
+        // Cache hits count as "seen": refresh them before eviction.
+        let touched = self
+            .touched
+            .get_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        for k in touched {
+            if let Some(e) = self.package.files.get_mut(&k) {
+                e.last_seen = now_ms;
+            }
         }
 
         // Evict entries not seen in EVICT_DAYS.
@@ -782,6 +804,46 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|x| x == "tmp"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn cache_hit_refreshes_last_seen_so_entry_survives_eviction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("hit.py");
+        std::fs::write(&file, "x = 1\n").unwrap();
+        let key = FileCacheKey::from_path(&file).unwrap();
+
+        let _ = init(tmp.path());
+        let hash = settings_hash(tmp.path(), &[], &[], "error", 0, 0);
+        let path = tmp.path().join(VERSION).join(format!("{hash:016x}"));
+        let mut pkg = PackageCache {
+            package_root: tmp.path().to_string_lossy().into_owned(),
+            files: HashMap::new(),
+        };
+        // Matching key but ancient last_seen (would be evicted without a hit).
+        pkg.files.insert(
+            file.to_string_lossy().into_owned(),
+            FileCache {
+                key: key.hash(),
+                last_seen: 0,
+                violations: vec![],
+            },
+        );
+        std::fs::write(
+            &path,
+            bincode::encode_to_vec(&pkg, bincode_config()).unwrap(),
+        )
+        .unwrap();
+
+        let mut c = open_cache(tmp.path(), &[], &[]);
+        assert!(c.get(&file, &key).is_some());
+        c.persist().unwrap();
+
+        let c2 = open_cache(tmp.path(), &[], &[]);
+        assert!(
+            c2.get(&file, &key).is_some(),
+            "hit entry should survive eviction"
+        );
     }
 
     #[test]

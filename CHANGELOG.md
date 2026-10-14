@@ -6,6 +6,7 @@
 
 ### Fix
 
+- **config**: prefer project venvs, bound the parent walk at the repo root
 - **config**: resolve relative python against config dir
 
 ## v0.5.0 (2026-10-13)

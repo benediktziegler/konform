@@ -88,10 +88,29 @@ Entries are relative to the directory containing the config file.
 
 ## Python environment
 
-konform uses `python` if set, otherwise auto-discovers an interpreter: the active
-`VIRTUAL_ENV` or `CONDA_PREFIX`, then `.venv`, `venv` or `.env` in the project and
-its parent directories, then `python3` on your `PATH`. A relative `python` path is
-resolved against the directory containing the config file.
+konform uses `python` if set, otherwise auto-discovers an interpreter, starting from
+the directory containing the config file (or the working directory if there is no
+config file). In order:
+
+1. `.venv`, `venv` or `.env` in the config directory.
+2. The same directories in each parent directory, up to and including the first one
+   that contains `.git` (the repository root). If no `.git` is found, parents are not
+   searched.
+3. The active `VIRTUAL_ENV`, then `CONDA_PREFIX`.
+4. `python3` on your `PATH` (`python.exe` on Windows).
+
+Inside an environment the interpreter is `bin/python3` or `bin/python`; on Windows it
+is `Scripts/python.exe`, or `python.exe` at the environment root (conda layout).
+
+An explicit `python` always wins over discovery. `~` is expanded, and a relative path
+is resolved against the directory containing the config file (previously it was
+relative to the working directory). It may point above the repository root, which is
+useful for monorepos where the venv lives above the config file:
+
+```toml
+[tool.konform]
+python = "../.venv/bin/python"
+```
 
 > **Note:** konform executes this interpreter (the `python` setting or any
 > auto-discovered venv interpreter) to read `sys.path` and the stdlib module list.

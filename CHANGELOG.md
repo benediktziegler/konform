@@ -6,6 +6,11 @@
 
 ### Fix
 
+- **cli**: make clean robust to cwd, refuse when paths cannot be canonicalized
+- **git**: normalize .. components before walking up for the repo root
+- **cli**: lint .pyi files
+- **cli**: make clean resolve and verify the cache dir
+- **git**: walk up from relative paths when finding repo root
 - **cache**: enforce size limit on write, sweep stale temp files, drop Mutex
 - **cache**: refresh last_seen on cache hits
 - **cache**: use unique temp files when persisting
@@ -15,6 +20,7 @@
 
 ### Refactor
 
+- **cli**: extract clean safety checks into a testable helper
 - **cache**: replace bincode with rkyv
 
 ## v0.5.0 (2026-10-13)

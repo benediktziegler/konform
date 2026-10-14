@@ -677,6 +677,21 @@ fn output_file_receives_report() {
     assert_eq!(v[0]["rule"], "KIS001");
 }
 
+#[test]
+fn pyi_files_are_linted_in_directory_and_explicit_modes() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stub.pyi"), BAD).unwrap();
+
+    check(dir.path(), &["."])
+        .assert()
+        .failure()
+        .stderr(contains("stub.pyi"));
+    check(dir.path(), &["stub.pyi"])
+        .assert()
+        .failure()
+        .stderr(contains("stub.pyi"));
+}
+
 // ---------------------------------------------------------------------------
 // clean
 // ---------------------------------------------------------------------------
@@ -702,7 +717,7 @@ fn clean_removes_cache_dir_created_by_check() {
         .arg("clean")
         .assert()
         .success()
-        .stderr(contains("Removed cache directory: .kcache"));
+        .stderr(contains("Removed cache directory:").and(contains(".kcache")));
     assert!(!cache.exists());
 
     // Nothing left to clean is not an error.
@@ -734,6 +749,203 @@ fn clean_removes_leftover_version_directories_too() {
 
     konform(dir.path()).arg("clean").assert().success();
     assert!(!cache.exists(), "all versions go with the cache root");
+}
+
+#[test]
+fn clean_refuses_dir_without_cachedir_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[tool.konform]\ncache-dir = \"build\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join("build")).unwrap();
+    std::fs::write(dir.path().join("build/keep.txt"), "x").unwrap();
+
+    konform(dir.path())
+        .arg("clean")
+        .assert()
+        .failure()
+        .stderr(contains("CACHEDIR.TAG"));
+    assert!(dir.path().join("build/keep.txt").is_file());
+}
+
+#[test]
+fn clean_refuses_cache_dir_that_is_the_repo_root() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[tool.konform]\ncache-dir = \".\"\n",
+    )
+    .unwrap();
+    // Even a (forged) tag must not make the project root deletable.
+    std::fs::write(dir.path().join("CACHEDIR.TAG"), "").unwrap();
+
+    konform(dir.path())
+        .arg("clean")
+        .assert()
+        .failure()
+        .stderr(contains("refusing"));
+    assert!(dir.path().join("pyproject.toml").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_reports_failure_to_remove_cache() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[tool.konform]\ncache-dir = \".kcache\"\n",
+    )
+    .unwrap();
+    let cache = dir.path().join(".kcache");
+    let locked = cache.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::write(cache.join("CACHEDIR.TAG"), "").unwrap();
+    std::fs::write(locked.join("f"), "x").unwrap();
+    // A read-only directory cannot have its entries removed.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Skip when permissions are not enforced (e.g. running as root).
+    let enforced = std::fs::remove_file(locked.join("f")).is_err();
+    if enforced {
+        konform(dir.path())
+            .arg("clean")
+            .assert()
+            .failure()
+            .stderr(contains("failed to remove cache"));
+    }
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn clean_from_subdirectory_resolves_cache_against_repo_root() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();
+    std::fs::write(dir.path().join("good.py"), GOOD).unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+
+    konform(dir.path())
+        .args(["check", "good.py"])
+        .assert()
+        .success();
+    let cache = dir.path().join(".konform_cache");
+    assert!(cache.join("CACHEDIR.TAG").is_file());
+
+    konform(&sub).arg("clean").assert().success();
+    assert!(!cache.exists());
+}
+
+#[test]
+fn clean_removes_absolute_cache_dir_and_prints_resolved_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let cache = elsewhere.path().join("abs_cache");
+    std::fs::create_dir(&cache).unwrap();
+    std::fs::write(cache.join("CACHEDIR.TAG"), "").unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        format!("[tool.konform]\ncache-dir = '{}'\n", cache.display()),
+    )
+    .unwrap();
+
+    konform(dir.path())
+        .arg("clean")
+        .assert()
+        .success()
+        .stderr(contains("Removed cache directory:").and(contains("abs_cache")));
+    assert!(!cache.exists());
+}
+
+#[test]
+fn clean_refuses_ancestor_cache_dir_when_cwd_is_not_the_repo_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path().join("proj");
+    let sub = proj.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(
+        proj.join("pyproject.toml"),
+        "[tool.konform]\ncache-dir = \"..\"\n",
+    )
+    .unwrap();
+    // A forged tag on the repo root's parent must not make it deletable.
+    std::fs::write(tmp.path().join("CACHEDIR.TAG"), "").unwrap();
+
+    konform(&sub)
+        .arg("clean")
+        .assert()
+        .failure()
+        .stderr(contains("refusing"));
+    assert!(proj.join("pyproject.toml").is_file());
+}
+
+#[test]
+fn clean_falls_back_to_tagged_cache_dir_below_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();
+    let sub = dir.path().join("sub");
+    let old = sub.join(".konform_cache");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("CACHEDIR.TAG"), "").unwrap();
+
+    konform(&sub)
+        .arg("clean")
+        .assert()
+        .success()
+        .stderr(contains("Removed cache directory:"));
+    assert!(!old.exists());
+
+    // An untagged directory of that name below the cwd is left alone.
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("keep.txt"), "x").unwrap();
+    konform(&sub)
+        .arg("clean")
+        .assert()
+        .success()
+        .stderr(contains("Cache directory not found"));
+    assert!(old.join("keep.txt").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_symlinked_cache_dir_removes_only_the_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = tempfile::tempdir().unwrap();
+    std::fs::write(real.path().join("CACHEDIR.TAG"), "").unwrap();
+    std::fs::write(real.path().join("entry"), "x").unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[tool.konform]\ncache-dir = \"link\"\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(real.path(), dir.path().join("link")).unwrap();
+
+    konform(dir.path()).arg("clean").assert().success();
+    assert!(dir.path().join("link").symlink_metadata().is_err());
+    assert!(real.path().join("entry").is_file(), "link target survives");
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_refuses_symlink_to_the_repo_root() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("CACHEDIR.TAG"), "").unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[tool.konform]\ncache-dir = \"link\"\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(dir.path(), dir.path().join("link")).unwrap();
+
+    konform(dir.path())
+        .arg("clean")
+        .assert()
+        .failure()
+        .stderr(contains("refusing"));
+    assert!(dir.path().join("pyproject.toml").is_file());
 }
 
 // ---------------------------------------------------------------------------

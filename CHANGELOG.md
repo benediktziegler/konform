@@ -6,6 +6,7 @@
 
 ### Fix
 
+- **cli**: make clean resolve and verify the cache dir
 - **git**: walk up from relative paths when finding repo root
 - **cache**: enforce size limit on write, sweep stale temp files, drop Mutex
 - **cache**: refresh last_seen on cache hits

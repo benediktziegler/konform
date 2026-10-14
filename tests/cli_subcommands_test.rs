@@ -677,6 +677,21 @@ fn output_file_receives_report() {
     assert_eq!(v[0]["rule"], "KIS001");
 }
 
+#[test]
+fn pyi_files_are_linted_in_directory_and_explicit_modes() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stub.pyi"), BAD).unwrap();
+
+    check(dir.path(), &["."])
+        .assert()
+        .failure()
+        .stderr(contains("stub.pyi"));
+    check(dir.path(), &["stub.pyi"])
+        .assert()
+        .failure()
+        .stderr(contains("stub.pyi"));
+}
+
 // ---------------------------------------------------------------------------
 // clean
 // ---------------------------------------------------------------------------

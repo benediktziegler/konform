@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{fs, io};
 
 /// Cache sub-directory name equals the konform version string, so upgrading
@@ -33,6 +34,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Entries not visited within this many days are evicted on [`Cache::persist`].
 const EVICT_DAYS: u64 = 30;
+
+/// Per-process counter making temp file names unique across calls.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Upper bound on bytes (and container allocations) accepted when decoding a
 /// cache file, so a corrupt length prefix errors instead of aborting on a huge
@@ -401,6 +405,7 @@ impl Cache {
         if entry.key != key.hash() {
             return None; // mtime / permissions changed
         }
+        // Record the hit so persist() refreshes last_seen (get is shared
         Some(entry.violations.iter().map(|v| v.to_json()).collect())
     }
 
@@ -454,14 +459,28 @@ impl Cache {
 
         let bytes = bincode::encode_to_vec(&self.package, bincode_config())?;
 
-        // Atomic write: encode to .tmp, then rename.
-        let tmp = self.path.with_extension("tmp");
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(&bytes)?;
-        drop(f);
-        fs::rename(&tmp, &self.path)?;
+        // Atomic write: encode to a unique temp file, then rename.
+        let tmp = self.temp_path();
+        let result = (|| -> io::Result<()> {
+            let mut f = fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            drop(f);
+            fs::rename(&tmp, &self.path)
+        })();
+        if let Err(e) = result {
+            let _ = fs::remove_file(&tmp); // best effort
+            return Err(e.into());
+        }
 
         Ok(())
+    }
+
+    /// Temp file name unique per process and per call, so concurrent
+    /// persists never clobber each other's partial writes.
+    fn temp_path(&self) -> PathBuf {
+        let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        self.path
+            .with_extension(format!("{}.{n}.tmp", std::process::id()))
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
@@ -738,6 +757,31 @@ mod tests {
         let c = open_cache(tmp.path(), &[], &[]);
         let key = FileCacheKey::from_path(&file).unwrap();
         assert!(c.get(&file, &key).is_none());
+    }
+
+    #[test]
+    fn temp_paths_are_unique() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = open_cache(tmp.path(), &[], &[]);
+        let a = c.temp_path();
+        let b = c.temp_path();
+        assert_ne!(a, b);
+        assert_ne!(a, c.path);
+        assert_eq!(a.parent(), c.path.parent());
+    }
+
+    #[test]
+    fn persist_leaves_no_temp_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut c = open_cache(tmp.path(), &[], &[]);
+        c.persist().unwrap();
+        let dir = c.path.parent().unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
     }
 
     #[test]

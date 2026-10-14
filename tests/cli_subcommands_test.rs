@@ -713,6 +713,29 @@ fn clean_removes_cache_dir_created_by_check() {
         .stderr(contains("Cache directory not found"));
 }
 
+#[test]
+fn clean_removes_leftover_version_directories_too() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[tool.konform]\ncache-dir = \".kcache\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("good.py"), GOOD).unwrap();
+    konform(dir.path())
+        .args(["check", "good.py"])
+        .assert()
+        .success();
+
+    let cache = dir.path().join(".kcache");
+    let leftover = cache.join("0.0.1");
+    std::fs::create_dir_all(&leftover).unwrap();
+    std::fs::write(leftover.join("deadbeefdeadbeef"), b"old format").unwrap();
+
+    konform(dir.path()).arg("clean").assert().success();
+    assert!(!cache.exists(), "all versions go with the cache root");
+}
+
 // ---------------------------------------------------------------------------
 // --isolated / stdin
 // ---------------------------------------------------------------------------

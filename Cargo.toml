@@ -65,12 +65,9 @@ similar = "3"
 # ---------------------------------------------------------------------------
 # Cache (ruff-style binary cache)
 # ---------------------------------------------------------------------------
-# Binary serialisation: replaces serde_json in the cache path.
-# Pinned to 2.0.1: the last working release before the project was abandoned
-# (3.0.0 is a tombstone that refuses to compile). The upstream maintainer
-# recommends `wincode` as a maintained fork; we can migrate when it
-# stabilises beyond v0.x and adopts a compatible Rust MSRV.
-bincode  = { version = "=2.0.1", features = ["derive"] }
+# Zero-copy binary serialisation with validated access (as ruff's cache does);
+# replaces the unmaintained `bincode` (RUSTSEC-2025-0141).
+rkyv     = { version = "0.8", default-features = false, features = ["std", "bytecheck"] }
 # Fast, deterministic hash for settings + file-cache keys
 seahash  = "4"
 # Writes CACHEDIR.TAG (backup/sync tool hint)

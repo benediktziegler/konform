@@ -6,8 +6,16 @@
 
 ### Fix
 
+- **cache**: enforce size limit on write, sweep stale temp files, drop Mutex
+- **cache**: refresh last_seen on cache hits
+- **cache**: use unique temp files when persisting
+- **cache**: cap bincode decode size
 - **config**: prefer project venvs, bound the parent walk at the repo root
 - **config**: resolve relative python against config dir
+
+### Refactor
+
+- **cache**: replace bincode with rkyv
 
 ## v0.5.0 (2026-10-13)
 

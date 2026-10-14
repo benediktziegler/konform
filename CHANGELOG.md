@@ -6,6 +6,7 @@
 
 ### Fix
 
+- **git**: normalize .. components before walking up for the repo root
 - **cli**: lint .pyi files
 - **cli**: make clean resolve and verify the cache dir
 - **git**: walk up from relative paths when finding repo root

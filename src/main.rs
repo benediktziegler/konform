@@ -1438,7 +1438,15 @@ fn run_clean(args: CleanArgs) {
     let config = load_config(Some(&cwd), args.config.as_deref());
     warn_config_errors(&config);
     let repo_root = find_repo_root(&cwd).unwrap_or_else(|| cwd.clone());
-    let cache_path = repo_root.join(&config.cache_dir);
+    // `check` anchors the repo root on its target path, so older versions may
+    // have left the cache below the cwd instead of the repo root.
+    let mut cache_path = repo_root.join(&config.cache_dir);
+    if !cache_path.exists() {
+        let local = cwd.join(&config.cache_dir);
+        if local.join("CACHEDIR.TAG").is_file() {
+            cache_path = local;
+        }
+    }
     if !cache_path.exists() {
         eprintln!("Cache directory not found: {}", cache_path.display());
         return;
@@ -1447,20 +1455,25 @@ fn run_clean(args: CleanArgs) {
         eprintln!("error: refusing to remove {}: {why}", cache_path.display());
         std::process::exit(1);
     };
-    let target = cache_path.canonicalize().unwrap_or(cache_path.clone());
-    let protected = [&repo_root, &cwd];
-    if protected.iter().any(|p| {
-        p.canonicalize()
-            .unwrap_or_else(|_| (*p).clone())
-            .starts_with(&target)
-    }) {
-        refuse("it is the repository root, the current directory, or one of their ancestors");
+    // Compare canonical forms only; if any of them cannot be resolved we
+    // cannot prove the removal is safe.
+    let Ok(target) = cache_path.canonicalize() else {
+        refuse("its location could not be resolved");
+    };
+    for protected in [&repo_root, &cwd] {
+        match protected.canonicalize() {
+            Ok(p) if p.starts_with(&target) => refuse(
+                "it is the repository root, the current directory, or one of their ancestors",
+            ),
+            Ok(_) => {}
+            Err(_) => refuse("the repository root or current directory could not be resolved"),
+        }
     }
     if !cache_path.join("CACHEDIR.TAG").is_file() {
         refuse("it does not contain a CACHEDIR.TAG, so it does not look like a konform cache");
     }
     match std::fs::remove_dir_all(&cache_path) {
-        Ok(()) => eprintln!("Removed cache directory: {}", config.cache_dir),
+        Ok(()) => eprintln!("Removed cache directory: {}", cache_path.display()),
         Err(e) => {
             eprintln!("error: failed to remove cache: {e}");
             std::process::exit(1);
@@ -1535,6 +1548,14 @@ mod watch_tests {
         assert!(!watched("gone.py"), "deleted files have nothing to check");
         // Without any exclude everything Python counts.
         assert!(is_watched_file(&dir.path().join("gen/b.py"), None, &config));
+    }
+
+    #[test]
+    fn watch_mode_accepts_pyi_stubs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("stub.pyi"), "x: int\n").unwrap();
+        let config = config::Config::default();
+        assert!(is_watched_file(&dir.path().join("stub.pyi"), None, &config));
     }
 }
 

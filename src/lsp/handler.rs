@@ -240,7 +240,7 @@ fn handle_code_action(
         )
     };
 
-    let path: std::path::PathBuf = uri.path().as_str().into();
+    let path = super::session::uri_file_path(uri);
     let mut actions: Vec<CodeActionOrCommand> = Vec::new();
 
     // Honour `context.only` (e.g. `["source.fixAll"]` on save, or
@@ -638,7 +638,7 @@ fn handle_formatting(
     let rules = Arc::clone(&sess.rules);
     drop(sess);
 
-    let path: std::path::PathBuf = uri.path().as_str().into();
+    let path = super::session::uri_file_path(uri);
     let fix_input = CheckInput::new(&path, &source);
     // Formatting-on-save is also an explicit, reviewable editor action.
     let edits: Vec<TextEdit> = match run_fix(&fix_input, &rules, &config, true) {
@@ -815,7 +815,7 @@ fn run_diagnostics(
     let rules = Arc::clone(&sess.rules);
     drop(sess);
 
-    let path: std::path::PathBuf = uri.path().as_str().into();
+    let path = super::session::uri_file_path(uri);
     let input = CheckInput::new(&path, &source);
     let violations: Vec<Violation> = run_check(&input, &rules, &config);
     let lsp_diags = violations.iter().map(violation_to_diagnostic).collect();

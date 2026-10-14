@@ -12,7 +12,7 @@
 use super::*;
 use crate::config::Config;
 use crate::module_probe::ModuleProbe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -265,18 +265,35 @@ impl TestServer {
 }
 
 fn file_uri(path: &std::path::Path) -> Uri {
+    Uri::from_str(&file_uri_string(path)).expect("valid file URI")
+}
+
+fn file_uri_string(path: &std::path::Path) -> String {
     // `path.display()` yields native separators (backslashes on Windows) and,
     // on Windows, an absolute path like `D:\a\b` rather than a leading `/`.
     // A valid `file://` URI needs forward slashes and a leading slash before
     // the path (so `D:\a\b` becomes `file:///D:/a/b`), while Unix paths
     // already start with `/` and just need `file://` prefixed as before.
     let normalized = path.display().to_string().replace('\\', "/");
-    let uri_str = if normalized.starts_with('/') {
+    if normalized.starts_with('/') {
         format!("file://{normalized}")
     } else {
         format!("file:///{normalized}")
-    };
-    Uri::from_str(&uri_str).expect("valid file URI")
+    }
+}
+
+/// Like [`file_uri`], but percent-encodes every byte outside the RFC 3986
+/// unreserved set (and `/`, `:`), as editors do for spaces and non-ASCII.
+fn file_uri_encoded(path: &std::path::Path) -> Uri {
+    let mut out = String::new();
+    for &b in file_uri_string(path).as_bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~/:".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    Uri::from_str(&out).expect("valid encoded file URI")
 }
 
 /// Source with a single fixable KIS001 violation.
@@ -1400,4 +1417,87 @@ fn excluded_documents_get_no_diagnostics() {
     assert!(server.next_diagnostics(&uri).diagnostics.is_empty());
 
     server.shutdown();
+}
+
+/// Write `rel` under the project root `<tmp>/<root_name>`, open it through a percent-encoded
+/// URI with `config`, and return the diagnostics the server publishes.
+fn diagnostics_for_encoded_path(
+    root_name: &str,
+    rel: &str,
+    make_config: impl Fn(&Path) -> Config,
+) -> usize {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join(root_name);
+    let file = root.join(rel);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, KIS001_SOURCE).unwrap();
+    let uri = file_uri_encoded(&file);
+    assert!(uri.as_str().contains('%'), "{uri:?} should be encoded");
+    let mut server = TestServer::new(root.clone(), make_config(&root));
+    server.initialize();
+    server.open(&uri, KIS001_SOURCE);
+    let n = server.next_diagnostics(&uri).diagnostics.len();
+    server.shutdown();
+    n
+}
+
+fn exclude_gen(root: &Path) -> Config {
+    Config {
+        exclude: vec!["gen/**".to_string()],
+        config_dir: Some(root.to_path_buf()),
+        ..Config::default()
+    }
+}
+
+fn ignore_kis001_in_gen(root: &Path) -> Config {
+    let mut config = Config {
+        config_dir: Some(root.to_path_buf()),
+        ..Config::default()
+    };
+    config
+        .lint
+        .per_file_ignores
+        .insert("gen/**".to_string(), vec!["KIS001".to_string()]);
+    config
+}
+
+#[test]
+fn exclude_matches_percent_encoded_path_with_space() {
+    assert_eq!(
+        diagnostics_for_encoded_path("my dir", "gen/a.py", exclude_gen),
+        0
+    );
+    // Control: outside `gen/` the same setup still reports.
+    assert_eq!(
+        diagnostics_for_encoded_path("my dir", "src/a.py", exclude_gen),
+        1
+    );
+}
+
+#[test]
+fn exclude_matches_percent_encoded_non_ascii_path() {
+    assert_eq!(
+        diagnostics_for_encoded_path("café", "gen/ü.py", exclude_gen),
+        0
+    );
+    assert_eq!(
+        diagnostics_for_encoded_path("café", "src/ü.py", exclude_gen),
+        1
+    );
+}
+
+#[test]
+fn per_file_ignores_match_percent_encoded_paths() {
+    assert_eq!(
+        diagnostics_for_encoded_path("my dir", "gen/a.py", ignore_kis001_in_gen),
+        0
+    );
+    assert_eq!(
+        diagnostics_for_encoded_path("café", "gen/ü.py", ignore_kis001_in_gen),
+        0
+    );
+    assert_eq!(
+        diagnostics_for_encoded_path("my dir", "src/a.py", ignore_kis001_in_gen),
+        1
+    );
 }

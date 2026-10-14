@@ -14,6 +14,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// The file path behind a `file://` URI, percent-decoded.
+pub fn uri_file_path(uri: &Uri) -> PathBuf {
+    file_path(uri.path().as_str())
+}
+
 /// The file path behind the path part of a `file://` URI. On Windows that
 /// part is `/D:/a/b`, with a slash in front of the drive letter.
 fn file_path(uri_path: &str) -> PathBuf {
@@ -21,12 +26,40 @@ fn file_path(uri_path: &str) -> PathBuf {
 }
 
 fn file_path_for(uri_path: &str, windows: bool) -> PathBuf {
-    match uri_path.as_bytes() {
+    let decoded = percent_decode(uri_path);
+    match decoded.as_bytes() {
         [b'/', drive, b':', ..] if windows && drive.is_ascii_alphabetic() => {
-            PathBuf::from(&uri_path[1..])
+            PathBuf::from(&decoded[1..])
         }
-        _ => PathBuf::from(uri_path),
+        _ => PathBuf::from(decoded),
     }
+}
+
+/// Decode `%XX` escapes as UTF-8. Invalid escapes (`%zz`, a truncated `%4`)
+/// are kept as-is, and bytes that do not form valid UTF-8 become U+FFFD.
+fn percent_decode(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_owned();
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+fn hex(b: u8) -> Option<u8> {
+    (b as char).to_digit(16).map(|d| d as u8)
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +167,7 @@ impl Session {
     pub fn is_excluded(&self, uri: &Uri) -> bool {
         self.excluded
             .as_ref()
-            .is_some_and(|gs| self.config.is_excluded(gs, &file_path(uri.path().as_str())))
+            .is_some_and(|gs| self.config.is_excluded(gs, &uri_file_path(uri)))
     }
 
     /// Store the most recently computed diagnostics for `codeAction` lookup.
@@ -247,5 +280,28 @@ mod tests {
             PathBuf::from("/home/me/b.py")
         );
         assert_eq!(file_path_for("/", true), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn percent_escapes_are_decoded() {
+        assert_eq!(percent_decode("/my%20dir/a.py"), "/my dir/a.py");
+        // Multi-byte UTF-8 (lower and upper case hex).
+        assert_eq!(percent_decode("/caf%C3%A9/%c3%bc.py"), "/café/ü.py");
+        assert_eq!(percent_decode("/plain/a.py"), "/plain/a.py");
+        assert_eq!(
+            file_path_for("/D:/my%20dir/a.py", true),
+            PathBuf::from("D:/my dir/a.py")
+        );
+        assert_eq!(file_path_for("/D%3A/a", false), PathBuf::from("/D:/a"));
+    }
+
+    #[test]
+    fn invalid_percent_escapes_are_left_alone() {
+        assert_eq!(percent_decode("/a%zz/b"), "/a%zz/b");
+        assert_eq!(percent_decode("/a%4"), "/a%4");
+        assert_eq!(percent_decode("/a%"), "/a%");
+        assert_eq!(percent_decode("/100%25"), "/100%");
+        // Invalid UTF-8 degrades to the replacement character.
+        assert_eq!(percent_decode("/a%FFb"), "/a\u{FFFD}b");
     }
 }

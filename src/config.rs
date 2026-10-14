@@ -1152,6 +1152,36 @@ mod tests {
     }
 
     #[test]
+    fn resolve_python_relative_without_config_dir_stays_relative() {
+        let cfg = Config {
+            config_dir: None,
+            python: Some("tools/python".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_python(&cfg), PathBuf::from("tools/python"));
+    }
+
+    #[test]
+    fn discover_python_ignores_empty_env_vars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        let local = make_env(&project, ".venv");
+        let empty = std::ffi::OsString::new();
+        assert_eq!(
+            discover_python_with_env(&project, Some(empty.clone()), Some(empty)),
+            local
+        );
+    }
+
+    #[test]
+    fn discover_python_reads_process_env() {
+        // The real environment may or may not define VIRTUAL_ENV, so only
+        // check that the wrapper yields some interpreter path.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!discover_python(tmp.path()).as_os_str().is_empty());
+    }
+
+    #[test]
     fn discover_python_falls_back_to_system() {
         let tmp = tempfile::tempdir().unwrap();
         let found = discover_python_with_env(tmp.path(), None, None);

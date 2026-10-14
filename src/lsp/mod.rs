@@ -9,8 +9,6 @@ pub mod convert;
 pub mod handler;
 pub mod session;
 
-use crate::config::{load_config, resolve_python};
-use crate::module_probe::ModuleProbe;
 use session::Session;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -34,16 +32,16 @@ pub fn run() {
         .expect("initialization handshake failed");
 
     // ── Load config from the workspace root, else the working directory ───
-    let root =
-        workspace_root(&init_params).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let (root, notices) = resolve_root(&init_params, std::env::current_dir().unwrap_or_default());
     eprintln!("konform server: root {}", root.display());
-    let config = load_config(Some(&root), None);
-    let python = resolve_python(&config);
-    let module_probe_root = config.config_dir.clone().unwrap_or_else(|| root.clone());
-    let probe = Arc::new(ModuleProbe::new(&python, &module_probe_root, &config.src));
+    for notice in &notices {
+        eprintln!("{notice}");
+    }
 
     // ── Build the shared session ───────────────────────────────────────────
-    let session = Arc::new(RwLock::new(Session::new(config, probe, root)));
+    let mut session = Session::start(root);
+    session.notices = notices;
+    let session = Arc::new(RwLock::new(session));
 
     eprintln!("konform server: initialized");
 
@@ -55,16 +53,67 @@ pub fn run() {
     eprintln!("konform server: exiting");
 }
 
-/// The local directory of the client's first workspace folder, else its
-/// `rootUri`. `None` when neither is given or it is not a local `file:` URI.
+/// The session root for an `initialize` request, plus messages for the user.
+///
+/// Uses the first workspace folder, else `rootUri`, else the deprecated
+/// `rootPath`, else `cwd`. Only one root is supported: configuration is read
+/// from it and applied to every document, so extra folders are reported.
+fn resolve_root(init_params: &serde_json::Value, cwd: PathBuf) -> (PathBuf, Vec<String>) {
+    let mut notices = Vec::new();
+    let folders = init_params
+        .get("workspaceFolders")
+        .and_then(|f| f.as_array())
+        .map_or(&[][..], Vec::as_slice);
+    let root = match workspace_root(init_params) {
+        Some(root) => root,
+        None => {
+            notices.push(format!(
+                "konform: the editor gave no local workspace folder, so the working \
+                 directory {} is used to find the configuration.",
+                cwd.display()
+            ));
+            cwd
+        }
+    };
+    if folders.len() > 1 {
+        notices.push(format!(
+            "konform: {} workspace folders are open, but konform uses the configuration of \
+             the first one ({}) for all of them. Run one konform server per folder for \
+             separate settings.",
+            folders.len(),
+            root.display()
+        ));
+    }
+    (root, notices)
+}
+
+/// The local directory of the client's first usable root: its first
+/// workspace folder, else `rootUri`, else the deprecated `rootPath`. `None`
+/// when none is given or none is a local `file:` URI / path.
 fn workspace_root(init_params: &serde_json::Value) -> Option<PathBuf> {
-    let from_folders = init_params
+    let uri_of = |v: Option<&serde_json::Value>| v.and_then(|u| u.as_str()).map(str::to_owned);
+    let first_folder = init_params
         .get("workspaceFolders")
         .and_then(|f| f.as_array())
         .and_then(|f| f.first())
-        .and_then(|f| f.get("uri"))
-        .and_then(|u| u.as_str());
-    let uri = from_folders.or_else(|| init_params.get("rootUri").and_then(|u| u.as_str()))?;
+        .and_then(|f| uri_of(f.get("uri")));
+    [first_folder, uri_of(init_params.get("rootUri"))]
+        .into_iter()
+        .flatten()
+        .find_map(|uri| local_dir(&uri))
+        .or_else(|| {
+            // `rootPath` is a plain path, deprecated in favour of `rootUri`.
+            init_params
+                .get("rootPath")
+                .and_then(|p| p.as_str())
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+        })
+}
+
+/// The local path named by a `file:` URI, `None` for other schemes or a
+/// `file://host/share` URI that names another machine.
+fn local_dir(uri: &str) -> Option<PathBuf> {
     let uri = lsp_types::Uri::from_str(uri).ok()?;
     if !uri
         .scheme()
@@ -72,7 +121,6 @@ fn workspace_root(init_params: &serde_json::Value) -> Option<PathBuf> {
     {
         return None;
     }
-    // Only a local path: a `file://host/share` URI names another machine.
     if uri
         .authority()
         .is_some_and(|a| !a.as_str().is_empty() && !a.as_str().eq_ignore_ascii_case("localhost"))
@@ -123,5 +171,48 @@ mod tests {
             None
         );
         assert_eq!(workspace_root(&json!({ "rootUri": "not a uri" })), None);
+    }
+
+    #[test]
+    fn root_path_is_the_last_resort() {
+        let params = json!({ "rootUri": "vscode-vfs://x/y", "rootPath": "/legacy" });
+        assert_eq!(workspace_root(&params), Some(PathBuf::from("/legacy")));
+        // A usable rootUri still wins, and so does a later local source over
+        // a remote first folder.
+        let params = json!({ "rootUri": "file:///new", "rootPath": "/legacy" });
+        assert_eq!(workspace_root(&params), Some(PathBuf::from("/new")));
+        let params = json!({
+            "workspaceFolders": [{ "uri": "vscode-vfs://x/y", "name": "r" }],
+            "rootUri": "file:///new",
+        });
+        assert_eq!(workspace_root(&params), Some(PathBuf::from("/new")));
+        assert_eq!(workspace_root(&json!({ "rootPath": "" })), None);
+    }
+
+    #[test]
+    fn a_missing_root_falls_back_to_cwd_with_a_notice() {
+        let (root, notices) = resolve_root(&json!({}), PathBuf::from("/work"));
+        assert_eq!(root, PathBuf::from("/work"));
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("/work"), "{notices:?}");
+
+        let (root, notices) = resolve_root(&json!({ "rootUri": "file:///p" }), "/work".into());
+        assert_eq!(root, PathBuf::from("/p"));
+        assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn extra_workspace_folders_are_reported() {
+        let params = json!({ "workspaceFolders": [
+            { "uri": "file:///a", "name": "a" },
+            { "uri": "file:///b", "name": "b" },
+        ] });
+        let (root, notices) = resolve_root(&params, PathBuf::from("/work"));
+        assert_eq!(root, PathBuf::from("/a"));
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].contains("2 workspace folders") && notices[0].contains("/a"),
+            "{notices:?}"
+        );
     }
 }

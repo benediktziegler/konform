@@ -36,9 +36,13 @@ struct TestServer {
 
 impl TestServer {
     fn new(root: PathBuf, config: Config) -> Self {
-        let (server_conn, client_conn) = Connection::memory();
         let probe = Arc::new(ModuleProbe::default());
-        let session = Arc::new(RwLock::new(Session::new(config, probe, root)));
+        Self::with_session(Session::new(config, probe, root))
+    }
+
+    fn with_session(session: Session) -> Self {
+        let (server_conn, client_conn) = Connection::memory();
+        let session = Arc::new(RwLock::new(session));
 
         let thread = std::thread::spawn(move || {
             // Mirrors `lsp::run()`: the initialize handshake happens before
@@ -166,6 +170,17 @@ impl TestServer {
                 Message::Notification(n) => return n,
                 Message::Request(req) => self.answer_server_request(req),
                 Message::Response(_) => {}
+            }
+        }
+    }
+
+    /// Block until the next `window/showMessage` arrives; returns its text.
+    fn next_show_message(&mut self) -> String {
+        loop {
+            let notif = self.next_notification();
+            if notif.method == "window/showMessage" {
+                assert_eq!(notif.params["type"], 2, "{}", notif.params);
+                return notif.params["message"].as_str().unwrap().to_owned();
             }
         }
     }
@@ -1500,4 +1515,188 @@ fn per_file_ignores_match_percent_encoded_paths() {
         diagnostics_for_encoded_path("my dir", "src/a.py", ignore_kis001_in_gen),
         1
     );
+}
+
+// ---------------------------------------------------------------------------
+// Reload, root and interpreter handling
+// ---------------------------------------------------------------------------
+
+/// Source whose import is flagged by KIS001 only when `pkg` (in `lib/`)
+/// can be found: otherwise the root package is unknown and nothing is said.
+const PKG_SOURCE: &str = "from pkg import name\n";
+
+fn make_pkg(root: &Path) {
+    let pkg = root.join("lib/pkg");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("__init__.py"), "name = 1\n").unwrap();
+}
+
+/// `(checked, unresolved)` KIS001 diagnostics: a definite violation vs. "the
+/// package was not found in this Python environment".
+fn import_state(params: &PublishDiagnosticsParams) -> (usize, usize) {
+    let kis001: Vec<_> = params
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "KIS001"))
+        .collect();
+    let unresolved = kis001
+        .iter()
+        .filter(|d| {
+            d.message
+                .contains("was not found in this Python environment")
+        })
+        .count();
+    (kis001.len() - unresolved, unresolved)
+}
+
+fn notify_config_changed(server: &TestServer) {
+    server.notify(
+        "workspace/didChangeWatchedFiles",
+        serde_json::json!({ "changes": [] }),
+    );
+}
+
+#[test]
+fn reload_changing_src_changes_import_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    make_pkg(dir.path());
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    server.initialize();
+
+    // `lib` is not a source root yet, so `pkg` is unknown.
+    server.open(&uri, PKG_SOURCE);
+    assert_eq!(import_state(&server.next_diagnostics(&uri)), (0, 1));
+
+    std::fs::write(dir.path().join("konform.toml"), "src = [\"lib\"]\n").unwrap();
+    notify_config_changed(&server);
+    assert_eq!(import_state(&server.next_diagnostics(&uri)), (1, 0));
+
+    std::fs::write(dir.path().join("konform.toml"), "src = [\".\"]\n").unwrap();
+    notify_config_changed(&server);
+    assert_eq!(import_state(&server.next_diagnostics(&uri)), (0, 1));
+
+    server.shutdown();
+}
+
+/// A shell script standing in for `python`: `sys.path` is `[<lib>]`, and the
+/// built-in module list is empty.
+#[cfg(unix)]
+fn fake_python(path: &Path, lib: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        format!(
+            "#!/bin/sh\ncase \"$2\" in\n*stdlib_module_names*) echo '[]';;\n*) echo '[\"{}\"]';;\nesac\n",
+            lib.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn reload_changing_python_changes_import_diagnostics_and_reports_a_broken_one() {
+    let dir = tempfile::tempdir().unwrap();
+    make_pkg(dir.path());
+    let python = dir.path().join("bin/fake-python");
+    fake_python(&python, &dir.path().join("lib"));
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    server.initialize();
+
+    server.open(&uri, PKG_SOURCE);
+    assert_eq!(import_state(&server.next_diagnostics(&uri)), (0, 1));
+
+    // The configured interpreter sees `pkg` on its sys.path.
+    std::fs::write(
+        dir.path().join("konform.toml"),
+        format!("python = \"{}\"\n", python.display()),
+    )
+    .unwrap();
+    notify_config_changed(&server);
+    assert_eq!(import_state(&server.next_diagnostics(&uri)), (1, 0));
+
+    // A broken one is reported, and the editor is told which.
+    let missing = dir.path().join("bin/missing-python");
+    std::fs::write(
+        dir.path().join("konform.toml"),
+        format!("python = \"{}\"\n", missing.display()),
+    )
+    .unwrap();
+    notify_config_changed(&server);
+    let message = server.next_show_message();
+    assert!(
+        message.contains("missing-python") && message.contains("Python interpreter"),
+        "{message}"
+    );
+    assert_eq!(import_state(&server.next_diagnostics(&uri)), (0, 1));
+
+    server.shutdown();
+}
+
+#[test]
+fn an_unusable_interpreter_is_reported_at_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("no-such-python");
+    std::fs::write(
+        dir.path().join("konform.toml"),
+        format!("python = \"{}\"\n", missing.display()),
+    )
+    .unwrap();
+    let mut server = TestServer::with_session(Session::start(dir.path().to_path_buf()));
+    server.initialize();
+    let message = server.next_show_message();
+    assert!(message.contains("no-such-python"), "{message}");
+    server.shutdown();
+}
+
+#[test]
+fn startup_notices_are_shown_as_warnings() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::new(
+        Config::default(),
+        Arc::new(ModuleProbe::default()),
+        dir.path().to_path_buf(),
+    );
+    session.notices = vec!["konform: first".to_owned(), "konform: second".to_owned()];
+    let mut server = TestServer::with_session(session);
+    server.initialize();
+    assert_eq!(server.next_show_message(), "konform: first");
+    assert_eq!(server.next_show_message(), "konform: second");
+    server.shutdown();
+}
+
+#[test]
+fn config_comes_from_the_workspace_root_not_the_process_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_ne!(dir.path(), std::env::current_dir().unwrap());
+    std::fs::write(dir.path().join("konform.toml"), "ignore = [\"KIS001\"]\n").unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_session(Session::start(dir.path().to_path_buf()));
+    server.initialize();
+
+    server.open(&uri, KIS001_SOURCE);
+    assert!(server.next_diagnostics(&uri).diagnostics.is_empty());
+    server.shutdown();
+}
+
+#[cfg(unix)]
+#[test]
+fn python_is_discovered_from_the_workspace_root_not_the_process_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    make_pkg(dir.path());
+    fake_python(
+        &dir.path().join(".venv/bin/python3"),
+        &dir.path().join("lib"),
+    );
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_session(Session::start(dir.path().to_path_buf()));
+    server.initialize();
+
+    server.open(&uri, PKG_SOURCE);
+    assert_eq!(import_state(&server.next_diagnostics(&uri)), (1, 0));
+    server.shutdown();
 }

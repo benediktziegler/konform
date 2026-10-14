@@ -105,7 +105,12 @@ pub fn main_loop(connection: Connection, session: Arc<RwLock<Session>>) {
     // notification, so the post-handshake work happens here.
     let config = Arc::clone(&session.read().unwrap().config);
     register_watchers(&connection, &config);
+    let notices = std::mem::take(&mut session.write().unwrap().notices);
+    for notice in notices {
+        show_message(&connection, MessageType::WARNING, notice);
+    }
     show_config_errors(&connection, &session);
+    show_probe_problem(&connection, &session);
 
     for msg in &connection.receiver {
         match msg {
@@ -716,13 +721,19 @@ fn handle_notification(
         }
         "workspace/didChangeWatchedFiles" => {
             // A config file changed: reload and re-lint all open documents.
+            // Rebuilding the module probe runs the Python interpreter, so do
+            // the slow part without the lock (requests keep being served by
+            // the old state meanwhile) and only swap under it.
+            let snapshot = session.read().unwrap().reload_snapshot();
+            let prepared = snapshot.prepare();
             let uris: Vec<Uri> = {
                 let mut sess = session.write().unwrap();
-                sess.reload_config();
+                sess.apply_reload(prepared);
                 // Collect open document URIs (can't borrow sess while pushing diags).
                 sess.documents.keys().cloned().collect()
             };
             show_config_errors(connection, session);
+            show_probe_problem(connection, session);
             for uri in uris {
                 push_diagnostics(connection, session, &uri);
             }
@@ -844,14 +855,24 @@ fn show_config_errors(connection: &Connection, session: &Arc<RwLock<Session>>) {
     if errors.is_empty() {
         return;
     }
-    let params = ShowMessageParams {
-        typ: MessageType::WARNING,
-        message: format!(
-            "konform: {} configuration problem(s):\n{}",
-            errors.len(),
-            errors.join("\n")
-        ),
-    };
+    let message = format!(
+        "konform: {} configuration problem(s):\n{}",
+        errors.len(),
+        errors.join("\n")
+    );
+    show_message(connection, MessageType::WARNING, message);
+}
+
+/// Warn when the configured Python interpreter cannot be run.
+fn show_probe_problem(connection: &Connection, session: &Arc<RwLock<Session>>) {
+    let problem = session.read().unwrap().probe_problem();
+    if let Some(message) = problem {
+        show_message(connection, MessageType::WARNING, message);
+    }
+}
+
+fn show_message(connection: &Connection, typ: MessageType, message: String) {
+    let params = ShowMessageParams { typ, message };
     let notif = Notification::new("window/showMessage".to_owned(), params);
     connection.sender.send(Message::Notification(notif)).ok();
 }

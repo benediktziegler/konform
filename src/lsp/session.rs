@@ -4,7 +4,7 @@
 //! (which mutates it on notifications) and worker threads (which read it for
 //! diagnostics) can access it safely.
 
-use crate::config::{load_config, resolve_python, Config};
+use crate::config::{load_config, resolve_python_in, Config};
 use crate::module_probe::ModuleProbe;
 use crate::rules::{all_rules, Rule};
 use crate::types::Violation;
@@ -106,10 +106,53 @@ pub struct Session {
     excluded: Option<GlobSet>,
     /// Working directory used for config discovery and relative path display.
     pub root: PathBuf,
+    /// Messages for the user queued before the main loop starts (e.g. why a
+    /// fallback root was chosen); the loop shows and clears them.
+    pub notices: Vec<String>,
+}
+
+/// What a config reload needs from the live session, copied out so the
+/// expensive part ([`ReloadSnapshot::prepare`]) runs without any lock.
+pub struct ReloadSnapshot {
+    root: PathBuf,
+    inputs: ProbeInputs,
+    probe: Arc<ModuleProbe>,
+}
+
+/// The result of [`ReloadSnapshot::prepare`], ready to be swapped in with
+/// [`Session::apply_reload`].
+pub struct PreparedReload {
+    config: Arc<Config>,
+    excluded: Option<GlobSet>,
+    inputs: ProbeInputs,
+    probe: Arc<ModuleProbe>,
+    rules: Arc<Vec<Box<dyn Rule>>>,
+}
+
+impl ReloadSnapshot {
+    /// Re-read the config, respawn the probe if its inputs changed (this runs
+    /// the Python interpreter and may take a while), and rebuild the rules.
+    pub fn prepare(self) -> PreparedReload {
+        let config = Arc::new(load_config(Some(&self.root), None));
+        let inputs = ProbeInputs::new(&config, &self.root);
+        let probe = if inputs == self.inputs {
+            self.probe
+        } else {
+            Arc::new(ModuleProbe::new(&inputs.python, &inputs.root, &inputs.src))
+        };
+        let rules = Arc::new(all_rules(Arc::clone(&probe), config.config_dir.clone()));
+        PreparedReload {
+            excluded: config.exclude_set(),
+            config,
+            inputs,
+            probe,
+            rules,
+        }
+    }
 }
 
 /// The settings a [`ModuleProbe`] is built from.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ProbeInputs {
     python: PathBuf,
     root: PathBuf,
@@ -119,7 +162,7 @@ struct ProbeInputs {
 impl ProbeInputs {
     fn new(config: &Config, session_root: &std::path::Path) -> Self {
         Self {
-            python: resolve_python(config),
+            python: resolve_python_in(config, session_root),
             root: config
                 .config_dir
                 .clone()
@@ -141,7 +184,17 @@ impl Session {
             probe,
             probe_inputs,
             root,
+            notices: Vec::new(),
         }
+    }
+
+    /// Load the config for `root` and build a session around it, probing the
+    /// Python environment the config selects.
+    pub fn start(root: PathBuf) -> Self {
+        let config = load_config(Some(&root), None);
+        let inputs = ProbeInputs::new(&config, &root);
+        let probe = Arc::new(ModuleProbe::new(&inputs.python, &inputs.root, &inputs.src));
+        Self::new(config, probe, root)
     }
 
     // ── Document lifecycle ─────────────────────────────────────────────────
@@ -221,24 +274,49 @@ impl Session {
 
     // ── Config reload ───────────────────────────────────────────────────────────
 
+    /// Copy out what a reload needs; see [`ReloadSnapshot::prepare`].
+    pub fn reload_snapshot(&self) -> ReloadSnapshot {
+        ReloadSnapshot {
+            root: self.root.clone(),
+            inputs: self.probe_inputs.clone(),
+            probe: Arc::clone(&self.probe),
+        }
+    }
+
+    /// Swap in a prepared reload. Cheap: callers hold the write lock only for
+    /// this.
+    pub fn apply_reload(&mut self, prepared: PreparedReload) {
+        self.config = prepared.config;
+        self.excluded = prepared.excluded;
+        self.probe_inputs = prepared.inputs;
+        self.probe = prepared.probe;
+        self.rules = prepared.rules;
+        eprintln!("konform server: config reloaded");
+    }
+
     /// Re-read `pyproject.toml` / `konform.toml` from the session root and
     /// rebuild the rules (which re-reads any pattern files).
     /// The module probe is respawned when `python`, `src` or the config
-    /// directory changed.
-    /// Called when `workspace/didChangeWatchedFiles` fires.
+    /// directory changed. This does everything under `&mut self`; the server
+    /// uses [`Session::reload_snapshot`] and [`Session::apply_reload`] so the
+    /// slow part runs without the session lock.
+    #[cfg(test)]
     pub fn reload_config(&mut self) {
-        self.config = Arc::new(load_config(Some(&self.root), None));
-        self.excluded = self.config.exclude_set();
-        let inputs = ProbeInputs::new(&self.config, &self.root);
-        if inputs != self.probe_inputs {
-            self.probe = Arc::new(ModuleProbe::new(&inputs.python, &inputs.root, &inputs.src));
-            self.probe_inputs = inputs;
-        }
-        self.rules = Arc::new(all_rules(
-            Arc::clone(&self.probe),
-            self.config.config_dir.clone(),
-        ));
-        eprintln!("konform server: config reloaded");
+        let prepared = self.reload_snapshot().prepare();
+        self.apply_reload(prepared);
+    }
+
+    /// A warning when the Python interpreter could not be run, so the
+    /// unresolved imports it causes are explainable. `None` when it works.
+    pub fn probe_problem(&self) -> Option<String> {
+        self.probe.probe_unusable().then(|| {
+            format!(
+                "konform: could not run the Python interpreter {}, so imports cannot be \
+                 resolved and import diagnostics (KIS001) will be missing or wrong. Check \
+                 `python` in your konform config or your virtualenv.",
+                self.probe_inputs.python.display()
+            )
+        })
     }
 
     /// Configuration problems: a broken `extend` chain, or ones reported by

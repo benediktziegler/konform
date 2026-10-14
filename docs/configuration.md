@@ -88,8 +88,14 @@ Entries are relative to the directory containing the config file.
 
 ## Python environment
 
-konform uses `python` if set, otherwise auto-discovers `.venv`, `venv` or `.env`
-in the project.
+konform uses `python` if set, otherwise auto-discovers an interpreter: the active
+`VIRTUAL_ENV` or `CONDA_PREFIX`, then `.venv`, `venv` or `.env` in the project and
+its parent directories, then `python3` on your `PATH`. A relative `python` path is
+resolved against the directory containing the config file.
+
+> **Note:** konform executes this interpreter (the `python` setting or any
+> auto-discovered venv interpreter) to read `sys.path` and the stdlib module list.
+> Only lint projects you trust.
 
 ## Upgrading from an older config format
 

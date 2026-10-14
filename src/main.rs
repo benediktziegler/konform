@@ -61,7 +61,7 @@ fn walk_python_files(path: &Path, config: &config::Config) -> Vec<PathBuf> {
         .build();
     for entry in walker.flatten() {
         let p = strip_leading_curdir(entry.path().to_path_buf());
-        if p.extension().is_none_or(|e| e != "py") {
+        if p.extension().is_none_or(|e| e != "py" && e != "pyi") {
             continue;
         }
         if exclude_set
@@ -852,7 +852,7 @@ fn is_watched_file(
     exclude: Option<&globset::GlobSet>,
     config: &config::Config,
 ) -> bool {
-    path.extension().is_some_and(|e| e == "py")
+    path.extension().is_some_and(|e| e == "py" || e == "pyi")
         && path.is_file()
         && !exclude.is_some_and(|gs| config.is_excluded(gs, path))
 }

@@ -658,13 +658,17 @@ fn resolve_explicit_python(setting: &str, config_dir: Option<&Path>) -> PathBuf 
 ///    [`discover_python`]
 /// 3. `python3` (`python.exe` on Windows) on `$PATH`
 pub fn resolve_python(config: &Config) -> PathBuf {
+    resolve_python_in(config, &std::env::current_dir().unwrap_or_default())
+}
+
+/// [`resolve_python`] for a caller whose project root is not the working
+/// directory (the language server): `search_dir` replaces the working
+/// directory as the discovery start when there is no config file.
+pub fn resolve_python_in(config: &Config, search_dir: &Path) -> PathBuf {
     if let Some(explicit) = &config.python {
         return resolve_explicit_python(explicit, config.config_dir.as_deref());
     }
-    match &config.config_dir {
-        Some(dir) => discover_python(dir),
-        None => discover_python(&std::env::current_dir().unwrap_or_default()),
-    }
+    discover_python(config.config_dir.as_deref().unwrap_or(search_dir))
 }
 
 // ---------------------------------------------------------------------------

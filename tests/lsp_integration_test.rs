@@ -72,6 +72,7 @@ fn file_uri(path: &std::path::Path) -> String {
 }
 
 struct ServerProcess {
+    root: std::path::PathBuf,
     child: Child,
     stdin: ChildStdin,
     reader: BufReader<std::process::ChildStdout>,
@@ -91,6 +92,7 @@ impl ServerProcess {
         let stdin = child.stdin.take().expect("piped stdin");
         let reader = BufReader::new(child.stdout.take().expect("piped stdout"));
         Self {
+            root: root.to_path_buf(),
             child,
             stdin,
             reader,
@@ -102,7 +104,7 @@ impl ServerProcess {
             &mut self.stdin,
             "initialize",
             Some(1),
-            json!({ "processId": null, "rootUri": null, "capabilities": {} }),
+            json!({ "processId": null, "rootUri": file_uri(&self.root), "capabilities": {} }),
         );
         let resp = read_message(&mut self.reader);
         assert_eq!(resp["id"], 1, "unexpected response id: {resp}");

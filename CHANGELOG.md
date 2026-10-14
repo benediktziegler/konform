@@ -2,10 +2,15 @@
 
 ### Feat
 
+- **lsp**: load config from the workspace root
 - **config**: discover VIRTUAL_ENV, CONDA_PREFIX and parent venvs
 
 ### Fix
 
+- **lsp**: keep non-UTF-8 file names and match localhost case-insensitively
+- **probe**: kill the interpreter after a timeout
+- **lsp**: rebuild module probe on config reload
+- **lsp**: percent-decode document URIs
 - **cli**: make clean robust to cwd, refuse when paths cannot be canonicalized
 - **git**: normalize .. components before walking up for the repo root
 - **cli**: lint .pyi files

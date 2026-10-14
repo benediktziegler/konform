@@ -27,6 +27,21 @@ The server reloads rules when `pyproject.toml`, `konform.toml`,
 (of either rule) or a file pulled in through `extend` changes. If you
 point `rules_file` or `extend` at a new path, restart the server.
 
+## Workspace root and folders
+
+The server reads its configuration, and discovers the Python interpreter, from the
+workspace root: the first workspace folder the client sends, else `rootUri`, else the
+deprecated `rootPath`. Only if none is a local directory does it use its working
+directory, and it then shows a warning saying so.
+
+A server handles one root. With several workspace folders open, the first one's
+configuration applies to all of them and the editor shows a warning; configure your
+client to start one server per folder (as the Neovim example below does) for separate
+settings. `workspace/didChangeWorkspaceFolders` is not supported.
+
+If the Python interpreter cannot be run (a wrong `python` setting, a broken virtualenv),
+the editor shows a warning naming it, since imports then cannot be resolved.
+
 ## Neovim
 
 ```lua

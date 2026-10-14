@@ -4,7 +4,7 @@
 //! (which mutates it on notifications) and worker threads (which read it for
 //! diagnostics) can access it safely.
 
-use crate::config::{load_config, Config};
+use crate::config::{load_config, resolve_python_in, Config};
 use crate::module_probe::ModuleProbe;
 use crate::rules::{all_rules, Rule};
 use crate::types::Violation;
@@ -14,6 +14,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// The file path behind a `file://` URI, percent-decoded.
+pub fn uri_file_path(uri: &Uri) -> PathBuf {
+    file_path(uri.path().as_str())
+}
+
 /// The file path behind the path part of a `file://` URI. On Windows that
 /// part is `/D:/a/b`, with a slash in front of the drive letter.
 fn file_path(uri_path: &str) -> PathBuf {
@@ -21,12 +26,49 @@ fn file_path(uri_path: &str) -> PathBuf {
 }
 
 fn file_path_for(uri_path: &str, windows: bool) -> PathBuf {
-    match uri_path.as_bytes() {
-        [b'/', drive, b':', ..] if windows && drive.is_ascii_alphabetic() => {
-            PathBuf::from(&uri_path[1..])
+    let decoded = percent_decode(uri_path);
+    let bytes = match decoded.as_slice() {
+        [b'/', drive, b':', ..] if windows && drive.is_ascii_alphabetic() => &decoded[1..],
+        _ => &decoded[..],
+    };
+    bytes_to_path(bytes)
+}
+
+/// On Unix a file name is an arbitrary byte string, so keep the decoded bytes
+/// as they are; a lossy UTF-8 conversion would name a different file.
+#[cfg(unix)]
+fn bytes_to_path(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+}
+
+#[cfg(not(unix))]
+fn bytes_to_path(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// Decode `%XX` escapes into raw bytes. Invalid escapes (`%zz`, a truncated
+/// `%4`) are kept as-is.
+fn percent_decode(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
         }
-        _ => PathBuf::from(uri_path),
+        out.push(bytes[i]);
+        i += 1;
     }
+    out
+}
+
+fn hex(b: u8) -> Option<u8> {
+    (b as char).to_digit(16).map(|d| d as u8)
 }
 
 // ---------------------------------------------------------------------------
@@ -56,15 +98,83 @@ pub struct Session {
     /// recompiled) only when they change, not on every request.
     pub rules: Arc<Vec<Box<dyn Rule>>>,
     pub probe: Arc<ModuleProbe>,
+    /// What `probe` was built from, so a config reload only respawns the
+    /// interpreter when it would actually change.
+    probe_inputs: ProbeInputs,
     /// `config`'s compiled `exclude` / `extend-exclude` globs; matching
     /// documents get no diagnostics or fixes.
     excluded: Option<GlobSet>,
     /// Working directory used for config discovery and relative path display.
     pub root: PathBuf,
+    /// Messages for the user queued before the main loop starts (e.g. why a
+    /// fallback root was chosen); the loop shows and clears them.
+    pub notices: Vec<String>,
+}
+
+/// What a config reload needs from the live session, copied out so the
+/// expensive part ([`ReloadSnapshot::prepare`]) runs without any lock.
+pub struct ReloadSnapshot {
+    root: PathBuf,
+    inputs: ProbeInputs,
+    probe: Arc<ModuleProbe>,
+}
+
+/// The result of [`ReloadSnapshot::prepare`], ready to be swapped in with
+/// [`Session::apply_reload`].
+pub struct PreparedReload {
+    config: Arc<Config>,
+    excluded: Option<GlobSet>,
+    inputs: ProbeInputs,
+    probe: Arc<ModuleProbe>,
+    rules: Arc<Vec<Box<dyn Rule>>>,
+}
+
+impl ReloadSnapshot {
+    /// Re-read the config, respawn the probe if its inputs changed (this runs
+    /// the Python interpreter and may take a while), and rebuild the rules.
+    pub fn prepare(self) -> PreparedReload {
+        let config = Arc::new(load_config(Some(&self.root), None));
+        let inputs = ProbeInputs::new(&config, &self.root);
+        let probe = if inputs == self.inputs {
+            self.probe
+        } else {
+            Arc::new(ModuleProbe::new(&inputs.python, &inputs.root, &inputs.src))
+        };
+        let rules = Arc::new(all_rules(Arc::clone(&probe), config.config_dir.clone()));
+        PreparedReload {
+            excluded: config.exclude_set(),
+            config,
+            inputs,
+            probe,
+            rules,
+        }
+    }
+}
+
+/// The settings a [`ModuleProbe`] is built from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProbeInputs {
+    python: PathBuf,
+    root: PathBuf,
+    src: Vec<String>,
+}
+
+impl ProbeInputs {
+    fn new(config: &Config, session_root: &std::path::Path) -> Self {
+        Self {
+            python: resolve_python_in(config, session_root),
+            root: config
+                .config_dir
+                .clone()
+                .unwrap_or_else(|| session_root.to_path_buf()),
+            src: config.src.clone(),
+        }
+    }
 }
 
 impl Session {
     pub fn new(config: Config, probe: Arc<ModuleProbe>, root: PathBuf) -> Self {
+        let probe_inputs = ProbeInputs::new(&config, &root);
         let rules = Arc::new(all_rules(Arc::clone(&probe), config.config_dir.clone()));
         Self {
             documents: HashMap::new(),
@@ -72,8 +182,19 @@ impl Session {
             config: Arc::new(config),
             rules,
             probe,
+            probe_inputs,
             root,
+            notices: Vec::new(),
         }
+    }
+
+    /// Load the config for `root` and build a session around it, probing the
+    /// Python environment the config selects.
+    pub fn start(root: PathBuf) -> Self {
+        let config = load_config(Some(&root), None);
+        let inputs = ProbeInputs::new(&config, &root);
+        let probe = Arc::new(ModuleProbe::new(&inputs.python, &inputs.root, &inputs.src));
+        Self::new(config, probe, root)
     }
 
     // ── Document lifecycle ─────────────────────────────────────────────────
@@ -134,7 +255,7 @@ impl Session {
     pub fn is_excluded(&self, uri: &Uri) -> bool {
         self.excluded
             .as_ref()
-            .is_some_and(|gs| self.config.is_excluded(gs, &file_path(uri.path().as_str())))
+            .is_some_and(|gs| self.config.is_excluded(gs, &uri_file_path(uri)))
     }
 
     /// Store the most recently computed diagnostics for `codeAction` lookup.
@@ -153,17 +274,49 @@ impl Session {
 
     // ── Config reload ───────────────────────────────────────────────────────────
 
+    /// Copy out what a reload needs; see [`ReloadSnapshot::prepare`].
+    pub fn reload_snapshot(&self) -> ReloadSnapshot {
+        ReloadSnapshot {
+            root: self.root.clone(),
+            inputs: self.probe_inputs.clone(),
+            probe: Arc::clone(&self.probe),
+        }
+    }
+
+    /// Swap in a prepared reload. Cheap: callers hold the write lock only for
+    /// this.
+    pub fn apply_reload(&mut self, prepared: PreparedReload) {
+        self.config = prepared.config;
+        self.excluded = prepared.excluded;
+        self.probe_inputs = prepared.inputs;
+        self.probe = prepared.probe;
+        self.rules = prepared.rules;
+        eprintln!("konform server: config reloaded");
+    }
+
     /// Re-read `pyproject.toml` / `konform.toml` from the session root and
     /// rebuild the rules (which re-reads any pattern files).
-    /// Called when `workspace/didChangeWatchedFiles` fires.
+    /// The module probe is respawned when `python`, `src` or the config
+    /// directory changed. This does everything under `&mut self`; the server
+    /// uses [`Session::reload_snapshot`] and [`Session::apply_reload`] so the
+    /// slow part runs without the session lock.
+    #[cfg(test)]
     pub fn reload_config(&mut self) {
-        self.config = Arc::new(load_config(Some(&self.root), None));
-        self.excluded = self.config.exclude_set();
-        self.rules = Arc::new(all_rules(
-            Arc::clone(&self.probe),
-            self.config.config_dir.clone(),
-        ));
-        eprintln!("konform server: config reloaded");
+        let prepared = self.reload_snapshot().prepare();
+        self.apply_reload(prepared);
+    }
+
+    /// A warning when the Python interpreter could not be run, so the
+    /// unresolved imports it causes are explainable. `None` when it works.
+    pub fn probe_problem(&self) -> Option<String> {
+        self.probe.probe_unusable().then(|| {
+            format!(
+                "konform: could not run the Python interpreter {}, so imports cannot be \
+                 resolved and import diagnostics (KIS001) will be missing or wrong. Check \
+                 `python` in your konform config or your virtualenv.",
+                self.probe_inputs.python.display()
+            )
+        })
     }
 
     /// Configuration problems: a broken `extend` chain, or ones reported by
@@ -247,5 +400,78 @@ mod tests {
             PathBuf::from("/home/me/b.py")
         );
         assert_eq!(file_path_for("/", true), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn reload_rebuilds_the_probe_only_when_its_inputs_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("konform.toml"), "ignore = [\"KIS001\"]\n").unwrap();
+        let config = load_config(Some(&root), None);
+        let probe = Arc::new(ModuleProbe::default());
+        let mut session = Session::new(config, Arc::clone(&probe), root.clone());
+
+        // An unrelated edit keeps the probe (and the interpreter behind it).
+        session.reload_config();
+        assert!(Arc::ptr_eq(&session.probe, &probe));
+
+        // Changing `src` rebuilds it, and the rules get the new probe.
+        std::fs::write(root.join("konform.toml"), "src = [\"lib\"]\n").unwrap();
+        session.reload_config();
+        assert!(!Arc::ptr_eq(&session.probe, &probe));
+        let rebuilt = Arc::clone(&session.probe);
+
+        // Changing `python` rebuilds it again.
+        std::fs::write(
+            root.join("konform.toml"),
+            "src = [\"lib\"]\npython = \"other-python\"\n",
+        )
+        .unwrap();
+        session.reload_config();
+        assert!(!Arc::ptr_eq(&session.probe, &rebuilt));
+        let rebuilt = Arc::clone(&session.probe);
+
+        // Reloading the same file again does not.
+        session.reload_config();
+        assert!(Arc::ptr_eq(&session.probe, &rebuilt));
+    }
+
+    #[test]
+    fn percent_escapes_are_decoded() {
+        assert_eq!(percent_decode("/my%20dir/a.py"), b"/my dir/a.py");
+        // Multi-byte UTF-8 (lower and upper case hex).
+        assert_eq!(
+            String::from_utf8(percent_decode("/caf%C3%A9/%c3%bc.py")).unwrap(),
+            "/café/ü.py"
+        );
+        assert_eq!(percent_decode("/plain/a.py"), b"/plain/a.py");
+        assert_eq!(
+            file_path_for("/D:/my%20dir/a.py", true),
+            PathBuf::from("D:/my dir/a.py")
+        );
+        assert_eq!(file_path_for("/D%3A/a", false), PathBuf::from("/D:/a"));
+    }
+
+    #[test]
+    fn an_encoded_drive_colon_is_still_a_drive() {
+        assert_eq!(file_path_for("/c%3A/a", true), PathBuf::from("c:/a"));
+        assert_eq!(file_path_for("/c%3A/a", false), PathBuf::from("/c:/a"));
+    }
+
+    #[test]
+    fn invalid_percent_escapes_are_left_alone() {
+        assert_eq!(percent_decode("/a%zz/b"), b"/a%zz/b");
+        assert_eq!(percent_decode("/a%4"), b"/a%4");
+        assert_eq!(percent_decode("/a%"), b"/a%");
+        assert_eq!(percent_decode("/100%25"), b"/100%");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_file_names_survive_decoding() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = file_path_for("/d/caf%E9.py", false);
+        assert_eq!(path.as_os_str().as_bytes(), b"/d/caf\xE9.py");
+        assert_eq!(percent_decode("/a%FFb"), b"/a\xFFb");
     }
 }

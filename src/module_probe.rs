@@ -14,7 +14,12 @@ use seahash::SeaHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// How long the interpreter may take to answer one probe query before it is
+/// killed and the probe is treated as unusable.
+const INTERPRETER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Result of checking whether an imported name is a module.
 ///
@@ -31,6 +36,52 @@ pub enum ModuleCheck {
     /// be a module or not, so callers should treat this as "unknown" rather
     /// than a definitive violation.
     Unknown,
+}
+
+/// Run `python -c code` and return its stdout, or `None` if it could not be
+/// started, exited unsuccessfully, printed non-UTF-8, or did not finish within
+/// [`INTERPRETER_TIMEOUT`] (in which case it is killed).
+fn run_python(python: &Path, code: &str) -> Option<String> {
+    run_python_with_timeout(python, code, INTERPRETER_TIMEOUT)
+}
+
+fn run_python_with_timeout(python: &Path, code: &str, timeout: Duration) -> Option<String> {
+    use std::io::Read;
+    let mut child = Command::new(python)
+        .args(["-c", code])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    // Drain stdout on a thread so a chatty child cannot block on a full pipe
+    // while we poll for its exit.
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).ok().map(|_| buf)
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // Timed out (or `try_wait` failed): do not join the reader, a
+            // grandchild may still hold the pipe open.
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let buf = reader.join().ok()??;
+    if !status.success() {
+        return None;
+    }
+    String::from_utf8(buf).ok()
 }
 
 /// Caches `(module_name, attr_name) -> is_module` probe results.
@@ -139,14 +190,7 @@ impl ModuleProbe {
         project_root: &Path,
         src_roots: &[String],
     ) -> Option<Vec<PathBuf>> {
-        let output = Command::new(python)
-            .args(["-c", "import json,sys; print(json.dumps(sys.path))"])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let stdout = String::from_utf8(output.stdout).ok()?;
+        let stdout = run_python(python, "import json,sys; print(json.dumps(sys.path))")?;
         let paths: Vec<String> = serde_json::from_str(stdout.trim()).ok()?;
         Some(Self::resolve_sys_path(paths, Some(project_root), src_roots))
     }
@@ -160,19 +204,12 @@ impl ModuleProbe {
     /// falls back to `sys.builtin_module_names`, which only covers modules
     /// statically linked into the executable but is present on all versions.
     fn get_builtin_modules(python: &Path) -> Option<HashSet<String>> {
-        let output = Command::new(python)
-            .args([
-                "-c",
-                "import json,sys; \
-                 names = getattr(sys, 'stdlib_module_names', None) or sys.builtin_module_names; \
-                 print(json.dumps(list(names)))",
-            ])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let stdout = String::from_utf8(output.stdout).ok()?;
+        let stdout = run_python(
+            python,
+            "import json,sys; \
+             names = getattr(sys, 'stdlib_module_names', None) or sys.builtin_module_names; \
+             print(json.dumps(list(names)))",
+        )?;
         let names: Vec<String> = serde_json::from_str(stdout.trim()).ok()?;
         Some(names.into_iter().collect())
     }
@@ -474,6 +511,42 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    fn script(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("fake-python");
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hanging_interpreter_is_killed_and_the_probe_is_unusable() {
+        let dir = TempDir::new().unwrap();
+        let hang = script(dir.path(), "exec sleep 30");
+        let started = Instant::now();
+        assert_eq!(
+            run_python_with_timeout(&hang, "print(1)", Duration::from_millis(200)),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interpreter_output_is_returned_and_failures_are_none() {
+        let dir = TempDir::new().unwrap();
+        let ok = script(dir.path(), "echo '[\"a\"]'");
+        assert_eq!(
+            run_python(&ok, "ignored").as_deref().map(str::trim),
+            Some("[\"a\"]")
+        );
+        let fail = script(dir.path(), "echo oops; exit 3");
+        assert_eq!(run_python(&fail, "ignored"), None);
+        assert_eq!(run_python(&dir.path().join("missing"), "x"), None);
+    }
 
     #[test]
     fn module_probe_is_send_and_sync() {

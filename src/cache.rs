@@ -21,12 +21,12 @@ use crate::rules::Rule;
 use anyhow::Result;
 use bincode::{Decode, Encode};
 use seahash::SeaHasher;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::{fs, io};
 
 /// Cache sub-directory name equals the konform version string, so upgrading
@@ -41,10 +41,19 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Upper bound on bytes (and container allocations) accepted when decoding a
 /// cache file, so a corrupt length prefix errors instead of aborting on a huge
-/// preallocation.
+/// preallocation. Encoding does not enforce it, so [`Cache::persist`] checks
+/// the encoded size itself and trims the cache to stay under it (otherwise
+/// the written file could never be read back).
 const MAX_DECODE_BYTES: usize = 256 * 1024 * 1024;
 
-/// Bincode configuration shared by encoding and decoding.
+/// Temp files older than this are considered orphaned (crashed run) and swept.
+const STALE_TMP_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Ensures the "cache too large" notice is printed at most once per process.
+static WARNED_OVERSIZE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Bincode configuration used for both encoding and decoding; the size limit
+/// only takes effect when decoding.
 fn bincode_config() -> bincode::config::Configuration<
     bincode::config::LittleEndian,
     bincode::config::Varint,
@@ -300,7 +309,43 @@ pub fn init(cache_root: &Path) -> Result<()> {
     // Standard cache-directory tag (backup / sync tools can skip this dir)
     cachedir::ensure_tag(cache_root)?;
 
+    sweep_stale_tmp(&cache_root.join(VERSION), STALE_TMP_AGE);
+
     Ok(())
+}
+
+/// Best-effort removal of orphaned `<hash>.<pid>.<n>.tmp` files (left behind
+/// by a crashed run) older than `max_age`.
+fn sweep_stale_tmp(dir: &Path, max_age: std::time::Duration) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".tmp")) else {
+            continue;
+        };
+        // `<hash>.<pid>.<n>`
+        let parts: Vec<&str> = stem.split('.').collect();
+        let is_ours = parts.len() == 3
+            && parts[0].len() == 16
+            && parts[0].bytes().all(|b| b.is_ascii_hexdigit())
+            && parts[1..]
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        if !is_ours {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age > max_age);
+        if old {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +362,7 @@ pub struct Cache {
     pending: Vec<(String, u64, Vec<CachedViolation>)>,
     /// Keys of entries hit via [`Cache::get`]; their `last_seen` is refreshed
     /// in [`Cache::persist`].
-    touched: Mutex<HashSet<String>>,
+    touched: RefCell<HashSet<String>>,
 }
 
 impl Cache {
@@ -373,7 +418,7 @@ impl Cache {
                             no_cache,
                             package: pkg,
                             pending: vec![],
-                            touched: Mutex::new(HashSet::new()),
+                            touched: RefCell::new(HashSet::new()),
                         }
                     }
                     Err(_) => Self::empty(path, root_str, no_cache), // corrupt
@@ -393,7 +438,7 @@ impl Cache {
                 files: HashMap::new(),
             },
             pending: vec![],
-            touched: Mutex::new(HashSet::new()),
+            touched: RefCell::new(HashSet::new()),
         }
     }
 
@@ -411,11 +456,11 @@ impl Cache {
         if entry.key != key.hash() {
             return None; // mtime / permissions changed
         }
-        // Record the hit so persist() refreshes last_seen (get is shared
-        // across lint threads, hence the Mutex).
-        if let Ok(mut t) = self.touched.lock() {
-            t.insert(k);
-        }
+        // Record the hit so persist() refreshes last_seen. `get` is only
+        // called from the sequential cache-lookup loop (never from the
+        // parallel lint workers), so interior mutability without a lock is
+        // enough; this makes `Cache` `!Sync` on purpose.
+        self.touched.borrow_mut().insert(k);
         Some(entry.violations.iter().map(|v| v.to_json()).collect())
     }
 
@@ -443,6 +488,10 @@ impl Cache {
 
     /// Merge pending entries, evict stale ones, and write atomically.
     pub fn persist(&mut self) -> Result<()> {
+        self.persist_with_limit(MAX_DECODE_BYTES)
+    }
+
+    fn persist_with_limit(&mut self, max_bytes: usize) -> Result<()> {
         if self.no_cache {
             return Ok(());
         }
@@ -464,11 +513,7 @@ impl Cache {
         }
 
         // Cache hits count as "seen": refresh them before eviction.
-        let touched = self
-            .touched
-            .get_mut()
-            .map(std::mem::take)
-            .unwrap_or_default();
+        let touched = std::mem::take(self.touched.get_mut());
         for k in touched {
             if let Some(e) = self.package.files.get_mut(&k) {
                 e.last_seen = now_ms;
@@ -479,7 +524,30 @@ impl Cache {
         let cutoff = now_ms.saturating_sub(EVICT_DAYS * 24 * 3600 * 1000);
         self.package.files.retain(|_, e| e.last_seen >= cutoff);
 
-        let bytes = bincode::encode_to_vec(&self.package, bincode_config())?;
+        let mut bytes = bincode::encode_to_vec(&self.package, bincode_config())?;
+
+        // A file above the decode limit would be rejected on the next run and
+        // leave the cache permanently cold, so drop the oldest half of the
+        // entries until it fits.
+        while bytes.len() > max_bytes && !self.package.files.is_empty() {
+            if !WARNED_OVERSIZE.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "warning: konform cache exceeds {max_bytes} bytes; dropping oldest entries"
+                );
+            }
+            let mut by_age: Vec<(u64, String)> = self
+                .package
+                .files
+                .iter()
+                .map(|(k, e)| (e.last_seen, k.clone()))
+                .collect();
+            by_age.sort();
+            let drop_n = by_age.len().div_ceil(2);
+            for (_, k) in by_age.into_iter().take(drop_n) {
+                self.package.files.remove(&k);
+            }
+            bytes = bincode::encode_to_vec(&self.package, bincode_config())?;
+        }
 
         // Atomic write: encode to a unique temp file, then rename.
         let tmp = self.temp_path();
@@ -773,12 +841,112 @@ mod tests {
         let _ = init(tmp.path());
         let hash = settings_hash(tmp.path(), &[], &[], "error", 0, 0);
         let path = tmp.path().join(VERSION).join(format!("{hash:016x}"));
-        // Varint marker 0xFF = u64 follows; claim a ~2^64 byte string.
-        std::fs::write(&path, [0xFFu8; 16]).unwrap();
+        // Valid `package_root` ("x"), then the `files` map length: varint
+        // marker 0xFD (u64 follows) claiming ~2^63 entries. Without the
+        // decode limit this tries to preallocate a huge map. (A 0xFF marker
+        // would be rejected as invalid regardless of the limit.)
+        let mut bytes = vec![1u8, b'x', 0xFD];
+        bytes.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        std::fs::write(&path, bytes).unwrap();
 
         let c = open_cache(tmp.path(), &[], &[]);
         let key = FileCacheKey::from_path(&file).unwrap();
         assert!(c.get(&file, &key).is_none());
+    }
+
+    #[test]
+    fn oversized_cache_is_trimmed_not_written_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut c = open_cache(tmp.path(), &[], &[]);
+        let mut files = Vec::new();
+        for i in 0..40 {
+            let f = tmp.path().join(format!("f{i}.py"));
+            std::fs::write(&f, "x = 1\n").unwrap();
+            let key = FileCacheKey::from_path(&f).unwrap();
+            c.set_linted(&f, &key, &[]);
+            files.push((f, key));
+        }
+        c.persist_with_limit(300).unwrap();
+        assert!(std::fs::metadata(&c.path).unwrap().len() <= 300);
+
+        // Still readable, and some (but not all) entries survived.
+        let c2 = open_cache(tmp.path(), &[], &[]);
+        let hits = files.iter().filter(|(f, k)| c2.get(f, k).is_some()).count();
+        assert!(hits > 0 && hits < 40, "hits = {hits}");
+
+        // A limit too small for even an empty cache ends with an empty cache.
+        c.persist_with_limit(1).unwrap();
+        let c3 = open_cache(tmp.path(), &[], &[]);
+        assert!(files.iter().all(|(f, k)| c3.get(f, k).is_none()));
+    }
+
+    #[test]
+    fn large_cache_under_limit_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut c = open_cache(tmp.path(), &[], &[]);
+        let viol = serde_json::json!({
+            "rule": "KIS001", "line": 3, "message": "m".repeat(200),
+            "level": "error", "help": "h".repeat(200),
+            "range": {"start_line": 3, "start_character": 1, "end_line": 3, "end_character": 0},
+            "fixable": false,
+        });
+        let f = tmp.path().join("a.py");
+        std::fs::write(&f, "x = 1\n").unwrap();
+        let key = FileCacheKey::from_path(&f).unwrap();
+        let viols = vec![viol; 2000];
+        for i in 0..8 {
+            c.set_linted(&tmp.path().join(format!("p{i}.py")), &key, &viols);
+        }
+        c.persist().unwrap();
+        let size = std::fs::metadata(&c.path).unwrap().len() as usize;
+        assert!(size > 1_000_000 && size < MAX_DECODE_BYTES, "size = {size}");
+
+        let c2 = open_cache(tmp.path(), &[], &[]);
+        for i in 0..8 {
+            let got = c2.get(&tmp.path().join(format!("p{i}.py")), &key).unwrap();
+            assert_eq!(got.len(), 2000);
+        }
+    }
+
+    #[test]
+    fn invalidate_after_hit_does_not_resurrect_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("a.py");
+        std::fs::write(&f, "x = 1\n").unwrap();
+        let key = FileCacheKey::from_path(&f).unwrap();
+        let mut c = open_cache(tmp.path(), &[], &[]);
+        c.set_linted(&f, &key, &[]);
+        c.persist().unwrap();
+
+        let mut c = open_cache(tmp.path(), &[], &[]);
+        assert!(c.get(&f, &key).is_some());
+        c.invalidate(&f);
+        c.persist().unwrap();
+
+        let c = open_cache(tmp.path(), &[], &[]);
+        assert!(c.get(&f, &key).is_none());
+    }
+
+    #[test]
+    fn init_sweeps_only_stale_cache_temp_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = init(tmp.path());
+        let dir = tmp.path().join(VERSION);
+        let old = dir.join("0123456789abcdef.123.4.tmp");
+        let fresh = dir.join("0123456789abcdef.123.5.tmp");
+        let foreign = dir.join("notes.tmp");
+        for p in [&old, &fresh, &foreign] {
+            std::fs::write(p, "x").unwrap();
+        }
+        let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        for p in [&old, &foreign] {
+            filetime::set_file_mtime(p, filetime::FileTime::from_system_time(two_hours_ago))
+                .unwrap();
+        }
+        init(tmp.path()).unwrap();
+        assert!(!old.exists(), "stale temp file must be swept");
+        assert!(fresh.exists(), "recent temp file may belong to a live run");
+        assert!(foreign.exists(), "non-matching names are left alone");
     }
 
     #[test]

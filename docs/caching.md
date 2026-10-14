@@ -13,3 +13,7 @@ The cache is also keyed by every setting that affects results: `select`,
 | Bypass for one run      | `konform check --no-cache`            |
 | Use another directory   | `konform check --cache-dir PATH`      |
 | Delete the cache        | `konform clean [--config PATH]`       |
+
+Concurrent runs sharing a cache directory never corrupt it (each write goes to a
+temporary file and is renamed into place), but the last writer wins: entries
+added by another run in the meantime may be lost and are simply re-linted next time.

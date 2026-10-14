@@ -37,11 +37,15 @@ pub fn get_changed_files() -> ChangedFiles {
 }
 
 /// Walk upward from `anchor` looking for `.git` or `pyproject.toml`.
+///
+/// The anchor is made absolute first so relative anchors such as `.` or
+/// `a.py` still walk up past the current directory.
 pub fn find_repo_root(anchor: &Path) -> Option<PathBuf> {
+    let anchor = std::path::absolute(anchor).ok()?;
     let start = if anchor.is_file() {
         anchor.parent()?.to_path_buf()
     } else {
-        anchor.to_path_buf()
+        anchor
     };
     for dir in start.ancestors() {
         if dir.join(".git").exists() || dir.join("pyproject.toml").exists() {
@@ -49,4 +53,41 @@ pub fn find_repo_root(anchor: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_root_from_nested_dir_and_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+        let nested = tmp.path().join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("x.py"), "").unwrap();
+        assert_eq!(find_repo_root(&nested), Some(tmp.path().to_path_buf()));
+        assert_eq!(
+            find_repo_root(&nested.join("x.py")),
+            Some(tmp.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn finds_git_dir_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        assert_eq!(find_repo_root(tmp.path()), Some(tmp.path().to_path_buf()));
+    }
+
+    #[test]
+    fn relative_anchor_is_made_absolute() {
+        // The cwd is the crate root (has Cargo.toml but also .git or
+        // pyproject.toml somewhere above or in it); a relative anchor must
+        // resolve to the same root as its absolute form.
+        let rel = Path::new("src");
+        let abs = std::env::current_dir().unwrap().join("src");
+        assert_eq!(find_repo_root(rel), find_repo_root(&abs));
+        assert_eq!(find_repo_root(Path::new(".")), find_repo_root(&abs));
+    }
 }

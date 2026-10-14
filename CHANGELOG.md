@@ -20,6 +20,7 @@
 
 ### Refactor
 
+- **cli**: extract clean safety checks into a testable helper
 - **cache**: replace bincode with rkyv
 
 ## v0.5.0 (2026-10-13)

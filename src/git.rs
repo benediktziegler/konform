@@ -62,16 +62,18 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// `s` without a leading Windows `\\?\` verbatim prefix, unless it is a UNC path.
+fn verbatim_stripped(s: &str) -> Option<&str> {
+    s.strip_prefix(r"\\?\")
+        .filter(|rest| !rest.starts_with("UNC\\"))
+}
+
 /// Drop the Windows `\\?\` verbatim prefix that `canonicalize` adds.
 fn strip_verbatim(path: PathBuf) -> PathBuf {
-    if cfg!(windows) {
-        if let Some(rest) = path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
-            if !rest.starts_with("UNC\\") {
-                return PathBuf::from(rest);
-            }
-        }
+    match path.to_str().and_then(verbatim_stripped) {
+        Some(rest) if cfg!(windows) => PathBuf::from(rest),
+        _ => path,
     }
-    path
 }
 
 /// Walk upward from `anchor` looking for `.git` or `pyproject.toml`.
@@ -114,6 +116,21 @@ mod tests {
             find_repo_root(&nested.join("x.py")),
             Some(tmp.path().to_path_buf())
         );
+    }
+
+    #[test]
+    fn verbatim_prefix_is_stripped_except_for_unc() {
+        assert_eq!(verbatim_stripped(r"\\?\C:\proj"), Some(r"C:\proj"));
+        assert_eq!(verbatim_stripped(r"\\?\UNC\host\share"), None);
+        assert_eq!(verbatim_stripped(r"C:\proj"), None);
+        // Only Windows rewrites the path; elsewhere it is returned untouched.
+        let p = PathBuf::from(r"\\?\C:\proj");
+        let expected = if cfg!(windows) {
+            PathBuf::from(r"C:\proj")
+        } else {
+            p.clone()
+        };
+        assert_eq!(strip_verbatim(p), expected);
     }
 
     #[test]

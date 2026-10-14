@@ -29,6 +29,10 @@
 - **cli**: extract clean safety checks into a testable helper
 - **cache**: replace bincode with rkyv
 
+### Perf
+
+- **cache**: skip rewriting an unchanged cache and warn about a corrupt one
+
 ## v0.5.0 (2026-10-13)
 
 ### Feat

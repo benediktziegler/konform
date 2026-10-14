@@ -1,6 +1,6 @@
 use crate::types::ChangedFiles;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 fn git_lines(args: &[&str]) -> Vec<String> {
@@ -36,12 +36,55 @@ pub fn get_changed_files() -> ChangedFiles {
     }
 }
 
+/// Resolve `.` and `..` components of an absolute path.
+///
+/// `std::path::absolute` keeps `..`, so `/proj/../other` would otherwise have
+/// `/proj` among its ancestors. A `..` that follows a symlink is resolved
+/// against the link target (as the OS would), everything else is purely
+/// lexical, so paths without `..` are returned unchanged (no `/var` ->
+/// `/private/var` rewriting, no `\\?\` verbatim prefixes).
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if out.is_symlink() {
+                    if let Ok(real) = out.canonicalize() {
+                        out = strip_verbatim(real);
+                    }
+                }
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Drop the Windows `\\?\` verbatim prefix that `canonicalize` adds.
+fn strip_verbatim(path: PathBuf) -> PathBuf {
+    if cfg!(windows) {
+        if let Some(rest) = path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+            if !rest.starts_with("UNC\\") {
+                return PathBuf::from(rest);
+            }
+        }
+    }
+    path
+}
+
 /// Walk upward from `anchor` looking for `.git` or `pyproject.toml`.
 ///
 /// The anchor is made absolute first so relative anchors such as `.` or
 /// `a.py` still walk up past the current directory.
 pub fn find_repo_root(anchor: &Path) -> Option<PathBuf> {
-    let anchor = std::path::absolute(anchor).ok()?;
+    find_repo_root_in(anchor, &std::env::current_dir().ok()?)
+}
+
+/// [`find_repo_root`] with relative anchors resolved against `base`.
+fn find_repo_root_in(anchor: &Path, base: &Path) -> Option<PathBuf> {
+    let anchor = normalize(&base.join(anchor));
     let start = if anchor.is_file() {
         anchor.parent()?.to_path_buf()
     } else {
@@ -82,12 +125,58 @@ mod tests {
 
     #[test]
     fn relative_anchor_is_made_absolute() {
-        // The cwd is the crate root (has Cargo.toml but also .git or
-        // pyproject.toml somewhere above or in it); a relative anchor must
-        // resolve to the same root as its absolute form.
-        let rel = Path::new("src");
-        let abs = std::env::current_dir().unwrap().join("src");
-        assert_eq!(find_repo_root(rel), find_repo_root(&abs));
-        assert_eq!(find_repo_root(Path::new(".")), find_repo_root(&abs));
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+        std::fs::create_dir(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/a.py"), "").unwrap();
+        let root = Some(tmp.path().to_path_buf());
+        assert_eq!(find_repo_root_in(Path::new("src"), tmp.path()), root);
+        assert_eq!(find_repo_root_in(Path::new("."), tmp.path()), root);
+        assert_eq!(find_repo_root_in(Path::new("src/a.py"), tmp.path()), root);
+        // The public entry point resolves against the process cwd.
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(find_repo_root(Path::new(".")), find_repo_root(&cwd));
+    }
+
+    #[test]
+    fn dotdot_components_are_resolved_before_walking_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(proj.join("sub")).unwrap();
+        std::fs::create_dir_all(other.join("deep")).unwrap();
+        std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+        // `other` has no marker of its own; `proj/../other` must not pick up
+        // `proj` as an ancestor.
+        assert_eq!(find_repo_root(&proj.join("../other")), None);
+        assert_eq!(find_repo_root(&proj.join("../other/deep")), None);
+        // `.` and `..` inside the project still resolve to the project root.
+        assert_eq!(find_repo_root(&proj.join("sub/./..")), Some(proj.clone()));
+        assert_eq!(
+            find_repo_root(&other.join("../proj/sub/../sub")),
+            Some(proj)
+        );
+        // Non-existent trailing components are resolved lexically.
+        assert_eq!(
+            normalize(&tmp.path().join("a/b/../c")),
+            tmp.path().join("a/c")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dotdot_after_symlink_follows_the_link_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real/inner");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(tmp.path().join("real/pyproject.toml"), "").unwrap();
+        std::fs::create_dir(tmp.path().join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(&real, tmp.path().join("elsewhere/link")).unwrap();
+        // `elsewhere/link/..` is `real`, not `elsewhere`.
+        let root = find_repo_root(&tmp.path().join("elsewhere/link/..")).unwrap();
+        assert_eq!(
+            root.canonicalize().unwrap(),
+            tmp.path().join("real").canonicalize().unwrap()
+        );
     }
 }

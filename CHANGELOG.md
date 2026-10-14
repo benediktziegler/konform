@@ -7,6 +7,7 @@
 
 ### Fix
 
+- **lsp**: reload config without holding the session lock
 - **lsp**: keep non-UTF-8 file names and match localhost case-insensitively
 - **probe**: kill the interpreter after a timeout
 - **lsp**: rebuild module probe on config reload

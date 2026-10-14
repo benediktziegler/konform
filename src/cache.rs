@@ -24,6 +24,7 @@
 use crate::config::Config;
 use crate::rules::Rule;
 use anyhow::Result;
+use owo_colors::OwoColorize;
 use rkyv::util::AlignedVec;
 use rkyv::{Archive, Deserialize, Serialize};
 use seahash::SeaHasher;
@@ -42,6 +43,13 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Entries not visited within this many days are evicted on [`Cache::persist`].
 const EVICT_DAYS: u64 = 30;
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 /// Per-process counter making temp file names unique across calls.
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -59,6 +67,11 @@ const FORMAT_VERSION: u32 = 1;
 
 /// Header length: magic + format version + padding to rkyv's 16-byte alignment.
 const HEADER_LEN: usize = 16;
+
+/// A hit only rewrites `last_seen` (and so the cache file) when the stored
+/// value is older than this; otherwise a fully cached run writes nothing.
+/// It must stay far below [`EVICT_DAYS`] so in-use entries never expire.
+const REFRESH_AFTER_MS: u64 = 24 * 3600 * 1000;
 
 /// Temp files older than this are considered orphaned (crashed run) and swept.
 const STALE_TMP_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -82,25 +95,56 @@ fn encode(pkg: &PackageCache) -> Result<AlignedVec<16>> {
     Ok(out)
 }
 
-/// Read and validate a cache file. `None` for anything that is not a valid
-/// cache in the current format (missing, too large, foreign or old format,
-/// corrupt); callers start from an empty cache in that case.
-fn read_package(path: &Path, max_bytes: usize) -> Option<PackageCache> {
-    let f = fs::File::open(path).ok()?;
-    let len = usize::try_from(f.metadata().ok()?.len()).ok()?;
-    if len > max_bytes || len < HEADER_LEN {
-        return None;
+/// Result of trying to load a cache file.
+enum ReadOutcome {
+    /// A valid cache in the current format.
+    Loaded(PackageCache),
+    /// Nothing usable, and nothing worth reporting: the file is missing, or
+    /// is an old-format or foreign file (expected after an upgrade).
+    Ignored,
+    /// The file is unusable for an abnormal reason (current header but a bad
+    /// payload, an I/O error other than "not found", or too large). Carries
+    /// a human-readable reason for the warning.
+    Corrupt(String),
+}
+
+/// Read and validate a cache file; see [`ReadOutcome`] for the cases.
+fn read_package(path: &Path, max_bytes: usize) -> ReadOutcome {
+    use ReadOutcome::{Corrupt, Ignored, Loaded};
+    let mut f = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ignored,
+        Err(e) => return Corrupt(format!("could not read: {e}")),
+    };
+    let len = match f.metadata().map(|m| usize::try_from(m.len())) {
+        Ok(Ok(len)) => len,
+        Ok(Err(_)) => return Corrupt("file is too large".into()),
+        Err(e) => return Corrupt(format!("could not read: {e}")),
+    };
+    if len > max_bytes {
+        return Corrupt(format!("file exceeds the {max_bytes} byte limit"));
+    }
+    if len < HEADER_LEN {
+        return Ignored; // too short to carry a header: not ours
     }
     // AlignedVec guarantees the alignment rkyv needs for access; `take`
     // bounds the read even if the file grows after the size check.
     let mut buf: AlignedVec<16> = AlignedVec::with_capacity(len);
-    buf.extend_from_reader(&mut f.take(len as u64)).ok()?;
+    if let Err(e) = buf.extend_from_reader(&mut (&mut f).take(len as u64)) {
+        return Corrupt(format!("could not read: {e}"));
+    }
     if buf.len() < HEADER_LEN || buf[..HEADER_LEN] != header() {
-        return None; // old bincode file, foreign file, or other format version
+        return Ignored; // old bincode file, foreign file, or other format version
     }
     let archived =
-        rkyv::access::<ArchivedPackageCache, rkyv::rancor::Error>(&buf[HEADER_LEN..]).ok()?;
-    rkyv::deserialize::<PackageCache, rkyv::rancor::Error>(archived).ok()
+        match rkyv::access::<ArchivedPackageCache, rkyv::rancor::Error>(&buf[HEADER_LEN..]) {
+            Ok(a) => a,
+            Err(e) => return Corrupt(format!("invalid contents: {e}")),
+        };
+    match rkyv::deserialize::<PackageCache, rkyv::rancor::Error>(archived) {
+        Ok(pkg) => Loaded(pkg),
+        Err(e) => Corrupt(format!("invalid contents: {e}")),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +492,10 @@ pub struct Cache {
     /// Keys of entries hit via [`Cache::get`]; their `last_seen` is refreshed
     /// in [`Cache::persist`].
     touched: RefCell<HashSet<String>>,
+    /// The in-memory cache differs from the file on disk (entry removed, or
+    /// a corrupt file that should be replaced). Pending entries are tracked
+    /// separately in `pending`.
+    dirty: bool,
 }
 
 impl Cache {
@@ -472,6 +520,36 @@ impl Cache {
         env_fingerprint: u64,
         rules_fingerprint: u64,
     ) -> Self {
+        Self::open_with_warn(
+            package_root,
+            cache_root,
+            no_cache,
+            level,
+            select,
+            ignore,
+            env_fingerprint,
+            rules_fingerprint,
+            &mut |msg| eprintln!("{} {msg}", "warning:".yellow().bold()),
+        )
+    }
+
+    /// [`Cache::open`] with an injectable warning sink. A warning is emitted
+    /// (once) only for a cache file that exists but is abnormal: right
+    /// header with an invalid payload, unreadable for a reason other than
+    /// "not found", or over the size limit. Missing, old-format and foreign
+    /// files stay silent. Either way the result is an empty cache.
+    #[allow(clippy::too_many_arguments)]
+    fn open_with_warn(
+        package_root: PathBuf,
+        cache_root: &Path,
+        no_cache: bool,
+        level: &str,
+        select: &[String],
+        ignore: &[String],
+        env_fingerprint: u64,
+        rules_fingerprint: u64,
+        warn: &mut dyn FnMut(&str),
+    ) -> Self {
         let hash = settings_hash(
             &package_root,
             select,
@@ -488,7 +566,7 @@ impl Cache {
         }
 
         match read_package(&path, MAX_CACHE_BYTES) {
-            Some(mut pkg) => {
+            ReadOutcome::Loaded(mut pkg) => {
                 if pkg.package_root != root_str {
                     // Hash collision (astronomically rare): start fresh.
                     pkg.files.clear();
@@ -499,9 +577,21 @@ impl Cache {
                     package: pkg,
                     pending: vec![],
                     touched: RefCell::new(HashSet::new()),
+                    dirty: false,
                 }
             }
-            None => Self::empty(path, root_str, no_cache),
+            ReadOutcome::Ignored => Self::empty(path, root_str, no_cache),
+            ReadOutcome::Corrupt(reason) => {
+                warn(&format!(
+                    "ignoring konform cache file {} ({reason}); it will be rebuilt",
+                    path.display()
+                ));
+                let mut c = Self::empty(path, root_str, no_cache);
+                // Replace the bad file on the next persist so the warning
+                // does not repeat on every run.
+                c.dirty = true;
+                c
+            }
         }
     }
 
@@ -515,6 +605,7 @@ impl Cache {
             },
             pending: vec![],
             touched: RefCell::new(HashSet::new()),
+            dirty: false,
         }
     }
 
@@ -558,24 +649,37 @@ impl Cache {
     /// Remove `abs_path` from the cache (called after an in-place fix).
     pub fn invalidate(&mut self, abs_path: &Path) {
         let k = Self::path_key(abs_path);
-        self.package.files.remove(&k);
+        if self.package.files.remove(&k).is_some() {
+            self.dirty = true;
+        }
         self.pending.retain(|(r, _, _)| r != &k);
     }
 
     /// Merge pending entries, evict stale ones, and write atomically.
-    pub fn persist(&mut self) -> Result<()> {
-        self.persist_with_limit(MAX_CACHE_BYTES)
+    ///
+    /// Returns `Ok(true)` if the file was written and `Ok(false)` if there was
+    /// nothing to write: no new, removed or replaced entries, and no hit
+    /// whose `last_seen` is older than [`REFRESH_AFTER_MS`]. Eviction only
+    /// happens as part of a write.
+    pub fn persist(&mut self) -> Result<bool> {
+        self.persist_at(now_ms(), MAX_CACHE_BYTES)
     }
 
-    fn persist_with_limit(&mut self, max_bytes: usize) -> Result<()> {
+    fn persist_at(&mut self, now_ms: u64, max_bytes: usize) -> Result<bool> {
         if self.no_cache {
-            return Ok(());
+            return Ok(false);
         }
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let touched = std::mem::take(self.touched.get_mut());
+        let stale_hit = touched.iter().any(|k| {
+            self.package
+                .files
+                .get(k)
+                .is_some_and(|e| now_ms.saturating_sub(e.last_seen) > REFRESH_AFTER_MS)
+        });
+        if !(self.dirty || !self.pending.is_empty() || stale_hit) {
+            return Ok(false);
+        }
 
         for (k, key_hash, violations) in std::mem::take(&mut self.pending) {
             self.package.files.insert(
@@ -589,7 +693,6 @@ impl Cache {
         }
 
         // Cache hits count as "seen": refresh them before eviction.
-        let touched = std::mem::take(self.touched.get_mut());
         for k in touched {
             if let Some(e) = self.package.files.get_mut(&k) {
                 e.last_seen = now_ms;
@@ -638,7 +741,8 @@ impl Cache {
             return Err(e.into());
         }
 
-        Ok(())
+        self.dirty = false;
+        Ok(true)
     }
 
     /// Temp file name unique per process and per call, so concurrent
@@ -1055,7 +1159,10 @@ mod tests {
         .to_vec();
         bytes[8..12].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
         std::fs::write(&path, bytes).unwrap();
-        assert!(read_package(&path, MAX_CACHE_BYTES).is_none());
+        assert!(matches!(
+            read_package(&path, MAX_CACHE_BYTES),
+            ReadOutcome::Ignored
+        ));
         assert_next_persist_round_trips(tmp.path(), &file);
     }
 
@@ -1069,9 +1176,18 @@ mod tests {
         };
         let bytes = encode(&pkg).unwrap();
         std::fs::write(&path, &bytes[..]).unwrap();
-        assert!(read_package(&path, bytes.len()).is_some());
-        assert!(read_package(&path, bytes.len() - 1).is_none());
-        assert!(read_package(&tmp.path().join("missing"), 1000).is_none());
+        assert!(matches!(
+            read_package(&path, bytes.len()),
+            ReadOutcome::Loaded(_)
+        ));
+        assert!(matches!(
+            read_package(&path, bytes.len() - 1),
+            ReadOutcome::Corrupt(_)
+        ));
+        assert!(matches!(
+            read_package(&tmp.path().join("missing"), 1000),
+            ReadOutcome::Ignored
+        ));
     }
 
     #[test]
@@ -1086,7 +1202,7 @@ mod tests {
             c.set_linted(&f, &key, &[]);
             files.push((f, key));
         }
-        c.persist_with_limit(300).unwrap();
+        c.persist_at(now_ms(), 300).unwrap();
         assert!(std::fs::metadata(&c.path).unwrap().len() <= 300);
 
         // Still readable, and some (but not all) entries survived.
@@ -1095,7 +1211,8 @@ mod tests {
         assert!(hits > 0 && hits < 40, "hits = {hits}");
 
         // A limit too small for even an empty cache ends with an empty cache.
-        c.persist_with_limit(1).unwrap();
+        c.dirty = true; // force a write: nothing is pending any more
+        c.persist_at(now_ms(), 1).unwrap();
         let c3 = open_cache(tmp.path(), &[], &[]);
         assert!(files.iter().all(|(f, k)| c3.get(f, k).is_none()));
     }
@@ -1270,6 +1387,221 @@ mod tests {
             c2.get(&file, &key).is_none(),
             "old entry should have been evicted"
         );
+    }
+
+    // ── Write throttling and corruption warnings ─────────────────────────
+
+    const DAY_MS: u64 = 24 * 3600 * 1000;
+
+    /// Write a cache file holding one entry for `file` with the given `last_seen`.
+    fn seed_entry(tmp: &Path, file: &Path, last_seen: u64) {
+        let key = FileCacheKey::from_path(file).unwrap();
+        let mut pkg = PackageCache {
+            package_root: tmp.to_string_lossy().into_owned(),
+            files: HashMap::new(),
+        };
+        pkg.files.insert(
+            file.to_string_lossy().into_owned(),
+            FileCache {
+                key: key.hash(),
+                last_seen,
+                violations: vec![],
+            },
+        );
+        std::fs::write(cache_file(tmp), encode(&pkg).unwrap()).unwrap();
+    }
+
+    fn py_file(tmp: &Path) -> (PathBuf, FileCacheKey) {
+        let file = tmp.join("a.py");
+        std::fs::write(&file, "x = 1\n").unwrap();
+        let key = FileCacheKey::from_path(&file).unwrap();
+        (file, key)
+    }
+
+    /// Open `tmp`'s cache, collecting warnings instead of printing them.
+    fn open_collecting(tmp: &Path) -> (Cache, Vec<String>) {
+        let mut warnings = Vec::new();
+        let c = Cache::open_with_warn(
+            tmp.to_path_buf(),
+            tmp,
+            false,
+            "error",
+            &[],
+            &[],
+            0,
+            0,
+            &mut |m| warnings.push(m.to_string()),
+        );
+        (c, warnings)
+    }
+
+    #[test]
+    fn pure_hit_run_does_not_rewrite_the_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (file, key) = py_file(tmp.path());
+        let now = now_ms();
+        seed_entry(tmp.path(), &file, now - 1000);
+        let before = std::fs::read(cache_file(tmp.path())).unwrap();
+
+        let mut c = open_cache(tmp.path(), &[], &[]);
+        assert!(c.get(&file, &key).is_some());
+        assert!(!c.persist_at(now, MAX_CACHE_BYTES).unwrap());
+        assert_eq!(std::fs::read(cache_file(tmp.path())).unwrap(), before);
+    }
+
+    #[test]
+    fn stale_last_seen_triggers_a_refresh_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (file, key) = py_file(tmp.path());
+        let now = now_ms();
+        seed_entry(tmp.path(), &file, now - REFRESH_AFTER_MS - 1000);
+
+        let mut c = open_cache(tmp.path(), &[], &[]);
+        assert!(c.get(&file, &key).is_some());
+        assert!(c.persist_at(now, MAX_CACHE_BYTES).unwrap());
+        assert_eq!(c.package.files.values().next().unwrap().last_seen, now);
+        // The next hit-only run finds a fresh entry and writes nothing.
+        let mut c2 = open_cache(tmp.path(), &[], &[]);
+        assert!(c2.get(&file, &key).is_some());
+        assert!(!c2.persist_at(now + 1000, MAX_CACHE_BYTES).unwrap());
+    }
+
+    #[test]
+    fn untouched_stale_entry_does_not_trigger_a_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (file, _) = py_file(tmp.path());
+        let now = now_ms();
+        seed_entry(tmp.path(), &file, now - 10 * DAY_MS);
+        let mut c = open_cache(tmp.path(), &[], &[]);
+        assert!(!c.persist_at(now, MAX_CACHE_BYTES).unwrap());
+    }
+
+    #[test]
+    fn added_or_invalidated_entry_triggers_a_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (file, key) = py_file(tmp.path());
+        let now = now_ms();
+        seed_entry(tmp.path(), &file, now);
+
+        let mut c = open_cache(tmp.path(), &[], &[]);
+        c.set_linted(&tmp.path().join("b.py"), &key, &[]);
+        assert!(c.persist_at(now, MAX_CACHE_BYTES).unwrap());
+
+        let mut c = open_cache(tmp.path(), &[], &[]);
+        c.invalidate(&tmp.path().join("unknown.py")); // not cached: no change
+        assert!(!c.persist_at(now, MAX_CACHE_BYTES).unwrap());
+        c.invalidate(&file);
+        assert!(c.persist_at(now, MAX_CACHE_BYTES).unwrap());
+        assert!(c.get(&file, &key).is_none());
+    }
+
+    #[test]
+    fn eviction_runs_when_a_write_happens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (file, key) = py_file(tmp.path());
+        let now = now_ms();
+        seed_entry(tmp.path(), &file, now - 40 * DAY_MS);
+        let mut c = open_cache(tmp.path(), &[], &[]);
+        c.set_linted(&tmp.path().join("b.py"), &key, &[]);
+        assert!(c.persist_at(now, MAX_CACHE_BYTES).unwrap());
+        assert!(open_cache(tmp.path(), &[], &[]).get(&file, &key).is_none());
+    }
+
+    #[test]
+    fn empty_cache_with_nothing_to_store_creates_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut c = open_cache(tmp.path(), &[], &[]);
+        assert!(!c.persist().unwrap());
+        assert!(!cache_file(tmp.path()).exists());
+
+        // A missing file with something to store is written.
+        let (file, key) = py_file(tmp.path());
+        c.set_linted(&file, &key, &[]);
+        assert!(c.persist().unwrap());
+        assert!(cache_file(tmp.path()).exists());
+    }
+
+    #[test]
+    fn no_cache_never_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut c = Cache::open(
+            tmp.path().to_path_buf(),
+            tmp.path(),
+            true,
+            "error",
+            &[],
+            &[],
+            0,
+            0,
+        );
+        let (file, key) = py_file(tmp.path());
+        c.set_linted(&file, &key, &[]);
+        assert!(!c.persist().unwrap());
+    }
+
+    #[test]
+    fn corrupt_payload_warns_once_and_is_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (file, key) = py_file(tmp.path());
+        let path = cache_file(tmp.path());
+        let mut garbage = header().to_vec();
+        garbage.extend_from_slice(&[0xFF; 64]);
+        std::fs::write(&path, garbage).unwrap();
+
+        let (mut c, warnings) = open_collecting(tmp.path());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains(&path.display().to_string()));
+        assert!(c.get(&file, &key).is_none());
+        // Replaced even with nothing to store, so the warning does not repeat.
+        assert!(c.persist().unwrap());
+        let (_, warnings) = open_collecting(tmp.path());
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn oversized_and_unreadable_files_warn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = cache_file(tmp.path());
+        // A directory where the file should be: open succeeds, read fails
+        // with an error other than NotFound.
+        std::fs::create_dir(&path).unwrap();
+        let (_, warnings) = open_collecting(tmp.path());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        std::fs::remove_dir(&path).unwrap();
+
+        std::fs::write(&path, vec![0u8; 100]).unwrap();
+        assert!(matches!(read_package(&path, 50), ReadOutcome::Corrupt(_)));
+    }
+
+    #[test]
+    fn expected_unusable_files_stay_silent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = cache_file(tmp.path());
+
+        let (_, warnings) = open_collecting(tmp.path()); // missing
+        assert!(warnings.is_empty());
+
+        let mut other_version = encode(&PackageCache {
+            package_root: String::new(),
+            files: HashMap::new(),
+        })
+        .unwrap()
+        .to_vec();
+        other_version[8..12].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
+        let samples: [Vec<u8>; 5] = [
+            vec![
+                1, b'x', 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0, 0, 0, 0, 0,
+            ], // bincode-like
+            b"not a konform cache file at all".to_vec(), // foreign
+            other_version,
+            MAGIC[..4].to_vec(), // shorter than a header
+            vec![],
+        ];
+        for bytes in samples {
+            std::fs::write(&path, bytes).unwrap();
+            let (_, warnings) = open_collecting(tmp.path());
+            assert!(warnings.is_empty(), "{warnings:?}");
+        }
     }
 }
 

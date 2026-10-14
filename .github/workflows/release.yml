@@ -7,8 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 env:
   rust_version: "1.97"
@@ -63,14 +62,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: |
-            3.10
-            3.11
-            3.12
-            3.13
-            3.14
+          python-version: "3.13"
           architecture: ${{ matrix.target }}
-          allow-prereleases: true
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -81,30 +74,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: wheels-windows-${{ matrix.target }}
-          path: dist
-
-  windows-freethreaded:
-    runs-on: windows-latest
-    strategy:
-      matrix:
-        target: [x64, x86]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.14t"
-          architecture: ${{ matrix.target }}
-          allow-prereleases: true
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
-          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-      - name: Upload wheels
-        uses: actions/upload-artifact@v7
-        with:
-          name: wheels-windows-${{ matrix.target }}-freethreaded
           path: dist
 
   macos:
@@ -212,7 +181,6 @@ jobs:
         linux,
         musllinux,
         windows,
-        windows-freethreaded,
         macos,
         sdist,
         build-binaries,
@@ -239,7 +207,10 @@ jobs:
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v4
         with:
-          subject-path: "wheels/*/*.whl"
+          subject-path: |
+            wheels/*/*.whl
+            wheels/*/*.tar.gz
+            binaries/*/konform*
 
       - name: Flatten wheels directory
         run: |

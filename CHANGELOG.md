@@ -1,5 +1,9 @@
 ## Unreleased
 
+### Feat
+
+- **config**: discover VIRTUAL_ENV, CONDA_PREFIX and parent venvs
+
 ### Fix
 
 - **config**: resolve relative python against config dir

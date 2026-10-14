@@ -766,6 +766,37 @@ fn clean_refuses_cache_dir_that_is_the_repo_root() {
     assert!(dir.path().join("pyproject.toml").is_file());
 }
 
+#[cfg(unix)]
+#[test]
+fn clean_reports_failure_to_remove_cache() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[tool.konform]\ncache-dir = \".kcache\"\n",
+    )
+    .unwrap();
+    let cache = dir.path().join(".kcache");
+    let locked = cache.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::write(cache.join("CACHEDIR.TAG"), "").unwrap();
+    std::fs::write(locked.join("f"), "x").unwrap();
+    // A read-only directory cannot have its entries removed.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Skip when permissions are not enforced (e.g. running as root).
+    let enforced = std::fs::remove_file(locked.join("f")).is_err();
+    if enforced {
+        konform(dir.path())
+            .arg("clean")
+            .assert()
+            .failure()
+            .stderr(contains("failed to remove cache"));
+    }
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 #[test]
 fn clean_from_subdirectory_resolves_cache_against_repo_root() {
     let dir = tempfile::tempdir().unwrap();

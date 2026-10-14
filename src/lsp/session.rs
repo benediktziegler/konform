@@ -4,7 +4,7 @@
 //! (which mutates it on notifications) and worker threads (which read it for
 //! diagnostics) can access it safely.
 
-use crate::config::{load_config, Config};
+use crate::config::{load_config, resolve_python, Config};
 use crate::module_probe::ModuleProbe;
 use crate::rules::{all_rules, Rule};
 use crate::types::Violation;
@@ -89,6 +89,9 @@ pub struct Session {
     /// recompiled) only when they change, not on every request.
     pub rules: Arc<Vec<Box<dyn Rule>>>,
     pub probe: Arc<ModuleProbe>,
+    /// What `probe` was built from, so a config reload only respawns the
+    /// interpreter when it would actually change.
+    probe_inputs: ProbeInputs,
     /// `config`'s compiled `exclude` / `extend-exclude` globs; matching
     /// documents get no diagnostics or fixes.
     excluded: Option<GlobSet>,
@@ -96,8 +99,30 @@ pub struct Session {
     pub root: PathBuf,
 }
 
+/// The settings a [`ModuleProbe`] is built from.
+#[derive(Debug, PartialEq, Eq)]
+struct ProbeInputs {
+    python: PathBuf,
+    root: PathBuf,
+    src: Vec<String>,
+}
+
+impl ProbeInputs {
+    fn new(config: &Config, session_root: &std::path::Path) -> Self {
+        Self {
+            python: resolve_python(config),
+            root: config
+                .config_dir
+                .clone()
+                .unwrap_or_else(|| session_root.to_path_buf()),
+            src: config.src.clone(),
+        }
+    }
+}
+
 impl Session {
     pub fn new(config: Config, probe: Arc<ModuleProbe>, root: PathBuf) -> Self {
+        let probe_inputs = ProbeInputs::new(&config, &root);
         let rules = Arc::new(all_rules(Arc::clone(&probe), config.config_dir.clone()));
         Self {
             documents: HashMap::new(),
@@ -105,6 +130,7 @@ impl Session {
             config: Arc::new(config),
             rules,
             probe,
+            probe_inputs,
             root,
         }
     }
@@ -188,10 +214,17 @@ impl Session {
 
     /// Re-read `pyproject.toml` / `konform.toml` from the session root and
     /// rebuild the rules (which re-reads any pattern files).
+    /// The module probe is respawned when `python`, `src` or the config
+    /// directory changed.
     /// Called when `workspace/didChangeWatchedFiles` fires.
     pub fn reload_config(&mut self) {
         self.config = Arc::new(load_config(Some(&self.root), None));
         self.excluded = self.config.exclude_set();
+        let inputs = ProbeInputs::new(&self.config, &self.root);
+        if inputs != self.probe_inputs {
+            self.probe = Arc::new(ModuleProbe::new(&inputs.python, &inputs.root, &inputs.src));
+            self.probe_inputs = inputs;
+        }
         self.rules = Arc::new(all_rules(
             Arc::clone(&self.probe),
             self.config.config_dir.clone(),
@@ -280,6 +313,40 @@ mod tests {
             PathBuf::from("/home/me/b.py")
         );
         assert_eq!(file_path_for("/", true), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn reload_rebuilds_the_probe_only_when_its_inputs_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("konform.toml"), "ignore = [\"KIS001\"]\n").unwrap();
+        let config = load_config(Some(&root), None);
+        let probe = Arc::new(ModuleProbe::default());
+        let mut session = Session::new(config, Arc::clone(&probe), root.clone());
+
+        // An unrelated edit keeps the probe (and the interpreter behind it).
+        session.reload_config();
+        assert!(Arc::ptr_eq(&session.probe, &probe));
+
+        // Changing `src` rebuilds it, and the rules get the new probe.
+        std::fs::write(root.join("konform.toml"), "src = [\"lib\"]\n").unwrap();
+        session.reload_config();
+        assert!(!Arc::ptr_eq(&session.probe, &probe));
+        let rebuilt = Arc::clone(&session.probe);
+
+        // Changing `python` rebuilds it again.
+        std::fs::write(
+            root.join("konform.toml"),
+            "src = [\"lib\"]\npython = \"other-python\"\n",
+        )
+        .unwrap();
+        session.reload_config();
+        assert!(!Arc::ptr_eq(&session.probe, &rebuilt));
+        let rebuilt = Arc::clone(&session.probe);
+
+        // Reloading the same file again does not.
+        session.reload_config();
+        assert!(Arc::ptr_eq(&session.probe, &rebuilt));
     }
 
     #[test]

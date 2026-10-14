@@ -6,6 +6,7 @@
 
 ### Fix
 
+- **lsp**: percent-decode document URIs
 - **cli**: make clean robust to cwd, refuse when paths cannot be canonicalized
 - **git**: normalize .. components before walking up for the repo root
 - **cli**: lint .pyi files

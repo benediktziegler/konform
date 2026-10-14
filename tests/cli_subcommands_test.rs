@@ -736,6 +736,63 @@ fn clean_removes_leftover_version_directories_too() {
     assert!(!cache.exists(), "all versions go with the cache root");
 }
 
+#[test]
+fn clean_refuses_dir_without_cachedir_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[tool.konform]\ncache-dir = \"build\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join("build")).unwrap();
+    std::fs::write(dir.path().join("build/keep.txt"), "x").unwrap();
+
+    konform(dir.path())
+        .arg("clean")
+        .assert()
+        .failure()
+        .stderr(contains("CACHEDIR.TAG"));
+    assert!(dir.path().join("build/keep.txt").is_file());
+}
+
+#[test]
+fn clean_refuses_cache_dir_that_is_the_repo_root() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[tool.konform]\ncache-dir = \".\"\n",
+    )
+    .unwrap();
+    // Even a (forged) tag must not make the project root deletable.
+    std::fs::write(dir.path().join("CACHEDIR.TAG"), "").unwrap();
+
+    konform(dir.path())
+        .arg("clean")
+        .assert()
+        .failure()
+        .stderr(contains("refusing"));
+    assert!(dir.path().join("pyproject.toml").is_file());
+}
+
+#[test]
+fn clean_from_subdirectory_resolves_cache_against_repo_root() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();
+    std::fs::write(dir.path().join("good.py"), GOOD).unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+
+    konform(dir.path())
+        .args(["check", "good.py"])
+        .assert()
+        .success();
+    let cache = dir.path().join(".konform_cache");
+    assert!(cache.join("CACHEDIR.TAG").is_file());
+
+    konform(&sub).arg("clean").assert().success();
+    assert!(!cache.exists());
+}
+
 // ---------------------------------------------------------------------------
 // --isolated / stdin
 // ---------------------------------------------------------------------------

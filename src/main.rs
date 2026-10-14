@@ -1437,17 +1437,34 @@ fn run_clean(args: CleanArgs) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let config = load_config(Some(&cwd), args.config.as_deref());
     warn_config_errors(&config);
-    let cache_path = std::path::Path::new(&config.cache_dir);
-    if cache_path.exists() {
-        match std::fs::remove_dir_all(cache_path) {
-            Ok(()) => eprintln!("Removed cache directory: {}", config.cache_dir),
-            Err(e) => {
-                eprintln!("error: failed to remove cache: {e}");
-                std::process::exit(1);
-            }
+    let repo_root = find_repo_root(&cwd).unwrap_or_else(|| cwd.clone());
+    let cache_path = repo_root.join(&config.cache_dir);
+    if !cache_path.exists() {
+        eprintln!("Cache directory not found: {}", cache_path.display());
+        return;
+    }
+    let refuse = |why: &str| -> ! {
+        eprintln!("error: refusing to remove {}: {why}", cache_path.display());
+        std::process::exit(1);
+    };
+    let target = cache_path.canonicalize().unwrap_or(cache_path.clone());
+    let protected = [&repo_root, &cwd];
+    if protected.iter().any(|p| {
+        p.canonicalize()
+            .unwrap_or_else(|_| (*p).clone())
+            .starts_with(&target)
+    }) {
+        refuse("it is the repository root, the current directory, or one of their ancestors");
+    }
+    if !cache_path.join("CACHEDIR.TAG").is_file() {
+        refuse("it does not contain a CACHEDIR.TAG, so it does not look like a konform cache");
+    }
+    match std::fs::remove_dir_all(&cache_path) {
+        Ok(()) => eprintln!("Removed cache directory: {}", config.cache_dir),
+        Err(e) => {
+            eprintln!("error: failed to remove cache: {e}");
+            std::process::exit(1);
         }
-    } else {
-        eprintln!("Cache directory not found: {}", config.cache_dir);
     }
 }
 

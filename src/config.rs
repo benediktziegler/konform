@@ -540,31 +540,66 @@ fn expand_home_in(path: &str, home: Option<std::ffi::OsString>) -> PathBuf {
 // Python interpreter discovery
 // ---------------------------------------------------------------------------
 
-/// Return the path to the Python interpreter to use for `sys.path` probing,
-/// by checking common virtual-environment locations under `project_root`.
+/// Return the path to the Python interpreter to use for `sys.path` probing.
 ///
 /// Discovery order:
-/// 1. `.venv/bin/python3`:   hatch (`path = ".venv"`), uv, plain `python -m venv`
-/// 2. `venv/bin/python3`:    common alternative name
-/// 3. `.env/bin/python3`:    another common name
+/// 1. `$VIRTUAL_ENV`, then `$CONDA_PREFIX`: the active environment
+/// 2. `.venv`, `venv`, `.env` under `project_root`
+/// 3. The same directories in each parent of `project_root`
 /// 4. `python3` on `$PATH`: system fallback
 ///
-/// On Windows `bin/` is replaced by `Scripts/` and `python3` by `python.exe`.
+/// Inside a venv the interpreter is `bin/python3` or `bin/python`; on Windows
+/// it is `Scripts/python.exe`.
 pub fn discover_python(project_root: &Path) -> PathBuf {
-    let (subdir, binary) = if cfg!(windows) {
-        ("Scripts", "python.exe")
-    } else {
-        ("bin", "python3")
-    };
+    discover_python_with_env(
+        project_root,
+        std::env::var_os("VIRTUAL_ENV"),
+        std::env::var_os("CONDA_PREFIX"),
+    )
+}
 
-    for venv in [".venv", "venv", ".env"] {
-        let candidate = project_root.join(venv).join(subdir).join(binary);
-        if candidate.is_file() {
-            return candidate;
+/// Interpreter inside the environment directory `env_dir`, if present.
+fn venv_interpreter(env_dir: &Path) -> Option<PathBuf> {
+    let candidates: &[&str] = if cfg!(windows) {
+        &["Scripts/python.exe"]
+    } else {
+        &["bin/python3", "bin/python"]
+    };
+    candidates
+        .iter()
+        .map(|rel| env_dir.join(rel))
+        .find(|p| p.is_file())
+}
+
+/// [`discover_python`] with the environment variable values passed in, so
+/// tests need not mutate the process environment.
+fn discover_python_with_env(
+    project_root: &Path,
+    virtual_env: Option<std::ffi::OsString>,
+    conda_prefix: Option<std::ffi::OsString>,
+) -> PathBuf {
+    for var in [virtual_env, conda_prefix].into_iter().flatten() {
+        if var.is_empty() {
+            continue;
+        }
+        if let Some(py) = venv_interpreter(Path::new(&var)) {
+            return py;
         }
     }
 
-    PathBuf::from(binary)
+    for dir in project_root.ancestors() {
+        for venv in [".venv", "venv", ".env"] {
+            if let Some(py) = venv_interpreter(&dir.join(venv)) {
+                return py;
+            }
+        }
+    }
+
+    PathBuf::from(if cfg!(windows) {
+        "python.exe"
+    } else {
+        "python3"
+    })
 }
 
 /// Resolve an explicit `python` setting. `~/` is expanded, relative paths
@@ -1023,16 +1058,77 @@ mod tests {
         let py = venv_bin.join(exe);
         std::fs::write(&py, "").unwrap();
 
-        let found = discover_python(tmp.path());
+        let found = discover_python_with_env(tmp.path(), None, None);
         assert_eq!(found, py);
+    }
+
+    fn make_env(root: &Path, name: &str) -> PathBuf {
+        let (bin, exe) = if cfg!(windows) {
+            ("Scripts", "python.exe")
+        } else {
+            ("bin", "python3")
+        };
+        let dir = root.join(name);
+        std::fs::create_dir_all(dir.join(bin)).unwrap();
+        let py = dir.join(bin).join(exe);
+        std::fs::write(&py, "").unwrap();
+        py
+    }
+
+    #[test]
+    fn discover_python_finds_venv_in_parent_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let py = make_env(tmp.path(), ".venv");
+        let project = tmp.path().join("packages/app");
+        std::fs::create_dir_all(&project).unwrap();
+        assert_eq!(discover_python_with_env(&project, None, None), py);
+    }
+
+    #[test]
+    fn discover_python_prefers_project_venv_over_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_env(tmp.path(), ".venv");
+        let project = tmp.path().join("app");
+        let local = make_env(&project, "venv");
+        assert_eq!(discover_python_with_env(&project, None, None), local);
+    }
+
+    #[test]
+    fn discover_python_env_var_precedence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        make_env(&project, ".venv");
+        let virt = make_env(tmp.path(), "virt");
+        let conda = make_env(tmp.path(), "conda");
+        let virt_dir = tmp.path().join("virt").into_os_string();
+        let conda_dir = tmp.path().join("conda").into_os_string();
+
+        // VIRTUAL_ENV beats CONDA_PREFIX and project venvs.
+        assert_eq!(
+            discover_python_with_env(&project, Some(virt_dir.clone()), Some(conda_dir.clone())),
+            virt
+        );
+        // CONDA_PREFIX beats project venvs.
+        assert_eq!(
+            discover_python_with_env(&project, None, Some(conda_dir.clone())),
+            conda
+        );
+        // A bogus VIRTUAL_ENV falls through to CONDA_PREFIX.
+        let bogus = tmp.path().join("missing").into_os_string();
+        assert_eq!(
+            discover_python_with_env(&project, Some(bogus), Some(conda_dir)),
+            conda
+        );
     }
 
     #[test]
     fn resolve_python_relative_joins_config_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = Config::default();
-        cfg.config_dir = Some(tmp.path().to_path_buf());
-        cfg.python = Some("tools/venv/bin/python".into());
+        let cfg = Config {
+            config_dir: Some(tmp.path().to_path_buf()),
+            python: Some("tools/venv/bin/python".into()),
+            ..Default::default()
+        };
         assert_eq!(
             resolve_python(&cfg),
             tmp.path().join("tools/venv/bin/python")
@@ -1042,8 +1138,10 @@ mod tests {
     #[test]
     fn resolve_python_keeps_absolute_and_bare_names() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = Config::default();
-        cfg.config_dir = Some(tmp.path().to_path_buf());
+        let mut cfg = Config {
+            config_dir: Some(tmp.path().to_path_buf()),
+            ..Default::default()
+        };
 
         let abs = std::env::current_dir().unwrap().join("py");
         cfg.python = Some(abs.to_string_lossy().into_owned());
@@ -1056,7 +1154,7 @@ mod tests {
     #[test]
     fn discover_python_falls_back_to_system() {
         let tmp = tempfile::tempdir().unwrap();
-        let found = discover_python(tmp.path());
+        let found = discover_python_with_env(tmp.path(), None, None);
         let expected = if cfg!(windows) {
             "python.exe"
         } else {

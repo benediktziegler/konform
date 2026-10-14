@@ -1433,6 +1433,35 @@ fn patch_ruff_config(
     }
 }
 
+/// Why `clean` must not delete `cache_path`, or `None` when it is safe.
+///
+/// Only canonical forms are compared; if any of them cannot be resolved the
+/// removal cannot be proven safe, so it is refused.
+fn clean_refusal(cache_path: &Path, repo_root: &Path, cwd: &Path) -> Option<&'static str> {
+    let Ok(target) = cache_path.canonicalize() else {
+        return Some("its location could not be resolved");
+    };
+    for protected in [repo_root, cwd] {
+        match protected.canonicalize() {
+            Ok(p) if p.starts_with(&target) => {
+                return Some(
+                    "it is the repository root, the current directory, or one of their ancestors",
+                );
+            }
+            Ok(_) => {}
+            Err(_) => {
+                return Some("the repository root or current directory could not be resolved");
+            }
+        }
+    }
+    if !cache_path.join("CACHEDIR.TAG").is_file() {
+        return Some(
+            "it does not contain a CACHEDIR.TAG, so it does not look like a konform cache",
+        );
+    }
+    None
+}
+
 fn run_clean(args: CleanArgs) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let config = load_config(Some(&cwd), args.config.as_deref());
@@ -1451,26 +1480,9 @@ fn run_clean(args: CleanArgs) {
         eprintln!("Cache directory not found: {}", cache_path.display());
         return;
     }
-    let refuse = |why: &str| -> ! {
+    if let Some(why) = clean_refusal(&cache_path, &repo_root, &cwd) {
         eprintln!("error: refusing to remove {}: {why}", cache_path.display());
         std::process::exit(1);
-    };
-    // Compare canonical forms only; if any of them cannot be resolved we
-    // cannot prove the removal is safe.
-    let Ok(target) = cache_path.canonicalize() else {
-        refuse("its location could not be resolved");
-    };
-    for protected in [&repo_root, &cwd] {
-        match protected.canonicalize() {
-            Ok(p) if p.starts_with(&target) => refuse(
-                "it is the repository root, the current directory, or one of their ancestors",
-            ),
-            Ok(_) => {}
-            Err(_) => refuse("the repository root or current directory could not be resolved"),
-        }
-    }
-    if !cache_path.join("CACHEDIR.TAG").is_file() {
-        refuse("it does not contain a CACHEDIR.TAG, so it does not look like a konform cache");
     }
     match std::fs::remove_dir_all(&cache_path) {
         Ok(()) => eprintln!("Removed cache directory: {}", cache_path.display()),
@@ -1951,5 +1963,66 @@ mod noqa_tests {
         let src = "x = 1  # noqa: E501 legacy\n";
         assert!(add_noqa_to_source(src, &[viol("KNQ002", 1)], Some("why")).is_none());
         assert!(add_noqa_to_source(src, &[viol("KNQ002", 1)], None).is_none());
+    }
+}
+
+#[cfg(test)]
+mod clean_refusal_tests {
+    use super::*;
+
+    fn tagged_cache(root: &Path) -> PathBuf {
+        let cache = root.join(".konform_cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("CACHEDIR.TAG"), "").unwrap();
+        cache
+    }
+
+    #[test]
+    fn allows_a_tagged_cache_below_the_repo_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tagged_cache(tmp.path());
+        assert_eq!(clean_refusal(&cache, tmp.path(), tmp.path()), None);
+    }
+
+    #[test]
+    fn refuses_an_unresolvable_cache_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        let why = clean_refusal(&missing, tmp.path(), tmp.path()).unwrap();
+        assert!(why.contains("location could not be resolved"), "{why}");
+    }
+
+    #[test]
+    fn refuses_an_unresolvable_repo_root_or_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tagged_cache(tmp.path());
+        let missing = tmp.path().join("missing");
+        let missing = missing.as_path();
+        for (root, cwd) in [(missing, tmp.path()), (tmp.path(), missing)] {
+            let why = clean_refusal(&cache, root, cwd).unwrap();
+            assert!(why.contains("could not be resolved"), "{why}");
+        }
+    }
+
+    #[test]
+    fn refuses_the_repo_root_and_its_ancestors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("CACHEDIR.TAG"), "").unwrap();
+        std::fs::write(tmp.path().join("CACHEDIR.TAG"), "").unwrap();
+        for target in [root.as_path(), tmp.path()] {
+            let why = clean_refusal(target, &root, &root).unwrap();
+            assert!(why.contains("repository root"), "{why}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_directory_without_the_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("build");
+        std::fs::create_dir(&dir).unwrap();
+        let why = clean_refusal(&dir, tmp.path(), tmp.path()).unwrap();
+        assert!(why.contains("CACHEDIR.TAG"), "{why}");
     }
 }

@@ -2,6 +2,7 @@
 
 ### Feat
 
+- **lsp**: load config from the workspace root
 - **config**: discover VIRTUAL_ENV, CONDA_PREFIX and parent venvs
 
 ### Fix

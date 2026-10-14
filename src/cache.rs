@@ -34,6 +34,20 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Entries not visited within this many days are evicted on [`Cache::persist`].
 const EVICT_DAYS: u64 = 30;
 
+/// Upper bound on bytes (and container allocations) accepted when decoding a
+/// cache file, so a corrupt length prefix errors instead of aborting on a huge
+/// preallocation.
+const MAX_DECODE_BYTES: usize = 256 * 1024 * 1024;
+
+/// Bincode configuration shared by encoding and decoding.
+fn bincode_config() -> bincode::config::Configuration<
+    bincode::config::LittleEndian,
+    bincode::config::Varint,
+    bincode::config::Limit<MAX_DECODE_BYTES>,
+> {
+    bincode::config::standard().with_limit::<MAX_DECODE_BYTES>()
+}
+
 // ---------------------------------------------------------------------------
 // On-disk data structures
 // ---------------------------------------------------------------------------
@@ -339,7 +353,7 @@ impl Cache {
             Ok(f) => {
                 match bincode::decode_from_reader::<PackageCache, _, _>(
                     BufReader::new(f),
-                    bincode::config::standard(),
+                    bincode_config(),
                 ) {
                     Ok(mut pkg) => {
                         if pkg.package_root != root_str {
@@ -438,7 +452,7 @@ impl Cache {
         let cutoff = now_ms.saturating_sub(EVICT_DAYS * 24 * 3600 * 1000);
         self.package.files.retain(|_, e| e.last_seen >= cutoff);
 
-        let bytes = bincode::encode_to_vec(&self.package, bincode::config::standard())?;
+        let bytes = bincode::encode_to_vec(&self.package, bincode_config())?;
 
         // Atomic write: encode to .tmp, then rename.
         let tmp = self.path.with_extension("tmp");
@@ -709,6 +723,22 @@ mod tests {
     }
 
     // ── LRU eviction ─────────────────────────────────────────────────────
+
+    #[test]
+    fn corrupt_length_prefix_yields_empty_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.py");
+        std::fs::write(&file, "x = 1\n").unwrap();
+        let _ = init(tmp.path());
+        let hash = settings_hash(tmp.path(), &[], &[], "error", 0, 0);
+        let path = tmp.path().join(VERSION).join(format!("{hash:016x}"));
+        // Varint marker 0xFF = u64 follows; claim a ~2^64 byte string.
+        std::fs::write(&path, [0xFFu8; 16]).unwrap();
+
+        let c = open_cache(tmp.path(), &[], &[]);
+        let key = FileCacheKey::from_path(&file).unwrap();
+        assert!(c.get(&file, &key).is_none());
+    }
 
     #[test]
     fn persist_evicts_entries_older_than_30_days() {

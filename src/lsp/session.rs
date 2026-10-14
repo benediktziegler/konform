@@ -27,20 +27,29 @@ fn file_path(uri_path: &str) -> PathBuf {
 
 fn file_path_for(uri_path: &str, windows: bool) -> PathBuf {
     let decoded = percent_decode(uri_path);
-    match decoded.as_bytes() {
-        [b'/', drive, b':', ..] if windows && drive.is_ascii_alphabetic() => {
-            PathBuf::from(&decoded[1..])
-        }
-        _ => PathBuf::from(decoded),
-    }
+    let bytes = match decoded.as_slice() {
+        [b'/', drive, b':', ..] if windows && drive.is_ascii_alphabetic() => &decoded[1..],
+        _ => &decoded[..],
+    };
+    bytes_to_path(bytes)
 }
 
-/// Decode `%XX` escapes as UTF-8. Invalid escapes (`%zz`, a truncated `%4`)
-/// are kept as-is, and bytes that do not form valid UTF-8 become U+FFFD.
-fn percent_decode(s: &str) -> String {
-    if !s.contains('%') {
-        return s.to_owned();
-    }
+/// On Unix a file name is an arbitrary byte string, so keep the decoded bytes
+/// as they are; a lossy UTF-8 conversion would name a different file.
+#[cfg(unix)]
+fn bytes_to_path(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+}
+
+#[cfg(not(unix))]
+fn bytes_to_path(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// Decode `%XX` escapes into raw bytes. Invalid escapes (`%zz`, a truncated
+/// `%4`) are kept as-is.
+fn percent_decode(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -55,7 +64,7 @@ fn percent_decode(s: &str) -> String {
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+    out
 }
 
 fn hex(b: u8) -> Option<u8> {
@@ -351,10 +360,13 @@ mod tests {
 
     #[test]
     fn percent_escapes_are_decoded() {
-        assert_eq!(percent_decode("/my%20dir/a.py"), "/my dir/a.py");
+        assert_eq!(percent_decode("/my%20dir/a.py"), b"/my dir/a.py");
         // Multi-byte UTF-8 (lower and upper case hex).
-        assert_eq!(percent_decode("/caf%C3%A9/%c3%bc.py"), "/café/ü.py");
-        assert_eq!(percent_decode("/plain/a.py"), "/plain/a.py");
+        assert_eq!(
+            String::from_utf8(percent_decode("/caf%C3%A9/%c3%bc.py")).unwrap(),
+            "/café/ü.py"
+        );
+        assert_eq!(percent_decode("/plain/a.py"), b"/plain/a.py");
         assert_eq!(
             file_path_for("/D:/my%20dir/a.py", true),
             PathBuf::from("D:/my dir/a.py")
@@ -363,12 +375,25 @@ mod tests {
     }
 
     #[test]
+    fn an_encoded_drive_colon_is_still_a_drive() {
+        assert_eq!(file_path_for("/c%3A/a", true), PathBuf::from("c:/a"));
+        assert_eq!(file_path_for("/c%3A/a", false), PathBuf::from("/c:/a"));
+    }
+
+    #[test]
     fn invalid_percent_escapes_are_left_alone() {
-        assert_eq!(percent_decode("/a%zz/b"), "/a%zz/b");
-        assert_eq!(percent_decode("/a%4"), "/a%4");
-        assert_eq!(percent_decode("/a%"), "/a%");
-        assert_eq!(percent_decode("/100%25"), "/100%");
-        // Invalid UTF-8 degrades to the replacement character.
-        assert_eq!(percent_decode("/a%FFb"), "/a\u{FFFD}b");
+        assert_eq!(percent_decode("/a%zz/b"), b"/a%zz/b");
+        assert_eq!(percent_decode("/a%4"), b"/a%4");
+        assert_eq!(percent_decode("/a%"), b"/a%");
+        assert_eq!(percent_decode("/100%25"), b"/100%");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_file_names_survive_decoding() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = file_path_for("/d/caf%E9.py", false);
+        assert_eq!(path.as_os_str().as_bytes(), b"/d/caf\xE9.py");
+        assert_eq!(percent_decode("/a%FFb"), b"/a\xFFb");
     }
 }

@@ -7,6 +7,7 @@
 
 ### Fix
 
+- **probe**: kill the interpreter after a timeout
 - **lsp**: rebuild module probe on config reload
 - **lsp**: percent-decode document URIs
 - **cli**: make clean robust to cwd, refuse when paths cannot be canonicalized

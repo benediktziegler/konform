@@ -75,7 +75,7 @@ fn workspace_root(init_params: &serde_json::Value) -> Option<PathBuf> {
     // Only a local path: a `file://host/share` URI names another machine.
     if uri
         .authority()
-        .is_some_and(|a| !a.as_str().is_empty() && a.as_str() != "localhost")
+        .is_some_and(|a| !a.as_str().is_empty() && !a.as_str().eq_ignore_ascii_case("localhost"))
     {
         return None;
     }
@@ -104,6 +104,9 @@ mod tests {
         let params = json!({ "rootUri": "file:///proj", "workspaceFolders": [] });
         assert_eq!(workspace_root(&params), Some(PathBuf::from("/proj")));
         let params = json!({ "rootUri": "file://localhost/proj" });
+        assert_eq!(workspace_root(&params), Some(PathBuf::from("/proj")));
+        // The host is case-insensitive.
+        let params = json!({ "rootUri": "file://LocalHost/proj" });
         assert_eq!(workspace_root(&params), Some(PathBuf::from("/proj")));
     }
 

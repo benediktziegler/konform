@@ -64,7 +64,6 @@ jobs:
         with:
           python-version: "3.13"
           architecture: ${{ matrix.target }}
-          allow-prereleases: true
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -210,6 +209,7 @@ jobs:
         with:
           subject-path: |
             wheels/*/*.whl
+            wheels/*/*.tar.gz
             binaries/*/konform*
 
       - name: Flatten wheels directory

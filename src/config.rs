@@ -567,6 +567,21 @@ pub fn discover_python(project_root: &Path) -> PathBuf {
     PathBuf::from(binary)
 }
 
+/// Resolve an explicit `python` setting. `~/` is expanded, relative paths
+/// (containing a separator) are joined to `config_dir`, and bare command
+/// names such as `python3` are left for `$PATH` lookup.
+fn resolve_explicit_python(setting: &str, config_dir: Option<&Path>) -> PathBuf {
+    let expanded = expand_home(setting);
+    let has_separator = setting.contains('/') || setting.contains('\\');
+    if expanded.is_absolute() || !has_separator {
+        return expanded;
+    }
+    match config_dir {
+        Some(dir) => dir.join(expanded),
+        None => expanded,
+    }
+}
+
 /// Resolve the Python interpreter to use for module probing.
 ///
 /// Priority:
@@ -575,7 +590,7 @@ pub fn discover_python(project_root: &Path) -> PathBuf {
 /// 3. `python3` / `python.exe` on `$PATH`
 pub fn resolve_python(config: &Config) -> PathBuf {
     if let Some(explicit) = &config.python {
-        return PathBuf::from(explicit);
+        return resolve_explicit_python(explicit, config.config_dir.as_deref());
     }
     if let Some(dir) = &config.config_dir {
         return discover_python(dir);
@@ -1010,6 +1025,32 @@ mod tests {
 
         let found = discover_python(tmp.path());
         assert_eq!(found, py);
+    }
+
+    #[test]
+    fn resolve_python_relative_joins_config_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.config_dir = Some(tmp.path().to_path_buf());
+        cfg.python = Some("tools/venv/bin/python".into());
+        assert_eq!(
+            resolve_python(&cfg),
+            tmp.path().join("tools/venv/bin/python")
+        );
+    }
+
+    #[test]
+    fn resolve_python_keeps_absolute_and_bare_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.config_dir = Some(tmp.path().to_path_buf());
+
+        let abs = std::env::current_dir().unwrap().join("py");
+        cfg.python = Some(abs.to_string_lossy().into_owned());
+        assert_eq!(resolve_python(&cfg), abs);
+
+        cfg.python = Some("python3".into());
+        assert_eq!(resolve_python(&cfg), PathBuf::from("python3"));
     }
 
     #[test]

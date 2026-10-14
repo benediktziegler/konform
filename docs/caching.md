@@ -18,13 +18,31 @@ Concurrent runs sharing a cache directory never corrupt it (each write goes to a
 temporary file and is renamed into place), but the last writer wins: entries
 added by another run in the meantime may be lost and are simply re-linted next time.
 
+## When the cache is written
+
+konform rewrites the cache file only when something changed: a file was
+(re-)linted, or an entry was dropped after an in-place fix. A run in which
+every file is a cache hit writes nothing, so repeated runs leave the file
+untouched.
+
+Each hit also refreshes the entry's "last used" time, which keeps it from
+expiring. To avoid a write on every run, this refresh is throttled: it is
+only written when at least one hit entry was last refreshed more than one day
+ago. Entries not used for 30 days are evicted whenever the file is written.
+
 ## Cache format and old caches
 
 Cache files are stored with [rkyv](https://rkyv.org) and begin with a short header
 (magic bytes plus a format version). Every file is validated before use. A file
-that is corrupt, larger than 256 MiB, or in any other format (for example the
-bincode format used by earlier development builds) is silently ignored and
-replaced by the next run, so no manual migration is needed.
+that cannot be used is ignored and replaced by the next run, so no manual
+migration is needed. konform stays silent for files that are expected after an
+upgrade: a missing file, a file in another format version, or a foreign file
+(for example the bincode format used by earlier development builds).
+
+For a file that looks like a current cache but is damaged, konform prints one
+warning to stderr naming the file and then starts from an empty cache. This
+covers a payload that fails validation, a read error other than "not found",
+and a file larger than 256 MiB.
 
 Each konform version keeps its cache in its own subdirectory of `cache-dir`.
 On startup, konform removes subdirectories of other released versions that

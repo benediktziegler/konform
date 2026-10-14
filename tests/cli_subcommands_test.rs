@@ -717,7 +717,7 @@ fn clean_removes_cache_dir_created_by_check() {
         .arg("clean")
         .assert()
         .success()
-        .stderr(contains("Removed cache directory: .kcache"));
+        .stderr(contains("Removed cache directory:").and(contains(".kcache")));
     assert!(!cache.exists());
 
     // Nothing left to clean is not an error.
@@ -837,6 +837,115 @@ fn clean_from_subdirectory_resolves_cache_against_repo_root() {
 
     konform(&sub).arg("clean").assert().success();
     assert!(!cache.exists());
+}
+
+#[test]
+fn clean_removes_absolute_cache_dir_and_prints_resolved_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let cache = elsewhere.path().join("abs_cache");
+    std::fs::create_dir(&cache).unwrap();
+    std::fs::write(cache.join("CACHEDIR.TAG"), "").unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        format!("[tool.konform]\ncache-dir = '{}'\n", cache.display()),
+    )
+    .unwrap();
+
+    konform(dir.path())
+        .arg("clean")
+        .assert()
+        .success()
+        .stderr(contains("Removed cache directory:").and(contains("abs_cache")));
+    assert!(!cache.exists());
+}
+
+#[test]
+fn clean_refuses_ancestor_cache_dir_when_cwd_is_not_the_repo_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path().join("proj");
+    let sub = proj.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(
+        proj.join("pyproject.toml"),
+        "[tool.konform]\ncache-dir = \"..\"\n",
+    )
+    .unwrap();
+    // A forged tag on the repo root's parent must not make it deletable.
+    std::fs::write(tmp.path().join("CACHEDIR.TAG"), "").unwrap();
+
+    konform(&sub)
+        .arg("clean")
+        .assert()
+        .failure()
+        .stderr(contains("refusing"));
+    assert!(proj.join("pyproject.toml").is_file());
+}
+
+#[test]
+fn clean_falls_back_to_tagged_cache_dir_below_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pyproject.toml"), "[tool.konform]\n").unwrap();
+    let sub = dir.path().join("sub");
+    let old = sub.join(".konform_cache");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("CACHEDIR.TAG"), "").unwrap();
+
+    konform(&sub)
+        .arg("clean")
+        .assert()
+        .success()
+        .stderr(contains("Removed cache directory:"));
+    assert!(!old.exists());
+
+    // An untagged directory of that name below the cwd is left alone.
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("keep.txt"), "x").unwrap();
+    konform(&sub)
+        .arg("clean")
+        .assert()
+        .success()
+        .stderr(contains("Cache directory not found"));
+    assert!(old.join("keep.txt").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_symlinked_cache_dir_removes_only_the_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = tempfile::tempdir().unwrap();
+    std::fs::write(real.path().join("CACHEDIR.TAG"), "").unwrap();
+    std::fs::write(real.path().join("entry"), "x").unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[tool.konform]\ncache-dir = \"link\"\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(real.path(), dir.path().join("link")).unwrap();
+
+    konform(dir.path()).arg("clean").assert().success();
+    assert!(dir.path().join("link").symlink_metadata().is_err());
+    assert!(real.path().join("entry").is_file(), "link target survives");
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_refuses_symlink_to_the_repo_root() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("CACHEDIR.TAG"), "").unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[tool.konform]\ncache-dir = \"link\"\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(dir.path(), dir.path().join("link")).unwrap();
+
+    konform(dir.path())
+        .arg("clean")
+        .assert()
+        .failure()
+        .stderr(contains("refusing"));
+    assert!(dir.path().join("pyproject.toml").is_file());
 }
 
 // ---------------------------------------------------------------------------

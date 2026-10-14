@@ -17,3 +17,16 @@ The cache is also keyed by every setting that affects results: `select`,
 Concurrent runs sharing a cache directory never corrupt it (each write goes to a
 temporary file and is renamed into place), but the last writer wins: entries
 added by another run in the meantime may be lost and are simply re-linted next time.
+
+## Cache format and old caches
+
+Cache files are stored with [rkyv](https://rkyv.org) and begin with a short header
+(magic bytes plus a format version). Every file is validated before use. A file
+that is corrupt, larger than 256 MiB, or in any other format (for example the
+bincode format used by earlier development builds) is silently ignored and
+replaced by the next run, so no manual migration is needed.
+
+Each konform version keeps its cache in its own subdirectory of `cache-dir`.
+On startup, konform removes subdirectories of other released versions that
+have not been modified for 30 days. `konform clean` removes the whole cache
+directory, including all versions.

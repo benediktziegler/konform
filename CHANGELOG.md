@@ -2,36 +2,19 @@
 
 ### Feat
 
-- **lsp**: load config from the workspace root
 - **config**: discover VIRTUAL_ENV, CONDA_PREFIX and parent venvs
 
 ### Fix
 
-- **lsp**: reload config without holding the session lock
-- **lsp**: keep non-UTF-8 file names and match localhost case-insensitively
-- **probe**: kill the interpreter after a timeout
-- **lsp**: rebuild module probe on config reload
-- **lsp**: percent-decode document URIs
-- **cli**: make clean robust to cwd, refuse when paths cannot be canonicalized
-- **git**: normalize .. components before walking up for the repo root
-- **cli**: lint .pyi files
-- **cli**: make clean resolve and verify the cache dir
-- **git**: walk up from relative paths when finding repo root
-- **cache**: enforce size limit on write, sweep stale temp files, drop Mutex
-- **cache**: refresh last_seen on cache hits
-- **cache**: use unique temp files when persisting
-- **cache**: cap bincode decode size
+- **lsp**: decode URIs, rebuild probe on reload, use workspace root (#103)
+- **cli**: repo root lookup, safe clean, and .pyi support (#105)
+- **cache**: harden decoding, persistence and eviction (#100)
 - **config**: prefer project venvs, bound the parent walk at the repo root
 - **config**: resolve relative python against config dir
 
-### Refactor
-
-- **cli**: extract clean safety checks into a testable helper
-- **cache**: replace bincode with rkyv
-
 ### Perf
 
-- **cache**: skip rewriting an unchanged cache and warn about a corrupt one
+- **cache**: skip needless cache writes and warn about corrupt cache files (#107)
 
 ## v0.5.0 (2026-10-13)
 

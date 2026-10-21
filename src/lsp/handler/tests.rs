@@ -47,10 +47,7 @@ impl TestServer {
         let thread = std::thread::spawn(move || {
             // Mirrors `lsp::run()`: the initialize handshake happens before
             // the main loop starts.
-            let caps = serde_json::to_value(server_capabilities()).unwrap();
-            server_conn
-                .initialize(caps)
-                .expect("initialize handshake failed");
+            initialize(&server_conn).expect("initialize handshake failed");
             main_loop(server_conn, session);
         });
 
@@ -75,6 +72,13 @@ impl TestServer {
     /// Perform the `initialize` + `initialized` handshake and return the
     /// capabilities the server advertised.
     fn initialize(&mut self) -> ServerCapabilities {
+        let result = self.initialize_result();
+        serde_json::from_value(result["capabilities"].clone())
+            .expect("capabilities should deserialize")
+    }
+
+    /// Perform the handshake and return the raw `InitializeResult`.
+    fn initialize_result(&mut self) -> serde_json::Value {
         let result = self.request(
             "initialize",
             serde_json::json!({
@@ -99,8 +103,7 @@ impl TestServer {
                 Err(_) => panic!("server did not register its watchers"),
             }
         }
-        serde_json::from_value(result["capabilities"].clone())
-            .expect("capabilities should deserialize")
+        result
     }
 
     fn fresh_id(&mut self) -> lsp_server::RequestId {
@@ -341,6 +344,22 @@ fn initialize_advertises_expected_capabilities() {
             Some(OneOf::Left(true))
         ),
         "range formatting"
+    );
+
+    server.shutdown();
+}
+
+#[test]
+fn initialize_reports_server_name_and_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    let result = server.initialize_result();
+
+    assert_eq!(result["serverInfo"]["name"], "konform");
+    assert_eq!(
+        result["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION"),
+        "serverInfo.version must track the crate version"
     );
 
     server.shutdown();

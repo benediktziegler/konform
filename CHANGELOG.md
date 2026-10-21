@@ -1,7 +1,8 @@
-## Unreleased
+## v0.6.0 (2026-10-21)
 
 ### Feat
 
+- **lsp**: include serverInfo in initialize response
 - **config**: discover VIRTUAL_ENV, CONDA_PREFIX and parent venvs
 
 ### Fix

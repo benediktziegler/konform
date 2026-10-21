@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name    = "konform"
-version = "0.5.0"
+version = "0.6.0"
 authors = [
   { name = "Benedikt Ziegler", email = "benediktziegler@gmail.com" },
 ]
@@ -53,10 +53,11 @@ version_files = [
     "extensions/zed-extension/Cargo.toml:^version",
     "extensions/zed-extension/extension.toml:# cz-sync",
 ]
-# Sync Cargo.lock files with the bumped versions (commit uses `git commit -a`)
+# Sync Cargo.lock and uv.lock files with the bumped versions (commit uses `git commit -a`)
 pre_bump_hooks = [
     "cargo update --workspace --offline",
     "cargo update --workspace --offline --manifest-path extensions/zed-extension/Cargo.toml",
+    "uv lock --default-index https://pypi.org/simple",
 ]
 
 [dependency-groups]

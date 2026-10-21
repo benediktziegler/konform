@@ -24,12 +24,7 @@ pub fn run() {
     let (connection, io_threads) = lsp_server::Connection::stdio();
 
     // ── LSP initialization handshake ──────────────────────────────────────
-    let server_caps = handler::server_capabilities();
-    let caps_value =
-        serde_json::to_value(server_caps).expect("ServerCapabilities must be serializable");
-    let init_params = connection
-        .initialize(caps_value)
-        .expect("initialization handshake failed");
+    let init_params = handler::initialize(&connection).expect("initialization handshake failed");
 
     // ── Load config from the workspace root, else the working directory ───
     let (root, notices) = resolve_root(&init_params, std::env::current_dir().unwrap_or_default());

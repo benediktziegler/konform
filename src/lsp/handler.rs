@@ -44,6 +44,23 @@ type PendingMap = HashMap<lsp_server::RequestId, PendingKind>;
 // Server capabilities advertised at initialize
 // ---------------------------------------------------------------------------
 
+/// Run the `initialize` handshake, replying with our capabilities and
+/// `serverInfo` (name + version, shown by editors such as Zed). Returns the
+/// client's `InitializeParams` as raw JSON.
+pub fn initialize(connection: &Connection) -> Result<serde_json::Value, lsp_server::ProtocolError> {
+    let (id, params) = connection.initialize_start()?;
+    let result = InitializeResult {
+        capabilities: server_capabilities(),
+        server_info: Some(ServerInfo {
+            name: "konform".to_string(),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        }),
+    };
+    let result = serde_json::to_value(result).expect("InitializeResult must be serializable");
+    connection.initialize_finish(id, result)?;
+    Ok(params)
+}
+
 /// Build the [`ServerCapabilities`] advertised during the `initialize` handshake.
 pub fn server_capabilities() -> ServerCapabilities {
     ServerCapabilities {

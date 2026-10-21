@@ -13,7 +13,46 @@ env:
   rust_version: "1.97"
 
 jobs:
+  # On tag pushes, hold the whole release until every other workflow run for
+  # the tagged commit (CI, Security Audit, Docs, ...) has finished green.
+  gate:
+    name: Wait for other checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Wait for checks on tagged commit
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Workflows that must have run for this commit (others are optional,
+          # e.g. Docs is path-filtered) but must pass if present.
+          required='["CI", "Security Audit"]'
+          while true; do
+            runs=$(gh run list --commit "$GITHUB_SHA" --limit 100 \
+              --json workflowName,status,conclusion,createdAt \
+              --jq 'map(select(.workflowName != "Release")) | group_by(.workflowName) | map(max_by(.createdAt))')
+            failed=$(jq -r '[.[] | select(.status == "completed" and (.conclusion | IN("success", "skipped", "neutral") | not)) | .workflowName] | join(", ")' <<< "$runs")
+            pending=$(jq -r '[.[] | select(.status != "completed")] | length' <<< "$runs")
+            missing=$(jq -r --argjson req "$required" '$req - map(.workflowName) | join(", ")' <<< "$runs")
+            if [ -n "$failed" ]; then
+              echo "::error::Checks failed for $GITHUB_SHA: $failed"
+              exit 1
+            fi
+            if [ "$pending" = "0" ] && [ -z "$missing" ]; then
+              echo "All checks passed for $GITHUB_SHA"
+              exit 0
+            fi
+            echo "Waiting... pending=$pending missing=[$missing]"
+            sleep 30
+          done
+
   linux:
+    needs: gate
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -34,6 +73,7 @@ jobs:
           path: dist
 
   musllinux:
+    needs: gate
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -54,6 +94,7 @@ jobs:
           path: dist
 
   windows:
+    needs: gate
     runs-on: windows-latest
     strategy:
       matrix:
@@ -77,6 +118,7 @@ jobs:
           path: dist
 
   macos:
+    needs: gate
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -104,6 +146,7 @@ jobs:
           path: dist
 
   sdist:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -120,6 +163,7 @@ jobs:
 
   build-binaries:
     name: Build standalone binaries
+    needs: gate
     runs-on: ${{ matrix.os }}
     if: startsWith(github.ref, 'refs/tags/')
     strategy:

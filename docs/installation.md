@@ -27,6 +27,16 @@ Verify the install:
 $ konform version
 ```
 
+## Verifying release artifacts
+
+Every wheel, sdist and standalone binary attached to a [GitHub release](https://github.com/benediktziegler/konform/releases) carries a signed [build provenance attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations), proving it was built by konform's release workflow from the tagged commit. Check a downloaded file with the [GitHub CLI](https://cli.github.com/):
+
+```console
+$ gh attestation verify konform-x86_64-unknown-linux-gnu --repo benediktziegler/konform
+```
+
+Add `--signer-workflow benediktziegler/konform/.github/workflows/release.yml` to also pin the workflow that produced it. Packages on PyPI additionally carry PyPI's own [publish attestations](https://docs.pypi.org/attestations/).
+
 ## Initialising a project
 
 `konform init` adds a `[tool.konform]` section to an existing `pyproject.toml` (after any Ruff blocks) (or creates `konform.toml` if there is none) and adds a `konform_patterns.toml`:

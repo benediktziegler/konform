@@ -20,7 +20,7 @@ use crate::config::Config;
 use crate::rules::{FileContext, FixTarget, NoqaAudit, Rule};
 use crate::types::Violation;
 use anyhow::Result;
-use globset::{Glob, GlobMatcher};
+use globset::GlobMatcher;
 use ruff_python_parser::parse_module;
 use std::path::Path;
 use std::sync::Arc;
@@ -160,22 +160,13 @@ fn apply_per_file_ignores(path: &Path, violations: &mut Vec<Violation>, config: 
     if config.lint.per_file_ignores.is_empty() || violations.is_empty() {
         return;
     }
-    let matchers: Vec<(GlobMatcher, Vec<String>)> = config
-        .lint
-        .per_file_ignores
-        .iter()
-        .filter_map(|(pat, codes)| {
-            Glob::new(pat)
-                .ok()
-                .map(|g| (g.compile_matcher(), codes.clone()))
-        })
-        .collect();
-    if matchers.is_empty() {
+    let compiled = config.per_file_ignores();
+    if compiled.matchers.is_empty() {
         return;
     }
     let config_dir = config.config_dir.as_deref();
-    let cwd = std::env::current_dir().ok();
-    violations.retain(|v| !per_file_ignored(path, &v.rule, &matchers, config_dir, cwd.as_deref()));
+    let cwd = compiled.cwd.as_deref();
+    violations.retain(|v| !per_file_ignored(path, &v.rule, &compiled.matchers, config_dir, cwd));
 }
 
 // ---------------------------------------------------------------------------

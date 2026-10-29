@@ -9,6 +9,7 @@ use crate::config::RuleSelection;
 use crate::module_probe::ModuleProbe;
 use crate::types::Violation;
 use anyhow::Result;
+use scope::{NamedSpan, ScopeIndex};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -45,8 +46,6 @@ pub struct FileContext {
     pub path: PathBuf,
     /// Full source text (UTF-8).
     pub source: String,
-    /// Source split into lines: 0-indexed, no trailing newlines.
-    pub lines: Vec<String>,
     /// When `true`, `# noqa` suppression comments are ignored.
     /// Propagated from `CheckInput::ignore_noqa` / `Config::ignore_noqa`.
     pub ignore_noqa: bool,
@@ -68,9 +67,31 @@ pub struct FileContext {
     /// What the other rules report with `# noqa` ignored. Set by the engine
     /// only for rules that ask for it (see [`Rule::audits_noqa`]).
     pub noqa_audit: Option<Arc<NoqaAudit>>,
-    /// Lazily parsed AST, shared by every rule and by clones of this context.
-    /// Always derived from `source`; see [`FileContext::parsed`].
-    parsed: Arc<OnceLock<Parsed<ModModule>>>,
+    /// Per-file data computed on first use and shared by every rule and by
+    /// clones of this context. Always derived from `source`.
+    shared: Arc<Shared>,
+}
+
+/// What several rules derive from the same source: each is computed once
+/// per file, on first use, instead of once per rule.
+#[derive(Default)]
+struct Shared {
+    /// See [`FileContext::parsed`].
+    parsed: OnceLock<Parsed<ModModule>>,
+    /// See [`FileContext::line_starts`].
+    line_starts: OnceLock<Vec<u32>>,
+    /// Byte range of each line's `# noqa` text; see [`FileContext::noqa_lines`].
+    noqa_ranges: OnceLock<Vec<(u32, u32)>>,
+    /// See [`FileContext::load_names`].
+    load_names: OnceLock<Vec<NamedSpan>>,
+    /// See [`FileContext::scope_index`].
+    scope_index: OnceLock<ScopeIndex>,
+}
+
+impl std::fmt::Debug for Shared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shared").finish_non_exhaustive()
+    }
 }
 
 /// Input for rules that judge `# noqa` comments by what they suppress (KNQ003).
@@ -98,11 +119,9 @@ impl FileContext {
     /// Used by the LSP, which keeps documents in memory rather than
     /// reading them on every lint request.
     pub fn from_source(path: PathBuf, source: String) -> Self {
-        let lines = source.lines().map(String::from).collect();
         Self {
             path,
             source,
-            lines,
             ignore_noqa: false,
             noqa_aliases: HashMap::new(),
             fix_target: None,
@@ -110,7 +129,7 @@ impl FileContext {
             fix_selection: RuleSelection::default(),
             unsafe_fixes: false,
             noqa_audit: None,
-            parsed: Arc::new(OnceLock::new()),
+            shared: Arc::default(),
         }
     }
 
@@ -120,7 +139,7 @@ impl FileContext {
     /// even for broken files; check [`FileContext::has_valid_syntax`] before
     /// trusting the tree. Must not be called after mutating `source`.
     pub fn parsed(&self) -> &Parsed<ModModule> {
-        self.parsed.get_or_init(|| {
+        self.shared.parsed.get_or_init(|| {
             ruff_python_parser::parse_unchecked_source(&self.source, PySourceType::Python)
         })
     }
@@ -165,14 +184,48 @@ impl FileContext {
     /// inside a string literal is ignored. Other file types (KPT can target
     /// them) fall back to the raw line text.
     pub fn noqa_lines(&self) -> Vec<&str> {
-        let is_python = self.is_python();
-        if is_python && self.source.contains("noqa") {
-            comment_lines(&self.source, self.parsed().tokens())
-        } else if is_python {
-            vec![""; self.lines.len()]
-        } else {
-            self.lines.iter().map(String::as_str).collect()
-        }
+        let ranges = self.shared.noqa_ranges.get_or_init(|| {
+            let is_python = self.is_python();
+            if is_python && self.source.contains("noqa") {
+                comment_ranges(&self.source, self.line_starts(), self.parsed().tokens())
+            } else if is_python {
+                vec![(0, 0); self.source.lines().count()]
+            } else {
+                let base = self.source.as_ptr() as usize;
+                self.source
+                    .lines()
+                    .map(|line| {
+                        let start = (line.as_ptr() as usize - base) as u32;
+                        (start, start + line.len() as u32)
+                    })
+                    .collect()
+            }
+        });
+        ranges
+            .iter()
+            .map(|&(start, end)| &self.source[start as usize..end as usize])
+            .collect()
+    }
+
+    /// Byte offset of the start of every line (see `scope::build_line_starts`).
+    pub(crate) fn line_starts(&self) -> &[u32] {
+        self.shared
+            .line_starts
+            .get_or_init(|| scope::build_line_starts(&self.source))
+    }
+
+    /// Every name read in Load context (see `scope::collect_load_names`).
+    pub(crate) fn load_names(&self) -> &[NamedSpan] {
+        self.shared
+            .load_names
+            .get_or_init(|| scope::collect_load_names(self.stmts()))
+    }
+
+    /// The names bound per scope (see `scope::build_scope_index`).
+    pub(crate) fn scope_index(&self) -> &ScopeIndex {
+        self.shared
+            .scope_index
+            .get_or_init(|| scope::build_scope_index(self.stmts()))
     }
 
     /// Should the fixer rewrite the violation of `rule` starting at
@@ -634,22 +687,21 @@ pub fn has_noqa(line: &str, code: &str, aliases: &HashMap<String, String>) -> bo
     })
 }
 
-/// Per-line text in which `# noqa` may appear: one entry per source line,
-/// holding that line's comment token (or `""` if it has none).
+/// Byte range of the text in which `# noqa` may appear, one entry per source
+/// line: that line's comment token, or `(0, 0)` (empty) if it has none.
 ///
 /// Going through tokens keeps `# noqa` inside string literals from
 /// suppressing anything. Works on syntactically broken files too.
-fn comment_lines<'a>(source: &'a str, tokens: &Tokens) -> Vec<&'a str> {
-    let mut out = vec![""; source.lines().count()];
-    let starts = scope::build_line_starts(source);
+fn comment_ranges(source: &str, starts: &[u32], tokens: &Tokens) -> Vec<(u32, u32)> {
+    let mut out = vec![(0, 0); source.lines().count()];
     for tok in tokens.iter() {
         if tok.kind() != TokenKind::Comment {
             continue;
         }
         let range = tok.range();
-        let (line, _) = scope::offset_to_line_col(&starts, range.start().to_u32());
+        let (line, _) = scope::offset_to_line_col(starts, range.start().to_u32());
         if let Some(slot) = out.get_mut(line - 1) {
-            *slot = &source[range.start().to_usize()..range.end().to_usize()];
+            *slot = (range.start().to_u32(), range.end().to_u32());
         }
     }
     out
@@ -726,6 +778,33 @@ mod noqa_alias_tests {
         let mut aliases = HashMap::new();
         aliases.insert("IS".to_owned(), "KIS".to_owned());
         assert!(has_noqa("x = 1  # noqa: IS", "KIS001", &aliases));
+    }
+}
+
+#[cfg(test)]
+mod shared_data_tests {
+    use super::*;
+
+    #[test]
+    fn per_file_data_is_computed_once_and_shared_with_clones() {
+        let ctx = FileContext::from_source(PathBuf::from("a.py"), "x = 1\ny = x\n".into());
+        let clone = ctx.clone();
+        assert!(std::ptr::eq(ctx.line_starts(), clone.line_starts()));
+        assert!(std::ptr::eq(ctx.load_names(), clone.load_names()));
+        assert!(std::ptr::eq(ctx.scope_index(), clone.scope_index()));
+        assert_eq!(ctx.line_starts(), [0, 6, 12]);
+        assert_eq!(ctx.load_names().len(), 1);
+    }
+
+    #[test]
+    fn noqa_lines_cover_every_line_for_each_file_kind() {
+        let py = FileContext::from_source(PathBuf::from("a.py"), "a\nb  # noqa\r\nc".into());
+        assert_eq!(py.noqa_lines(), ["", "# noqa", ""]);
+        assert_eq!(py.noqa_lines(), ["", "# noqa", ""], "cached result");
+        let quiet = FileContext::from_source(PathBuf::from("a.py"), "a\nb\n".into());
+        assert_eq!(quiet.noqa_lines(), ["", ""]);
+        let txt = FileContext::from_source(PathBuf::from("a.txt"), "a\r\nb # noqa\n".into());
+        assert_eq!(txt.noqa_lines(), ["a", "b # noqa"]);
     }
 }
 

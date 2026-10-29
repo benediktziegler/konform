@@ -24,7 +24,7 @@ pub use dump::dump as dump_ast;
 pub use schema::rules_schema;
 
 use super::kpt::{glob_matches, resolve_path};
-use super::scope::{build_line_starts, offset_to_line_col};
+use super::scope::offset_to_line_col;
 use super::{has_noqa, FileContext, Rule, RuleDoc, SelfTestReport};
 use crate::types::{Level, Violation};
 use anyhow::Result;
@@ -435,7 +435,7 @@ struct Walker<'a> {
     active: Vec<&'a CompiledRule>,
     imports: Imports,
     noqa: Vec<&'a str>,
-    line_starts: Vec<u32>,
+    line_starts: &'a [u32],
     /// Ancestors of the node being visited, outermost first.
     path: Vec<Node<'a>>,
     out: Vec<Hit<'a>>,
@@ -456,8 +456,8 @@ impl<'a> Visitor<'a> for Walker<'a> {
                 continue;
             }
             let span = node.report_span(&self.ctx.source);
-            let (line, col) = offset_to_line_col(&self.line_starts, span.start);
-            let (end_line, end_col) = offset_to_line_col(&self.line_starts, span.end);
+            let (line, col) = offset_to_line_col(self.line_starts, span.start);
+            let (end_line, end_col) = offset_to_line_col(self.line_starts, span.end);
             let noqa = self.noqa.get(line - 1).copied().unwrap_or("");
             if !self.ctx.ignore_noqa && has_noqa(noqa, &rule.id, &self.ctx.noqa_aliases) {
                 continue;
@@ -500,7 +500,7 @@ fn run_rules<'a>(ctx: &'a FileContext, active: Vec<&'a CompiledRule>) -> Vec<Hit
         active,
         imports: Imports::collect(root),
         noqa: ctx.noqa_lines(),
-        line_starts: build_line_starts(&ctx.source),
+        line_starts: ctx.line_starts(),
         path: Vec::new(),
         out: Vec::new(),
     };

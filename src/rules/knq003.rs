@@ -29,7 +29,7 @@
 //! are left.
 
 use super::docs::{DocSection, Example, RuleDocs, RuleOption};
-use super::scope::{build_line_starts, offset_to_line_col};
+use super::scope::offset_to_line_col;
 use super::{noqa_comments, rule_settings, FileContext, NoqaAudit, NoqaComment, Rule};
 use crate::types::{Level, Violation};
 use anyhow::Result;
@@ -68,15 +68,15 @@ fn findings(ctx: &FileContext) -> Vec<Finding> {
         return Vec::new();
     };
     let source = ctx.source.as_str();
-    let line_starts = build_line_starts(source);
+    let line_starts = ctx.line_starts();
 
     let mut out = Vec::new();
     for NoqaComment { start, end, noqa } in noqa_comments(ctx) {
         let Some(codes) = noqa.codes.as_deref() else {
             continue; // bare `# noqa`: may serve another tool
         };
-        let (line, col) = offset_to_line_col(&line_starts, (start + noqa.start) as u32);
-        let (_, end_col) = offset_to_line_col(&line_starts, (start + noqa.end) as u32);
+        let (line, col) = offset_to_line_col(line_starts, (start + noqa.start) as u32);
+        let (_, end_col) = offset_to_line_col(line_starts, (start + noqa.end) as u32);
         let (used, unused): (Vec<&str>, Vec<&str>) = codes
             .iter()
             .partition(|code| !is_unused(code, line, audit, &ctx.noqa_aliases));

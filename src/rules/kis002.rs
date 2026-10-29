@@ -46,9 +46,8 @@
 
 use super::docs::{DocSection, Example, RuleDocs, RuleOption};
 use super::scope::{
-    bucket_for_offset, build_line_starts, build_scope_index, collect_all_exports,
-    collect_load_names, is_name_shadowed, offset_to_line_col, shadowed_at_occurrences_of,
-    NamedSpan, ScopeIndex,
+    bucket_for_offset, collect_all_exports, is_name_shadowed, offset_to_line_col,
+    shadowed_at_occurrences_of, NamedSpan, ScopeIndex,
 };
 use super::{has_noqa, FileContext, Rule};
 use crate::types::{Level, Violation};
@@ -450,10 +449,10 @@ fn collect_import_bindings_rec(stmts: &[Stmt], out: &mut HashMap<String, HashSet
 
 /// Everything `check` and `fix` need to decide which aliases are flagged and
 /// which of those can be fixed, computed once per file.
-struct AliasAnalysis {
+struct AliasAnalysis<'a> {
     cands: Vec<AliasCandidate>,
-    load_names: Vec<NamedSpan>,
-    scope_index: ScopeIndex,
+    load_names: &'a [NamedSpan],
+    scope_index: &'a ScopeIndex,
     bound_targets: HashMap<String, HashSet<String>>,
     all_exports: HashSet<String>,
     /// `alias_start` of aliases that are legitimate by convention (several
@@ -464,17 +463,18 @@ struct AliasAnalysis {
     fix_collisions: HashSet<u32>,
 }
 
-impl AliasAnalysis {
+impl<'a> AliasAnalysis<'a> {
     /// `None` when there are no parseable statements.
-    fn new(stmts: &[Stmt], template: Option<&AliasTemplate>) -> Option<Self> {
+    fn new(ctx: &'a FileContext, template: Option<&AliasTemplate>) -> Option<Self> {
+        let stmts = ctx.stmts();
         if stmts.is_empty() {
             return None;
         }
-        let scope_index = build_scope_index(stmts);
+        let scope_index = ctx.scope_index();
         let cands = collect_alias_candidates(stmts);
-        let allowed_by_convention = collect_allowed_by_convention(&cands, &scope_index, template);
+        let allowed_by_convention = collect_allowed_by_convention(&cands, scope_index, template);
         let mut analysis = Self {
-            load_names: collect_load_names(stmts),
+            load_names: ctx.load_names(),
             bound_targets: collect_import_bindings(stmts),
             all_exports: collect_all_exports(stmts),
             cands,
@@ -514,14 +514,14 @@ impl AliasAnalysis {
             || self.bound_targets.contains_key(&cand.name)
             || is_name_shadowed(
                 &cand.name,
-                bucket_for_offset(&self.scope_index, cand.alias_start),
-                &self.scope_index,
+                bucket_for_offset(self.scope_index, cand.alias_start),
+                self.scope_index,
             )
             || shadowed_at_occurrences_of(
                 &cand.name,
                 &cand.asname,
-                &self.load_names,
-                &self.scope_index,
+                self.load_names,
+                self.scope_index,
             )
     }
 
@@ -532,8 +532,8 @@ impl AliasAnalysis {
         let no_local_shadow = !shadowed_at_occurrences_of(
             &cand.asname,
             &cand.asname,
-            &self.load_names,
-            &self.scope_index,
+            self.load_names,
+            self.scope_index,
         );
         let unambiguous_target = self
             .bound_targets
@@ -576,7 +576,7 @@ impl AliasAnalysis {
         let mut rejected: HashSet<u32> = HashSet::new();
         for cand in eligible {
             let key = (
-                bucket_for_offset(&self.scope_index, cand.alias_start),
+                bucket_for_offset(self.scope_index, cand.alias_start),
                 cand.name.as_str(),
             );
             if !claimed.insert(key) {
@@ -592,20 +592,19 @@ impl AliasAnalysis {
 // ---------------------------------------------------------------------------
 
 fn check_aliases(ctx: &FileContext, settings: &Kis002Settings) -> Vec<Violation> {
-    let source = ctx.source.as_str();
     let ignore_noqa = ctx.ignore_noqa;
     let noqa_aliases = &ctx.noqa_aliases;
-    let Some(analysis) = AliasAnalysis::new(ctx.stmts(), settings.template().as_ref()) else {
+    let Some(analysis) = AliasAnalysis::new(ctx, settings.template().as_ref()) else {
         return Vec::new();
     };
-    let line_starts = build_line_starts(source);
+    let line_starts = ctx.line_starts();
     let lines = ctx.noqa_lines();
 
     let mut violations = Vec::new();
     for (cand, fixable) in analysis.flagged() {
-        let (start_line, col) = offset_to_line_col(&line_starts, cand.alias_start);
+        let (start_line, col) = offset_to_line_col(line_starts, cand.alias_start);
         let (end_line, end_col_inclusive) =
-            offset_to_line_col(&line_starts, cand.alias_end.saturating_sub(1));
+            offset_to_line_col(line_starts, cand.alias_end.saturating_sub(1));
         let end_col = end_col_inclusive + 1;
 
         if !ignore_noqa {
@@ -654,8 +653,8 @@ fn check_aliases(ctx: &FileContext, settings: &Kis002Settings) -> Vec<Violation>
 
 fn apply_fixes(ctx: &FileContext, settings: &Kis002Settings) -> Option<String> {
     let source = ctx.source.as_str();
-    let analysis = AliasAnalysis::new(ctx.stmts(), settings.template().as_ref())?;
-    let line_starts = build_line_starts(source);
+    let analysis = AliasAnalysis::new(ctx, settings.template().as_ref())?;
+    let line_starts = ctx.line_starts();
     let lines = ctx.noqa_lines();
 
     let mut renames: HashMap<&str, &str> = HashMap::new();
@@ -666,7 +665,7 @@ fn apply_fixes(ctx: &FileContext, settings: &Kis002Settings) -> Option<String> {
             continue;
         }
 
-        let (line, col) = offset_to_line_col(&line_starts, cand.alias_start);
+        let (line, col) = offset_to_line_col(line_starts, cand.alias_start);
         if !ctx.wants_fix("KIS002", line, col) {
             continue;
         }
@@ -686,7 +685,7 @@ fn apply_fixes(ctx: &FileContext, settings: &Kis002Settings) -> Option<String> {
         return None;
     }
 
-    for occ in &analysis.load_names {
+    for occ in analysis.load_names {
         if let Some(new_name) = renames.get(occ.name.as_str()) {
             splices.push((occ.start, occ.end, (*new_name).to_owned()));
         }

@@ -1623,6 +1623,19 @@ mod noqa_tests {
         }
     }
 
+    #[test]
+    fn changed_files_are_asked_from_git_when_they_route_violations() {
+        let some = HashMap::from([("a.py".to_owned(), vec![viol("KIS001", 1)])]);
+        for (changed_level, format) in [
+            (Level::Warning, OutputFormat::Full),
+            (Level::Error, OutputFormat::Zuul),
+        ] {
+            // Whatever git reports here, it must match a direct query.
+            let changed = changed_files_for(&some, Level::Error, changed_level, format);
+            assert_eq!(changed.files, get_changed_files().files);
+        }
+    }
+
     // add_noqa: lines that can't take a comment ------------------------------
 
     #[test]

@@ -25,14 +25,15 @@
 //!   pattern(s) match the already-flagged line overrides `message` and `help`
 
 use super::docs::{DocSection, Example, RuleDocs, RuleOption};
+use super::scope::{build_line_starts, offset_to_line_col};
 use super::{has_noqa, FileContext, FixTarget, Rule, RuleDoc};
 use crate::types::{Level, Violation};
 use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use regex::Regex;
+use regex::{Regex, RegexSet};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -150,6 +151,10 @@ struct CompiledPattern {
     help: Option<String>,
     /// One or more compiled regexes: a match on any fires this rule.
     regexes: Vec<Regex>,
+    /// For line-by-line patterns, the regexes in multi-line mode, run once
+    /// over the whole file: no match there means no line can match, so the
+    /// per-line scan is skipped. `None` when that cannot be guaranteed.
+    prefilter: Option<RegexSet>,
     /// `None` → applies to every file; `Some` → only files matching any glob.
     files: Option<GlobSet>,
     level: Level,
@@ -334,6 +339,7 @@ impl Rule for KptRule {
         let noqa = ctx.noqa_lines();
         let mut violations = Vec::new();
         let cwd = std::env::current_dir().ok();
+        let line_starts = OnceLock::new();
 
         for pattern in patterns.iter() {
             if !ctx.is_enabled(&pattern.id)
@@ -347,17 +353,13 @@ impl Rule for KptRule {
                 // source text; one violation is reported per match.
                 for re in &pattern.regexes {
                     for m in re.find_iter(&ctx.source) {
-                        // Determine start line/col from the byte prefix.
-                        let prefix = &ctx.source[..m.start()];
-                        let line_0 = prefix.bytes().filter(|&b| b == b'\n').count();
-                        let line_num = line_0 + 1;
-                        let col = m.start() - prefix.rfind('\n').map(|p| p + 1).unwrap_or(0);
-
-                        // Determine end line/col.
-                        let end_prefix = &ctx.source[..m.end()];
-                        let end_line_0 = end_prefix.bytes().filter(|&b| b == b'\n').count();
-                        let end_line = end_line_0 + 1;
-                        let end_col = m.end() - end_prefix.rfind('\n').map(|p| p + 1).unwrap_or(0);
+                        // Line/column of both ends, by binary search over the
+                        // line starts (counting newlines in the prefix of
+                        // every match was quadratic in the file size).
+                        let starts = line_starts.get_or_init(|| build_line_starts(&ctx.source));
+                        let (line_num, col) = offset_to_line_col(starts, m.start() as u32);
+                        let (end_line, end_col) = offset_to_line_col(starts, m.end() as u32);
+                        let line_0 = line_num - 1;
 
                         // noqa is checked against the first line of the match.
                         let first_line = noqa.get(line_0).copied().unwrap_or("");
@@ -386,6 +388,13 @@ impl Rule for KptRule {
                     }
                 }
             } else {
+                if pattern
+                    .prefilter
+                    .as_ref()
+                    .is_some_and(|set| !set.is_match(&ctx.source))
+                {
+                    continue;
+                }
                 for (i, line) in lines.iter().enumerate() {
                     // Try all regexes and report the match with the widest span.
                     if let Some(m) = pattern
@@ -613,6 +622,23 @@ impl Rule for KptRule {
     }
 }
 
+/// A whole-file prefilter for line-by-line `regexes`: each compiled in
+/// multi-line and CRLF mode, so `^` and `$` match at every line (with or
+/// without `\r`). It can only match more than the per-line scan (a class
+/// such as `\s` may now span lines), never less, except for patterns that
+/// anchor to the start or end of the input or set their own flags: those get
+/// no prefilter.
+fn line_prefilter(regexes: &[Regex]) -> Option<RegexSet> {
+    let sources: Vec<&str> = regexes.iter().map(Regex::as_str).collect();
+    if sources
+        .iter()
+        .any(|s| s.contains("\\A") || s.contains("\\z") || s.contains("(?"))
+    {
+        return None;
+    }
+    RegexSet::new(sources.iter().map(|s| format!("(?mR){s}"))).ok()
+}
+
 // ---------------------------------------------------------------------------
 // Targeted fix helper
 // ---------------------------------------------------------------------------
@@ -625,12 +651,11 @@ fn replace_multiline_match_at(
     replacement: &str,
     target: &FixTarget,
 ) -> String {
+    let starts = build_line_starts(source);
     for re in &pattern.regexes {
         for caps in re.captures_iter(source) {
             let m = caps.get(0).expect("group 0 always matches");
-            let prefix = &source[..m.start()];
-            let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
-            let col = m.start() - prefix.rfind('\n').map_or(0, |p| p + 1);
+            let (line, col) = offset_to_line_col(&starts, m.start() as u32);
             if line == target.line && col == target.col {
                 let mut expanded = String::new();
                 caps.expand(replacement, &mut expanded);
@@ -770,6 +795,7 @@ fn compile_patterns(
             if regexes.is_empty() {
                 return None;
             }
+            let prefilter = (!is_multiline).then(|| line_prefilter(&regexes)).flatten();
 
             // Compile the file globs; skip bad globs with a diagnostic.
             let files = if file_globs.is_empty() {
@@ -843,6 +869,7 @@ fn compile_patterns(
                 message,
                 help,
                 regexes,
+                prefilter,
                 files,
                 level,
                 sub_rules,
@@ -1854,6 +1881,53 @@ multiline = true
         // noqa on the first line of the match suppresses the violation.
         let v = rule().check(&ctx("foo  # noqa: KPT001\nbar\n"), &cfg);
         assert!(v.is_empty());
+    }
+
+    #[test]
+    fn multiline_violation_end_position_is_correct() {
+        let cfg = cfg_with_rules(
+            "[[rules]]\nid = \"KPT001\"\nmessage = \"m\"\npattern = 'oo\\nba'\nmultiline = true\n",
+        );
+        let v = rule().check(&ctx("x\nfoo\nbar\nfoo\nbaz\n"), &cfg);
+        let spans: Vec<_> = v
+            .iter()
+            .map(|v| (v.line, v.col, v.end_line, v.end_col))
+            .collect();
+        assert_eq!(spans, [(2, 1, 3, 2), (4, 1, 5, 2)]);
+    }
+
+    // ── whole-file prefilter for line patterns ────────────────────────────
+
+    fn lines_hit(pattern: &str, source: &str) -> Vec<usize> {
+        let cfg = cfg_with_rules(&format!(
+            "[[rules]]\nid = \"KPT001\"\nmessage = \"m\"\npattern = '{pattern}'\n"
+        ));
+        rule()
+            .check(&ctx(source), &cfg)
+            .iter()
+            .map(|v| v.line)
+            .collect()
+    }
+
+    #[test]
+    fn prefilter_keeps_line_anchors_working() {
+        assert_eq!(lines_hit("^import os$", "x = 1\nimport os\n"), [2]);
+        assert_eq!(lines_hit("^import os$", "x = 1\r\nimport os\r\ny\r\n"), [2]);
+        assert_eq!(
+            lines_hit("^import os$", "x = 1\nimport osx\n"),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn patterns_that_need_the_per_line_scan_get_no_prefilter() {
+        let compile = |p: &str| line_prefilter(&[Regex::new(p).unwrap()]);
+        assert!(compile("^foo$").is_some());
+        assert!(compile("\\Afoo").is_none());
+        assert!(compile("foo\\z").is_none());
+        assert!(compile("(?i)foo").is_none());
+        // `\A` still means "start of each line" in the per-line scan.
+        assert_eq!(lines_hit("\\Afoo", "x\nfoo\n"), [2]);
     }
 
     // ── replacement / auto-fix ────────────────────────────────────────────

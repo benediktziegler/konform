@@ -11,6 +11,7 @@ use dashmap::DashMap;
 use ruff_python_ast::Stmt;
 use ruff_python_parser::parse_module;
 use seahash::SeaHasher;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -84,6 +85,134 @@ fn run_python_with_timeout(python: &Path, code: &str, timeout: Duration) -> Opti
     String::from_utf8(buf).ok()
 }
 
+/// Everything [`ModuleProbe`] needs from the interpreter, fetched in one call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct InterpreterInfo {
+    /// Raw `sys.path`; the `""` (working directory) entry is resolved later.
+    sys_path: Vec<String>,
+    /// `sys.stdlib_module_names` (Python 3.10+), else `sys.builtin_module_names`:
+    /// modules with no discoverable file on disk (e.g. `itertools`, `sys`).
+    builtin_modules: Vec<String>,
+    /// `site.getusersitepackages()`. Python adds it to `sys.path` only once
+    /// it exists, so its creation must invalidate a saved answer too.
+    user_site: Option<String>,
+}
+
+/// One interpreter call answering all of [`InterpreterInfo`].
+const INTERPRETER_QUERY: &str = "import json,sys\n\
+names = getattr(sys, 'stdlib_module_names', None) or sys.builtin_module_names\n\
+try:\n    import site; user_site = site.getusersitepackages()\n\
+except Exception:\n    user_site = None\n\
+print(json.dumps({'sys_path': sys.path, 'builtin_modules': list(names), 'user_site': user_site}))";
+
+/// Ask `python` for its [`InterpreterInfo`]; `None` if it could not be run.
+fn query_interpreter(python: &Path) -> Option<InterpreterInfo> {
+    let stdout = run_python(python, INTERPRETER_QUERY)?;
+    serde_json::from_str(stdout.trim()).ok()
+}
+
+/// Environment variables that change the interpreter's `sys.path`.
+const PATH_ENV_VARS: &[&str] = &[
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONSAFEPATH",
+    "PYTHONNOUSERSITE",
+    "PYTHONUSERBASE",
+    "PYTHONPLATLIBDIR",
+    "HOME",
+    "APPDATA",
+];
+
+/// The file a bare interpreter name (`python3`) runs: the first match on
+/// `PATH`. Paths with a directory part are taken as they are.
+fn resolve_executable(python: &Path) -> Option<PathBuf> {
+    if python.components().count() > 1 {
+        return std::path::absolute(python).ok();
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(python))
+        .find(|p| p.is_file())
+}
+
+/// Key of the saved [`InterpreterInfo`] for `python`, or `None` when the
+/// interpreter cannot be located (it is then queried, never cached).
+fn interpreter_key(python: &Path) -> Option<u64> {
+    let exe = resolve_executable(python)?;
+    // Follow symlinks (a venv's `python` links to the base interpreter) so
+    // upgrading the base interpreter changes the key.
+    let real = std::fs::canonicalize(&exe).ok()?;
+    let meta = std::fs::metadata(&real).ok()?;
+    let mut h = SeaHasher::new();
+    exe.hash(&mut h);
+    real.hash(&mut h);
+    meta.len().hash(&mut h);
+    dir_stamp(&real).hash(&mut h);
+    // A venv's `pyvenv.cfg` sits next to `bin/` (or `Scripts/`).
+    exe.parent()
+        .and_then(Path::parent)
+        .map(|env| dir_stamp(&env.join("pyvenv.cfg")))
+        .hash(&mut h);
+    for var in PATH_ENV_VARS {
+        std::env::var_os(var).hash(&mut h);
+    }
+    // Relative `PYTHONPATH` entries resolve against the working directory.
+    std::env::current_dir().ok().hash(&mut h);
+    Some(h.finish())
+}
+
+/// Modification time of `path` (seconds, nanoseconds), or `None` if it
+/// cannot be read (for example because it does not exist).
+fn dir_stamp(path: &Path) -> Option<(i64, u32)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = filetime::FileTime::from_last_modification_time(&meta);
+    Some((mtime.seconds(), mtime.nanoseconds()))
+}
+
+/// The directories whose mtimes guard a saved [`InterpreterInfo`]: every
+/// non-empty `sys.path` entry plus the user site directory.
+fn info_stamps(info: &InterpreterInfo) -> Vec<(String, Option<(i64, u32)>)> {
+    info.sys_path
+        .iter()
+        .filter(|p| !p.is_empty())
+        .chain(info.user_site.iter())
+        .map(|p| (p.clone(), dir_stamp(Path::new(p))))
+        .collect()
+}
+
+/// On-disk form of a saved [`InterpreterInfo`].
+#[derive(Serialize, Deserialize)]
+struct SavedInfo {
+    info: InterpreterInfo,
+    stamps: Vec<(String, Option<(i64, u32)>)>,
+}
+
+/// The [`InterpreterInfo`] saved in `file`, if present, readable, and still
+/// current (no guarded directory changed since it was saved).
+fn load_info(file: &Path) -> Option<InterpreterInfo> {
+    let bytes = std::fs::read(file).ok()?;
+    let saved: SavedInfo = serde_json::from_slice(&bytes).ok()?;
+    (info_stamps(&saved.info) == saved.stamps).then_some(saved.info)
+}
+
+/// Best-effort save of `info` to `file` (write to a temp file, then rename,
+/// so a concurrent run never reads a partial file).
+fn store_info(file: &Path, key: u64, info: &InterpreterInfo) {
+    let saved = SavedInfo {
+        info: info.clone(),
+        stamps: info_stamps(info),
+    };
+    let Ok(bytes) = serde_json::to_vec(&saved) else {
+        return;
+    };
+    // `<hash>.<pid>.<n>.tmp`, the name the cache's stale-temp sweep knows.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = file.with_file_name(format!("{key:016x}.{}.{n}.tmp", std::process::id()));
+    if std::fs::write(&tmp, bytes).is_err() || std::fs::rename(&tmp, file).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 /// Caches `(module_name, attr_name) -> is_module` probe results.
 pub struct ModuleProbe {
     /// Ordered list of directories to search, from `python3 -c "import sys,json; print(json.dumps(sys.path))"`.
@@ -125,18 +254,56 @@ impl ModuleProbe {
     /// to additionally search, mirroring Ruff's `src` setting (defaults to
     /// `[".", "src"]`).
     pub fn new(python: &Path, project_root: &Path, src_roots: &[String]) -> Self {
-        let sys_path_result = Self::get_sys_path(python, project_root, src_roots);
-        let builtin_modules_result = Self::get_builtin_modules(python);
-        // Both probes invoke the same interpreter; if either failed outright
-        // (binary missing, not executable, crashed, etc.) treat the whole
-        // probe as unusable rather than silently proceeding with empty
-        // data, which would make every import in the project look like an
-        // unresolvable package instead of surfacing the real problem: a
-        // broken/misconfigured `python`.
-        let probe_unusable = sys_path_result.is_none() || builtin_modules_result.is_none();
+        Self::from_info(query_interpreter(python), project_root, src_roots)
+    }
+
+    /// Like [`ModuleProbe::new`], but reuses the interpreter's answer saved
+    /// in `cache_dir` by an earlier run, so a run whose environment did not
+    /// change starts no Python process at all.
+    ///
+    /// The saved answer is keyed by the interpreter (its resolved path, size
+    /// and mtime), the environment variables that shape `sys.path`, and the
+    /// working directory. It is used only while every `sys.path` directory
+    /// (and the user site directory) still has the mtime it had when saved,
+    /// so installing a package or adding a `.pth` file re-queries.
+    pub fn new_cached(
+        python: &Path,
+        project_root: &Path,
+        src_roots: &[String],
+        cache_dir: &Path,
+    ) -> Self {
+        let info = match interpreter_key(python) {
+            Some(key) => {
+                let file = cache_dir.join(format!("{key:016x}.python"));
+                load_info(&file).or_else(|| {
+                    let info = query_interpreter(python)?;
+                    store_info(&file, key, &info);
+                    Some(info)
+                })
+            }
+            None => query_interpreter(python),
+        };
+        Self::from_info(info, project_root, src_roots)
+    }
+
+    /// Build a probe from the interpreter's answer; `None` (the interpreter
+    /// could not be run) yields an unusable probe rather than silently
+    /// proceeding with empty data, which would make every import in the
+    /// project look like an unresolvable package instead of surfacing the
+    /// real problem: a broken/misconfigured `python`.
+    fn from_info(info: Option<InterpreterInfo>, project_root: &Path, src_roots: &[String]) -> Self {
+        let probe_unusable = info.is_none();
+        let (sys_path, builtin_modules) = info
+            .map(|i| {
+                (
+                    Self::resolve_sys_path(i.sys_path, Some(project_root), src_roots),
+                    i.builtin_modules.into_iter().collect(),
+                )
+            })
+            .unwrap_or_default();
         Self {
-            sys_path: sys_path_result.unwrap_or_default(),
-            builtin_modules: builtin_modules_result.unwrap_or_default(),
+            sys_path,
+            builtin_modules,
             cache: DashMap::new(),
             root_cache: DashMap::new(),
             probe_unusable,
@@ -183,35 +350,6 @@ impl ModuleProbe {
             }
         }
         h.finish()
-    }
-
-    fn get_sys_path(
-        python: &Path,
-        project_root: &Path,
-        src_roots: &[String],
-    ) -> Option<Vec<PathBuf>> {
-        let stdout = run_python(python, "import json,sys; print(json.dumps(sys.path))")?;
-        let paths: Vec<String> = serde_json::from_str(stdout.trim()).ok()?;
-        Some(Self::resolve_sys_path(paths, Some(project_root), src_roots))
-    }
-
-    /// Ask the interpreter for the set of standard-library module names that
-    /// have no discoverable file on disk (built into the interpreter binary,
-    /// e.g. `itertools`, `sys`, `_thread`, `_abc`).
-    ///
-    /// `sys.stdlib_module_names` (Python 3.10+) covers the full standard
-    /// library, pure-Python and compiled alike. On older interpreters it
-    /// falls back to `sys.builtin_module_names`, which only covers modules
-    /// statically linked into the executable but is present on all versions.
-    fn get_builtin_modules(python: &Path) -> Option<HashSet<String>> {
-        let stdout = run_python(
-            python,
-            "import json,sys; \
-             names = getattr(sys, 'stdlib_module_names', None) or sys.builtin_module_names; \
-             print(json.dumps(list(names)))",
-        )?;
-        let names: Vec<String> = serde_json::from_str(stdout.trim()).ok()?;
-        Some(names.into_iter().collect())
     }
 
     /// Resolve the raw `sys.path` strings returned by the interpreter into
@@ -546,6 +684,100 @@ mod tests {
         let fail = script(dir.path(), "echo oops; exit 3");
         assert_eq!(run_python(&fail, "ignored"), None);
         assert_eq!(run_python(&dir.path().join("missing"), "x"), None);
+    }
+
+    /// A fake interpreter answering [`INTERPRETER_QUERY`] with `site_dir` as
+    /// its only `sys.path` entry, counting its runs in `<dir>/calls`.
+    #[cfg(unix)]
+    fn counting_python(dir: &Path, site_dir: &Path) -> PathBuf {
+        let calls = dir.join("calls");
+        script(
+            dir,
+            &format!(
+                "echo x >> '{}'\necho '{{\"sys_path\": [\"{}\"], \"builtin_modules\": [\"sys\"], \"user_site\": null}}'",
+                calls.display(),
+                site_dir.display()
+            ),
+        )
+    }
+
+    #[cfg(unix)]
+    fn calls(dir: &Path) -> usize {
+        fs::read_to_string(dir.join("calls")).map_or(0, |s| s.lines().count())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_interpreter_answers_the_query() {
+        let info = query_interpreter(Path::new("python3")).expect("python3 on PATH");
+        assert!(info.sys_path.iter().any(|p| !p.is_empty()));
+        assert!(info.builtin_modules.iter().any(|m| m == "sys"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_cached_reuses_the_saved_answer() {
+        let dir = TempDir::new().unwrap();
+        let site = dir.path().join("site");
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        let py = counting_python(dir.path(), &site);
+
+        let first = ModuleProbe::new_cached(&py, dir.path(), &[], &cache);
+        let second = ModuleProbe::new_cached(&py, dir.path(), &[], &cache);
+        assert_eq!(calls(dir.path()), 1, "second run must not start Python");
+        assert_eq!(first.sys_path, second.sys_path);
+        assert_eq!(first.builtin_modules, second.builtin_modules);
+        assert!(!second.probe_unusable());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_cached_requeries_when_a_sys_path_dir_changes() {
+        let dir = TempDir::new().unwrap();
+        let site = dir.path().join("site");
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        let py = counting_python(dir.path(), &site);
+
+        ModuleProbe::new_cached(&py, dir.path(), &[], &cache);
+        // Installing a package changes the site directory's mtime.
+        filetime::set_file_mtime(&site, filetime::FileTime::from_unix_time(1, 0)).unwrap();
+        ModuleProbe::new_cached(&py, dir.path(), &[], &cache);
+        assert_eq!(calls(dir.path()), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_cached_requeries_when_the_saved_file_is_damaged() {
+        let dir = TempDir::new().unwrap();
+        let site = dir.path().join("site");
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        let py = counting_python(dir.path(), &site);
+
+        ModuleProbe::new_cached(&py, dir.path(), &[], &cache);
+        for entry in fs::read_dir(&cache).unwrap() {
+            fs::write(entry.unwrap().path(), "not json").unwrap();
+        }
+        let probe = ModuleProbe::new_cached(&py, dir.path(), &[], &cache);
+        assert_eq!(calls(dir.path()), 2);
+        assert!(probe.builtin_modules.contains("sys"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_cached_does_not_save_a_failed_query() {
+        let dir = TempDir::new().unwrap();
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let py = script(dir.path(), "exit 1");
+
+        assert!(ModuleProbe::new_cached(&py, dir.path(), &[], &cache).probe_unusable());
+        assert_eq!(fs::read_dir(&cache).unwrap().count(), 0);
     }
 
     #[test]

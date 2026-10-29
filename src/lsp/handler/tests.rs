@@ -1607,7 +1607,7 @@ fn fake_python(path: &Path, lib: &Path) {
     std::fs::write(
         path,
         format!(
-            "#!/bin/sh\ncase \"$2\" in\n*stdlib_module_names*) echo '[]';;\n*) echo '[\"{}\"]';;\nesac\n",
+            "#!/bin/sh\necho '{{\"sys_path\": [\"{}\"], \"builtin_modules\": [], \"user_site\": null}}'\n",
             lib.display()
         ),
     )

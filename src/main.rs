@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use types::{Level, Violation};
+use types::{ChangedFiles, Level, Violation};
 
 // ---------------------------------------------------------------------------
 // File walking
@@ -73,6 +73,23 @@ fn walk_python_files(path: &Path, config: &config::Config) -> Vec<PathBuf> {
         files.push(p);
     }
     files
+}
+
+/// The files git reports as changed, which only matter when there are
+/// violations and either `--changed-files-level` differs from `--level` or
+/// the Zuul report routes them; otherwise git is not run at all.
+fn changed_files_for(
+    reported: &HashMap<String, Vec<Violation>>,
+    level: Level,
+    changed_files_level: Level,
+    output_format: OutputFormat,
+) -> ChangedFiles {
+    if reported.is_empty() || (changed_files_level == level && output_format != OutputFormat::Zuul)
+    {
+        ChangedFiles::default()
+    } else {
+        get_changed_files()
+    }
 }
 
 /// Strip a leading `./` component, matching ruff's relative-path reporting
@@ -468,8 +485,6 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
         cache::rules_fingerprint(&config, &active_rules),
     );
 
-    let changed_files = get_changed_files();
-
     // ── --show-files: print resolved file list and exit ──────────────────
     if args.show_files {
         if wants_stdin {
@@ -711,6 +726,12 @@ after a `\\` continuation); suppress it on another line or fix it",
     let reported = violations;
 
     let changed_files_level = args.changed_files_level.unwrap_or(args.level);
+    let changed_files = changed_files_for(
+        &reported,
+        args.level,
+        changed_files_level,
+        args.output_format,
+    );
     let exit_code = print_violations(
         &reported,
         &changed_files,
@@ -899,7 +920,12 @@ fn recheck_batch(files: &[PathBuf], ctx: &RecheckContext<'_>, cache: &mut Cache)
         let _ = cache.persist();
     }
 
-    let changed_files = get_changed_files();
+    let changed_files = changed_files_for(
+        &violations,
+        ctx.level,
+        ctx.changed_files_level,
+        ctx.output_format,
+    );
     print_violations(
         &violations,
         &changed_files,
@@ -1579,6 +1605,22 @@ mod noqa_tests {
 
     fn viol(rule: &str, line: usize) -> Violation {
         Violation::for_test(rule, line, "test")
+    }
+
+    // changed_files_for ------------------------------------------------------
+
+    #[test]
+    fn changed_files_are_not_needed_without_violations_or_a_separate_level() {
+        let none = HashMap::new();
+        let some = HashMap::from([("a.py".to_owned(), vec![viol("KIS001", 1)])]);
+        for (reported, changed_level, format) in [
+            (&none, Level::Warning, OutputFormat::Zuul),
+            (&some, Level::Error, OutputFormat::Full),
+            (&some, Level::Error, OutputFormat::Json),
+        ] {
+            let changed = changed_files_for(reported, Level::Error, changed_level, format);
+            assert!(changed.files.is_empty());
+        }
     }
 
     // add_noqa: lines that can't take a comment ------------------------------

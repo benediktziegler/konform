@@ -139,7 +139,7 @@ impl Violation {
 // ---------------------------------------------------------------------------
 
 /// The set of files considered "changed" for violation routing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ChangedFiles {
     pub files: HashSet<String>,
 }

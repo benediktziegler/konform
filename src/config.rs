@@ -1,9 +1,9 @@
 use crate::types::Level;
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{Glob, GlobMatcher, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // LintConfig
@@ -179,6 +179,40 @@ pub struct Config {
     /// The CLI exits on them; the language server shows them.
     #[serde(skip)]
     pub errors: Vec<String>,
+    /// `lint.per-file-ignores` compiled by [`Config::per_file_ignores`],
+    /// shared by clones of this config.
+    #[serde(skip)]
+    pub compiled_per_file_ignores: Arc<Mutex<Option<Arc<PerFileIgnores>>>>,
+}
+
+/// `lint.per-file-ignores` compiled to glob matchers, built once per run
+/// instead of once per file.
+#[derive(Debug)]
+pub struct PerFileIgnores {
+    /// The setting this was compiled from, to notice later edits.
+    source: HashMap<String, Vec<String>>,
+    /// One matcher per valid glob, with the codes it suppresses.
+    pub matchers: Vec<(GlobMatcher, Vec<String>)>,
+    /// The working directory when compiled; paths are also matched relative to it.
+    pub cwd: Option<PathBuf>,
+}
+
+impl PerFileIgnores {
+    fn compile(source: &HashMap<String, Vec<String>>) -> Self {
+        let matchers = source
+            .iter()
+            .filter_map(|(pat, codes)| {
+                Glob::new(pat)
+                    .ok()
+                    .map(|g| (g.compile_matcher(), codes.clone()))
+            })
+            .collect();
+        Self {
+            source: source.clone(),
+            matchers,
+            cwd: std::env::current_dir().ok(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -196,6 +230,7 @@ impl Default for Config {
             src: vec![".".to_owned(), "src".to_owned()],
             extends: vec![],
             errors: vec![],
+            compiled_per_file_ignores: Arc::default(),
         }
     }
 }
@@ -235,6 +270,24 @@ impl Config {
             extend_select: self.lint.extend_select.clone(),
             ignore: self.lint.ignore.clone(),
         }
+    }
+
+    /// `lint.per-file-ignores`, compiled on first use and reused until the
+    /// setting changes. Invalid globs are skipped.
+    pub fn per_file_ignores(&self) -> Arc<PerFileIgnores> {
+        let mut slot = self
+            .compiled_per_file_ignores
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(compiled) = slot
+            .as_ref()
+            .filter(|c| c.source == self.lint.per_file_ignores)
+        {
+            return Arc::clone(compiled);
+        }
+        let compiled = Arc::new(PerFileIgnores::compile(&self.lint.per_file_ignores));
+        *slot = Some(Arc::clone(&compiled));
+        compiled
     }
 
     /// The `exclude` and `extend-exclude` globs compiled into one set, or
@@ -1350,6 +1403,25 @@ mod tests {
             .expect("glob missing");
         assert!(codes.contains(&"KIS001".to_owned()));
         assert!(codes.contains(&"KPT".to_owned()));
+    }
+
+    #[test]
+    fn per_file_ignores_are_compiled_once_and_rebuilt_after_an_edit() {
+        let mut cfg = Config::default();
+        cfg.lint
+            .per_file_ignores
+            .insert("tests/**".into(), vec!["KIS001".into()]);
+        let first = cfg.per_file_ignores();
+        assert!(Arc::ptr_eq(&first, &cfg.per_file_ignores()));
+        assert!(Arc::ptr_eq(&first, &cfg.clone().per_file_ignores()));
+        assert_eq!(first.matchers.len(), 1);
+
+        cfg.lint
+            .per_file_ignores
+            .insert("[".into(), vec!["KIS002".into()]);
+        let second = cfg.per_file_ignores();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(second.matchers.len(), 1, "invalid globs are skipped");
     }
 
     #[test]

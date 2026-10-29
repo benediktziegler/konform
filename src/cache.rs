@@ -380,11 +380,16 @@ fn settings_hash(
 // init(): called once before the first cache access
 // ---------------------------------------------------------------------------
 
+/// The directory holding this konform version's cache files.
+pub fn version_dir(cache_root: &Path) -> PathBuf {
+    cache_root.join(VERSION)
+}
+
 /// Create the version sub-directory, `.gitignore`, and `CACHEDIR.TAG`.
 ///
 /// Safe to call on every run: existing files are left untouched.
 pub fn init(cache_root: &Path) -> Result<()> {
-    fs::create_dir_all(cache_root.join(VERSION))?;
+    fs::create_dir_all(version_dir(cache_root))?;
 
     // .gitignore: skip if already present
     match fs::OpenOptions::new()

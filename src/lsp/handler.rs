@@ -137,14 +137,14 @@ pub fn main_loop(connection: Connection, session: Arc<RwLock<Session>>) {
     loop {
         let msg = match connection.receiver.try_recv() {
             Ok(msg) => msg,
-            Err(e) if e.is_empty() => {
+            // Nothing queued (or the client is gone): publish, then wait.
+            Err(_) => {
                 flush_stale(&connection, &session, &mut stale);
                 match connection.receiver.recv() {
                     Ok(msg) => msg,
                     Err(_) => return,
                 }
             }
-            Err(_) => return,
         };
         match msg {
             Message::Request(req) => {

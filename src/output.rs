@@ -11,7 +11,7 @@ use crate::rules::Rule;
 use crate::theme;
 use crate::types::{ChangedFiles, Level, Violation};
 use std::collections::HashMap;
-use std::io::IsTerminal;
+use std::io::{BufWriter, IsTerminal, Write};
 use std::path::Path;
 
 /// Returns `true` when stderr should emit ANSI colour codes.
@@ -196,6 +196,9 @@ pub fn print_violations(
     }
 
     // ── Per-violation blocks ──────────────────────────────────────────────
+    // One locked, buffered writer: an unbuffered `eprintln!` per line costs
+    // a write syscall each, which dominates runs with many violations.
+    let mut err = BufWriter::new(std::io::stderr().lock());
     // Sort files for deterministic output.
     let mut paths: Vec<&String> = reported.keys().collect();
     paths.sort();
@@ -255,20 +258,20 @@ pub fn print_violations(
             } else {
                 String::new()
             };
-            eprintln!("{level_str}{code_str}{badge}: {}", pal.message(msg));
+            let _ = writeln!(err, "{level_str}{code_str}{badge}: {}", pal.message(msg));
 
             // ── Arrow: --> file:line:col ──────────────────────────────────
-            eprintln!("  {} {file_path}:{line}:{col}", pal.arrow("-->"));
+            let _ = writeln!(err, "  {} {file_path}:{line}:{col}", pal.arrow("-->"));
 
             // ── Help (optional) ───────────────────────────────────────────
             if !help.is_empty() {
                 // Strip "(fixable)" suffix: the [*] badge already shows it.
                 let help_text = help.strip_suffix(" (fixable)").unwrap_or(help);
-                eprintln!("  {}: {help_text}", pal.help_label("help"));
+                let _ = writeln!(err, "  {}: {help_text}", pal.help_label("help"));
             }
 
             // Blank line between violations (matches ruff spacing).
-            eprintln!();
+            let _ = writeln!(err);
         }
     }
 
@@ -287,32 +290,33 @@ pub fn print_violations(
                     if w == 1 { "" } else { "s" }
                 ),
             };
-            eprintln!("{found}");
+            let _ = writeln!(err, "{found}");
 
-            match (safe_fixable_count > 0, unsafe_fixable_count > 0) {
-                (true, false) => eprintln!(
+            let _ = match (safe_fixable_count > 0, unsafe_fixable_count > 0) {
+                (true, false) => writeln!(err,
                     "[{}] {} fixable with the `--fix` option.",
                     pal.summary_star(),
                     safe_fixable_count,
                 ),
-                (true, true) => eprintln!(
+                (true, true) => writeln!(err,
                     "[{}] {} fixable with the `--fix` option ({} hidden fix{} can be enabled with the `--unsafe-fixes` option).",
                     pal.summary_star(),
                     safe_fixable_count,
                     unsafe_fixable_count,
                     if unsafe_fixable_count == 1 { "" } else { "es" },
                 ),
-                (false, true) => eprintln!(
+                (false, true) => writeln!(err,
                     "[{}] {} fixable only with the `--unsafe-fixes` option.",
                     pal.summary_star(),
                     unsafe_fixable_count,
                 ),
-                (false, false) => {}
-            }
+                (false, false) => Ok(()),
+            };
         } else {
-            eprintln!("{}", pal.success("All checks passed!"));
+            let _ = writeln!(err, "{}", pal.success("All checks passed!"));
         }
     }
+    let _ = err.flush();
 
     exit_code_for(reported, changed_files, level, changed_files_level)
 }
@@ -529,6 +533,7 @@ fn print_violations_concise(
         return exit_code_for(reported, changed_files, level, changed_files_level);
     }
 
+    let mut err = BufWriter::new(std::io::stderr().lock());
     let mut paths: Vec<&String> = reported.keys().collect();
     paths.sort();
 
@@ -560,9 +565,13 @@ fn print_violations_concise(
                 .strip_prefix(&format!("{rule_code}: "))
                 .unwrap_or(raw_msg);
 
-            eprintln!("{file_path}:{line}:{col}: {level_str}{code_str}{fix_tag} {msg}");
+            let _ = writeln!(
+                err,
+                "{file_path}:{line}:{col}: {level_str}{code_str}{fix_tag} {msg}"
+            );
         }
     }
+    let _ = err.flush();
 
     exit_code_for(reported, changed_files, level, changed_files_level)
 }
@@ -915,13 +924,14 @@ pub fn print_statistics(
     let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
     sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
-    eprintln!();
+    let mut err = BufWriter::new(std::io::stderr().lock());
+    let _ = writeln!(err);
     for (code, count) in &sorted {
         let name = rule_names
             .get(code.as_str())
             .map(String::as_str)
             .unwrap_or("");
-        eprintln!("{count:>4}  {code:<10}  {name}");
+        let _ = writeln!(err, "{count:>4}  {code:<10}  {name}");
     }
 }
 

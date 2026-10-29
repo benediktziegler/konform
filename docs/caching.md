@@ -18,6 +18,18 @@ Concurrent runs sharing a cache directory never corrupt it (each write goes to a
 temporary file and is renamed into place), but the last writer wins: entries
 added by another run in the meantime may be lost and are simply re-linted next time.
 
+## The Python environment
+
+KIS001 asks the project's Python interpreter for its `sys.path` and its
+standard-library module names. konform saves that answer in the cache directory
+and reuses it, so a run in an unchanged environment starts no Python process.
+It asks the interpreter again when the interpreter itself changes, when one of
+`PYTHONPATH`, `PYTHONHOME`, `PYTHONSAFEPATH`, `PYTHONNOUSERSITE`,
+`PYTHONUSERBASE`, `PYTHONPLATLIBDIR` or the home directory changes, when konform runs from
+another directory, or when any `sys.path` directory or the user site directory
+changes (installing or removing a package, or adding a `.pth` file, does this).
+`--no-cache` always asks the interpreter.
+
 ## When the cache is written
 
 konform rewrites the cache file only when something changed: a file was

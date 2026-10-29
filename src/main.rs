@@ -416,7 +416,20 @@ fn run_check(args: CheckArgs, isolated: bool) {
         .config_dir
         .clone()
         .unwrap_or_else(|| repo_root.clone());
-    let probe = Arc::new(ModuleProbe::new(&python, &module_probe_root, &config.src));
+    let cache_root = repo_root.join(&config.cache_dir);
+    // Reuse the interpreter's answer from an earlier run when the
+    // environment is unchanged, so a warm run starts no Python process.
+    let probe = if args.no_cache || args.show_settings || cache::init(&cache_root).is_err() {
+        ModuleProbe::new(&python, &module_probe_root, &config.src)
+    } else {
+        ModuleProbe::new_cached(
+            &python,
+            &module_probe_root,
+            &config.src,
+            &cache::version_dir(&cache_root),
+        )
+    };
+    let probe = Arc::new(probe);
     if probe.probe_unusable() && !theme::is_quiet() {
         eprintln!(
             "{} could not run Python interpreter {:?} to resolve imports for KIS001 -- \
@@ -435,7 +448,6 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
     exit_on_config_errors(&config, &active_rules);
 
     let level_str = args.level.to_string();
-    let cache_root = repo_root.join(&config.cache_dir);
     let _ = cache::init(&cache_root);
     // `extend-select` changes which rules run, so it is part of the cache key.
     let selection_key: Vec<String> = config

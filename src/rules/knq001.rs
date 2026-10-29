@@ -42,7 +42,7 @@
 //!   for rules whose suppression explains itself (`exempt-codes`).
 
 use super::docs::{DocSection, Example, RuleDocs, RuleOption};
-use super::scope::{build_line_starts, offset_to_line_col};
+use super::scope::offset_to_line_col;
 use super::{noqa_comments, rule_settings, FileContext, NoqaComment, Rule};
 use crate::types::{Level, Violation};
 use serde::Deserialize;
@@ -100,7 +100,7 @@ impl Rule for Knq001Rule {
         let level = settings.level;
         let policy = Policy::new(&settings);
         let source = ctx.source.as_str();
-        let line_starts = build_line_starts(source);
+        let line_starts = ctx.line_starts();
 
         let mut violations = Vec::new();
         for NoqaComment { start, noqa, .. } in noqa_comments(ctx) {
@@ -121,8 +121,8 @@ impl Rule for Knq001Rule {
             } else {
                 continue;
             };
-            let (line, col) = offset_to_line_col(&line_starts, span.0 as u32);
-            let (_, end_col) = offset_to_line_col(&line_starts, span.1 as u32);
+            let (line, col) = offset_to_line_col(line_starts, span.0 as u32);
+            let (_, end_col) = offset_to_line_col(line_starts, span.1 as u32);
             violations.push(Violation {
                 rule: "KNQ001".to_owned(),
                 line,

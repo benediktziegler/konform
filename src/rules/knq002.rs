@@ -25,7 +25,7 @@
 //! rule that polices it.
 
 use super::docs::{DocSection, Example, RuleDocs, RuleOption};
-use super::scope::{build_line_starts, offset_to_line_col};
+use super::scope::offset_to_line_col;
 use super::{noqa_comments, rule_settings, FileContext, NoqaComment, Rule};
 use crate::types::{Level, Violation};
 use anyhow::Result;
@@ -61,11 +61,11 @@ fn findings(ctx: &FileContext) -> Vec<Finding> {
         return Vec::new();
     }
     let source = ctx.source.as_str();
-    let line_starts = build_line_starts(source);
+    let line_starts = ctx.line_starts();
 
     comments
         .iter()
-        .filter_map(|c| finding(c, source, &line_starts))
+        .filter_map(|c| finding(c, source, line_starts))
         .collect()
 }
 

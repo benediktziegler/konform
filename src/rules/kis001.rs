@@ -14,10 +14,7 @@
 //! ```
 
 use super::docs::{DocSection, Example, RuleDocs, RuleOption};
-use super::scope::{
-    build_line_starts, build_scope_index, collect_all_exports, collect_load_names,
-    offset_to_line_col, shadowed_at_occurrences_of,
-};
+use super::scope::{collect_all_exports, offset_to_line_col, shadowed_at_occurrences_of};
 use super::{has_noqa, FileContext, Rule};
 use crate::module_probe::{ModuleCheck, ModuleProbe};
 use crate::types::{Level, Violation};
@@ -257,13 +254,12 @@ struct FixInfo {
 ///
 /// Returns `(imports, all_exports)`.  On parse error both collections are
 /// empty so the caller silently skips the file.
-fn parse_ast(stmts: &[Stmt], source: &str) -> (Vec<ParsedImport>, HashSet<String>) {
+fn parse_ast(stmts: &[Stmt], line_starts: &[u32]) -> (Vec<ParsedImport>, HashSet<String>) {
     if stmts.is_empty() {
         return (vec![], HashSet::new());
     }
-    let line_starts = build_line_starts(source);
     let mut imports = Vec::new();
-    collect_imports(stmts, false, false, &line_starts, &mut imports);
+    collect_imports(stmts, false, false, line_starts, &mut imports);
     let exports = collect_all_exports(stmts);
     (imports, exports)
 }
@@ -577,14 +573,13 @@ fn check_imports(
     level: Level,
     unresolved_level: Option<Level>,
 ) -> Vec<Violation> {
-    let source = ctx.source.as_str();
     let ignore_noqa = ctx.ignore_noqa;
     let noqa_aliases = &ctx.noqa_aliases;
     let stmts = ctx.stmts();
     let lines = ctx.noqa_lines();
-    let (imports, all_exports) = parse_ast(stmts, source);
-    let scope_index = build_scope_index(stmts);
-    let load_names = collect_load_names(stmts);
+    let (imports, all_exports) = parse_ast(stmts, ctx.line_starts());
+    let scope_index = ctx.scope_index();
+    let load_names = ctx.load_names();
     let mut violations = Vec::new();
 
     let exception_set: HashSet<&str> = exceptions.iter().map(String::as_str).collect();
@@ -638,7 +633,7 @@ fn check_imports(
             }
 
             let name_shadowed =
-                shadowed_at_occurrences_of(effective, effective, &load_names, &scope_index);
+                shadowed_at_occurrences_of(effective, effective, load_names, scope_index);
             let candidate_fix = if name_shadowed {
                 None
             } else {
@@ -659,8 +654,8 @@ fn check_imports(
                     shadowed_at_occurrences_of(
                         &f.new_bound_name,
                         effective,
-                        &load_names,
-                        &scope_index,
+                        load_names,
+                        scope_index,
                     )
                 })
                 .map(|f| f.new_bound_name.clone());
@@ -773,9 +768,9 @@ fn apply_fixes(ctx: &FileContext, probe: &ModuleProbe, exceptions: &[String]) ->
     let lines: Vec<&str> = source.lines().collect();
     let noqa = ctx.noqa_lines();
     let stmts = ctx.stmts();
-    let (imports, all_exports) = parse_ast(stmts, source);
-    let scope_index = build_scope_index(stmts);
-    let load_names = collect_load_names(stmts);
+    let (imports, all_exports) = parse_ast(stmts, ctx.line_starts());
+    let scope_index = ctx.scope_index();
+    let load_names = ctx.load_names();
     let exception_set: HashSet<&str> = exceptions.iter().map(String::as_str).collect();
     let bound_targets = bound_import_targets(&imports, probe);
 
@@ -821,7 +816,7 @@ fn apply_fixes(ctx: &FileContext, probe: &ModuleProbe, exceptions: &[String]) ->
             if all_exports.contains(effective) || all_exports.contains(&alias.name) {
                 continue;
             }
-            if shadowed_at_occurrences_of(effective, effective, &load_names, &scope_index) {
+            if shadowed_at_occurrences_of(effective, effective, load_names, scope_index) {
                 // `effective`'s own occurrences aren't reliably reads of the
                 // import: a local binding of the same name shares the scope
                 // of at least one of them, and with no full scope resolution
@@ -844,8 +839,8 @@ fn apply_fixes(ctx: &FileContext, probe: &ModuleProbe, exceptions: &[String]) ->
                 if shadowed_at_occurrences_of(
                     &fix.new_bound_name,
                     effective,
-                    &load_names,
-                    &scope_index,
+                    load_names,
+                    scope_index,
                 ) {
                     // The fix would replace `effective`'s occurrences with
                     // `fix.new_bound_name.attr` -- but at (at least) one of
@@ -1184,15 +1179,15 @@ fn apply_fixes(ctx: &FileContext, probe: &ModuleProbe, exceptions: &[String]) ->
     // produces a `SyntaxError`. It also cannot tell a real code reference
     // apart from the same text appearing inside a string, docstring or
     // comment. AST Load-context spans have neither problem.
-    let line_starts = build_line_starts(source);
+    let line_starts = ctx.line_starts();
     let mut replacements: Vec<(usize, usize, usize, String)> = Vec::new();
 
-    for occ in collect_load_names(stmts) {
+    for occ in load_names {
         let Some(new_qualified) = renames.get(&occ.name) else {
             continue;
         };
-        let (start_line, col_start) = offset_to_line_col(&line_starts, occ.start);
-        let (end_line, col_end) = offset_to_line_col(&line_starts, occ.end);
+        let (start_line, col_start) = offset_to_line_col(line_starts, occ.start);
+        let (end_line, col_end) = offset_to_line_col(line_starts, occ.end);
         if start_line != end_line {
             continue; // a bare Name never spans multiple lines
         }
@@ -1266,7 +1261,7 @@ fn apply_fixes(ctx: &FileContext, probe: &ModuleProbe, exceptions: &[String]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::scope::parse_module_stmts;
+    use crate::rules::scope::{build_scope_index, parse_module_stmts};
     use std::path::PathBuf;
 
     fn rule() -> Kis001Rule {

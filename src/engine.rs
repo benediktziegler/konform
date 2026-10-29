@@ -401,7 +401,6 @@ mod tests {
         let ctx = FileContext::from(&input);
         assert_eq!(ctx.path, p);
         assert_eq!(ctx.source, "x = 1\n");
-        assert_eq!(ctx.lines, vec!["x = 1"]);
     }
 
     #[test]

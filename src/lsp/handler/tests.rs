@@ -282,6 +282,18 @@ impl TestServer {
     }
 }
 
+impl TestServer {
+    /// Drop the client end without `shutdown`/`exit`, as a crashed editor
+    /// would, and join the server thread.
+    fn disconnect(mut self) {
+        let thread = self.thread.take();
+        drop(self);
+        if let Some(t) = thread {
+            t.join().expect("server thread panicked");
+        }
+    }
+}
+
 fn file_uri(path: &std::path::Path) -> Uri {
     Uri::from_str(&file_uri_string(path)).expect("valid file URI")
 }
@@ -1790,4 +1802,16 @@ fn closing_a_document_with_a_pending_edit_leaves_it_cleared() {
     );
 
     server.shutdown();
+}
+
+#[test]
+fn the_server_stops_when_the_client_disconnects() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    server.initialize();
+    server.open(&uri, KIS001_SOURCE);
+    assert_eq!(server.next_diagnostics(&uri).diagnostics.len(), 1);
+
+    server.disconnect();
 }

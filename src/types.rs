@@ -35,15 +35,13 @@ impl std::str::FromStr for Level {
 }
 
 // ---------------------------------------------------------------------------
-// Violation  (Step 3: typed replacement for the serde_json::Value blobs)
+// Violation
 // ---------------------------------------------------------------------------
 
 /// A single rule violation produced by a checker.
 ///
-/// This is the typed equivalent of the `serde_json::Value` dicts that
-/// `checker.rs` currently returns.  The old dict format is preserved in
-/// `to_json()` so the cache, output, and LSP layers can migrate
-/// incrementally without a flag day.
+/// Violations stay typed from the engine through the cache to the output
+/// renderers; only the Zuul report uses the dict format of `to_json()`.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Violation {
@@ -69,11 +67,7 @@ pub struct Violation {
 
 #[allow(dead_code)]
 impl Violation {
-    /// Serialise to the Zuul / cache dict format used by the current code.
-    ///
-    /// Keeping this format stable lets the cache, output, and LSP layers
-    /// continue working without changes while the engine refactor
-    /// (Steps 4–11) progresses.
+    /// Serialise to the dict format of Zuul file comments.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "rule":    self.rule,
@@ -119,6 +113,24 @@ impl Violation {
                 .unwrap_or(Level::Error),
             fixable: v["fixable"].as_bool().unwrap_or(false),
         })
+    }
+}
+
+#[cfg(test)]
+impl Violation {
+    /// An error of `rule` on `line` (column 0), for tests.
+    pub fn for_test(rule: &str, line: usize, message: &str) -> Self {
+        Violation {
+            rule: rule.to_owned(),
+            line,
+            col: 0,
+            end_line: line,
+            end_col: 0,
+            message: message.to_owned(),
+            help: None,
+            level: Level::Error,
+            fixable: false,
+        }
     }
 }
 

@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use types::Level;
+use types::{Level, Violation};
 
 // ---------------------------------------------------------------------------
 // File walking
@@ -127,7 +127,7 @@ struct AddedNoqa {
 fn add_noqa(
     path: &Path,
     source: &str,
-    violations: &[serde_json::Value],
+    violations: &[Violation],
     reason: Option<&str>,
 ) -> AddedNoqa {
     use std::collections::{BTreeMap, BTreeSet};
@@ -139,8 +139,8 @@ fn add_noqa(
     // Collect rule codes per 1-based line number.
     let mut by_line: HashMap<usize, BTreeSet<String>> = HashMap::new();
     for v in violations {
-        let line_no = v.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
-        let rule = v.get("rule").and_then(|r| r.as_str()).unwrap_or("");
+        let line_no = v.line;
+        let rule = v.rule.as_str();
         if line_no == 0 || rule.is_empty() {
             continue;
         }
@@ -218,7 +218,7 @@ fn add_noqa(
 #[cfg(test)]
 fn add_noqa_to_source(
     source: &str,
-    violations: &[serde_json::Value],
+    violations: &[Violation],
     reason: Option<&str>,
 ) -> Option<String> {
     add_noqa(Path::new("x.py"), source, violations, reason).source
@@ -600,7 +600,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
     }
 
     // ── Check pass ────────────────────────────────────────────────────────
-    let mut violations: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    let mut violations: HashMap<String, Vec<Violation>> = HashMap::new();
     let mut uncached: Vec<&PathBuf> = Vec::new();
 
     for fp in &all_file_paths {
@@ -621,7 +621,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
             .build_global();
     }
 
-    let new_results: Vec<(PathBuf, Vec<serde_json::Value>)> = uncached
+    let new_results: Vec<(PathBuf, Vec<Violation>)> = uncached
         .par_iter()
         .map(|fp| {
             let source = match std::fs::read_to_string(*fp) {
@@ -630,11 +630,8 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
             };
             let mut input = CheckInput::new(fp, &source);
             input.ignore_noqa = config.ignore_noqa;
-            let json_viols = engine::run_check(&input, &active_rules, &config)
-                .into_iter()
-                .map(|v| v.to_json())
-                .collect();
-            ((*fp).clone(), json_viols)
+            let viols = engine::run_check(&input, &active_rules, &config);
+            ((*fp).clone(), viols)
         })
         .collect();
 
@@ -651,12 +648,9 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
     if let Some(ref src) = stdin_source {
         let mut input = CheckInput::new(&stdin_display, src);
         input.ignore_noqa = config.ignore_noqa;
-        let json_viols: Vec<serde_json::Value> = engine::run_check(&input, &active_rules, &config)
-            .into_iter()
-            .map(|v| v.to_json())
-            .collect();
-        if !json_viols.is_empty() {
-            violations.insert(stdin_display.to_string_lossy().into_owned(), json_viols);
+        let viols = engine::run_check(&input, &active_rules, &config);
+        if !viols.is_empty() {
+            violations.insert(stdin_display.to_string_lossy().into_owned(), viols);
         }
     }
 
@@ -714,7 +708,7 @@ after a `\\` continuation); suppress it on another line or fix it",
     }
 
     // ── Reporting ───────────────────────────────────────────────────────────────────
-    let reported = violations.clone();
+    let reported = violations;
 
     let changed_files_level = args.changed_files_level.unwrap_or(args.level);
     let exit_code = print_violations(
@@ -875,7 +869,7 @@ fn recheck_batch(files: &[PathBuf], ctx: &RecheckContext<'_>, cache: &mut Cache)
     let s = if n == 1 { "" } else { "s" };
     eprintln!("\n\u{2500}\u{2500}\u{2500} {n} file{s} changed, rechecking \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
 
-    let mut violations: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    let mut violations: HashMap<String, Vec<Violation>> = HashMap::new();
 
     for file_path in files {
         cache.invalidate(file_path);
@@ -889,19 +883,15 @@ fn recheck_batch(files: &[PathBuf], ctx: &RecheckContext<'_>, cache: &mut Cache)
         };
         let mut input = CheckInput::new(file_path, &source);
         input.ignore_noqa = ctx.config.ignore_noqa;
-        let json_viols: Vec<serde_json::Value> =
-            engine::run_check(&input, ctx.active_rules, ctx.config)
-                .into_iter()
-                .map(|v| v.to_json())
-                .collect();
+        let viols = engine::run_check(&input, ctx.active_rules, ctx.config);
 
         if !ctx.no_cache {
             if let Some(key) = FileCacheKey::from_path(file_path) {
-                cache.set_linted(file_path, &key, &json_viols);
+                cache.set_linted(file_path, &key, &viols);
             }
         }
-        if !json_viols.is_empty() {
-            violations.insert(file_path.to_string_lossy().to_string(), json_viols);
+        if !viols.is_empty() {
+            violations.insert(file_path.to_string_lossy().to_string(), viols);
         }
     }
 
@@ -1587,8 +1577,8 @@ mod watch_tests {
 mod noqa_tests {
     use super::*;
 
-    fn viol(rule: &str, line: u64) -> serde_json::Value {
-        serde_json::json!({"rule": rule, "line": line, "col": 1, "message": "test"})
+    fn viol(rule: &str, line: usize) -> Violation {
+        Violation::for_test(rule, line, "test")
     }
 
     // add_noqa: lines that can't take a comment ------------------------------
@@ -1812,11 +1802,7 @@ mod noqa_tests {
 
     #[test]
     fn add_noqa_source_ignores_violations_without_a_line_or_rule() {
-        let viols = vec![
-            serde_json::json!({"rule": "", "line": 1}),
-            serde_json::json!({"rule": "KIS001", "line": 0}),
-            serde_json::json!({"line": 1}),
-        ];
+        let viols = vec![viol("", 1), viol("KIS001", 0)];
         assert!(add_noqa_to_source("import os\n", &viols, None).is_none());
     }
 

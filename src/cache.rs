@@ -23,6 +23,7 @@
 
 use crate::config::Config;
 use crate::rules::Rule;
+use crate::types::{Level, Violation};
 use anyhow::Result;
 use owo_colors::OwoColorize;
 use rkyv::util::AlignedVec;
@@ -63,7 +64,7 @@ const MAX_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const MAGIC: &[u8; 8] = b"KONFCACH";
 
 /// Version of the on-disk layout. Bump when [`PackageCache`] changes shape.
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 /// Header length: magic + format version + padding to rkyv's 16-byte alignment.
 const HEADER_LEN: usize = 16;
@@ -177,46 +178,51 @@ struct FileCache {
 pub struct CachedViolation {
     pub rule: String,
     pub line: u32,
+    /// 0-based, as in [`Violation::col`].
     pub col: u32,
     pub end_line: u32,
+    pub end_col: u32,
     pub message: String,
+    /// Empty when the violation has no help text.
     pub help: String,
-    pub level: String,
+    /// `true` for [`Level::Error`], `false` for [`Level::Warning`].
+    pub error: bool,
     pub fixable: bool,
 }
 
-impl CachedViolation {
-    /// Reconstruct the `serde_json::Value` blob consumed by the output pipeline.
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "rule":    self.rule,
-            "line":    self.line,
-            "message": self.message,
-            "level":   self.level,
-            "help":    if self.help.is_empty() { serde_json::Value::Null }
-                       else { serde_json::Value::String(self.help.clone()) },
-            "range": {
-                "start_line":      self.line,
-                "start_character": self.col,
-                "end_line":        self.end_line,
-                "end_character":   0u32,
-            },
-            "fixable": self.fixable,
-        })
+impl From<&Violation> for CachedViolation {
+    fn from(v: &Violation) -> Self {
+        Self {
+            rule: v.rule.clone(),
+            line: v.line as u32,
+            col: v.col as u32,
+            end_line: v.end_line as u32,
+            end_col: v.end_col as u32,
+            message: v.message.clone(),
+            help: v.help.clone().unwrap_or_default(),
+            error: v.level == Level::Error,
+            fixable: v.fixable,
+        }
     }
+}
 
-    /// Build from the `serde_json::Value` produced by `Violation::to_json`.
-    pub fn from_json(v: &serde_json::Value) -> Option<Self> {
-        Some(Self {
-            rule: v["rule"].as_str()?.to_owned(),
-            line: v["line"].as_u64()? as u32,
-            col: v["range"]["start_character"].as_u64().unwrap_or(1) as u32,
-            end_line: v["range"]["end_line"].as_u64().unwrap_or(1) as u32,
-            message: v["message"].as_str().unwrap_or("").to_owned(),
-            help: v["help"].as_str().unwrap_or("").to_owned(),
-            level: v["level"].as_str().unwrap_or("error").to_owned(),
-            fixable: v["fixable"].as_bool().unwrap_or(false),
-        })
+impl From<&CachedViolation> for Violation {
+    fn from(v: &CachedViolation) -> Self {
+        Self {
+            rule: v.rule.clone(),
+            line: v.line as usize,
+            col: v.col as usize,
+            end_line: v.end_line as usize,
+            end_col: v.end_col as usize,
+            message: v.message.clone(),
+            help: (!v.help.is_empty()).then(|| v.help.clone()),
+            level: if v.error {
+                Level::Error
+            } else {
+                Level::Warning
+            },
+            fixable: v.fixable,
+        }
     }
 }
 
@@ -619,7 +625,7 @@ impl Cache {
     /// Look up a cached result by absolute path + mtime key.
     ///
     /// Returns `None` on a miss (unknown file or stale mtime).
-    pub fn get(&self, abs_path: &Path, key: &FileCacheKey) -> Option<Vec<serde_json::Value>> {
+    pub fn get(&self, abs_path: &Path, key: &FileCacheKey) -> Option<Vec<Violation>> {
         if self.no_cache {
             return None;
         }
@@ -633,20 +639,13 @@ impl Cache {
         // parallel lint workers), so interior mutability without a lock is
         // enough; this makes `Cache` `!Sync` on purpose.
         self.touched.borrow_mut().insert(k);
-        Some(entry.violations.iter().map(|v| v.to_json()).collect())
+        Some(entry.violations.iter().map(Violation::from).collect())
     }
 
     /// Stage a linted result.  Applied to disk in [`Cache::persist`].
-    pub fn set_linted(
-        &mut self,
-        abs_path: &Path,
-        key: &FileCacheKey,
-        json_viols: &[serde_json::Value],
-    ) {
-        let violations: Vec<CachedViolation> = json_viols
-            .iter()
-            .filter_map(CachedViolation::from_json)
-            .collect();
+    pub fn set_linted(&mut self, abs_path: &Path, key: &FileCacheKey, violations: &[Violation]) {
+        let violations: Vec<CachedViolation> =
+            violations.iter().map(CachedViolation::from).collect();
         self.pending
             .push((Self::path_key(abs_path), key.hash(), violations));
     }
@@ -908,11 +907,7 @@ mod tests {
         let file = tmp.path().join("d.py");
         std::fs::write(&file, "x = 1\n").unwrap();
 
-        let viols = vec![
-            serde_json::json!({"rule":"KIS001","line":1,"message":"KIS001: m",
-            "level":"error","help":null,"range":{"start_line":1,"start_character":1,
-            "end_line":1,"end_character":0},"fixable":false}),
-        ];
+        let viols = vec![Violation::for_test("KIS001", 1, "KIS001: m")];
 
         {
             let mut c = open_cache(tmp.path(), &[], &[]);
@@ -929,16 +924,39 @@ mod tests {
     }
 
     #[test]
+    fn cached_violations_round_trip_every_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("g.py");
+        std::fs::write(&file, "x = 1\n").unwrap();
+        let mut warning = Violation::for_test("KPT001", 4, "KPT001: w");
+        warning.col = 2;
+        warning.end_line = 5;
+        warning.end_col = 7;
+        warning.help = Some("h".to_owned());
+        warning.level = Level::Warning;
+        warning.fixable = true;
+        let viols = vec![Violation::for_test("KIS001", 1, "KIS001: m"), warning];
+
+        {
+            let mut c = open_cache(tmp.path(), &[], &[]);
+            let key = FileCacheKey::from_path(&file).unwrap();
+            c.set_linted(&file, &key, &viols);
+            c.persist().unwrap();
+        }
+
+        let c2 = open_cache(tmp.path(), &[], &[]);
+        let key = FileCacheKey::from_path(&file).unwrap();
+        let hit = c2.get(&file, &key).unwrap();
+        assert_eq!(format!("{hit:?}"), format!("{viols:?}"));
+    }
+
+    #[test]
     fn cache_miss_after_mtime_change() {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("e.py");
         std::fs::write(&file, "x = 1\n").unwrap();
 
-        let viols = vec![
-            serde_json::json!({"rule":"KIS001","line":1,"message":"KIS001: m",
-            "level":"error","help":null,"range":{"start_line":1,"start_character":1,
-            "end_line":1,"end_character":0},"fixable":false}),
-        ];
+        let viols = vec![Violation::for_test("KIS001", 1, "KIS001: m")];
 
         {
             let mut c = open_cache(tmp.path(), &[], &[]);
@@ -963,11 +981,7 @@ mod tests {
         let file = tmp.path().join("f.py");
         std::fs::write(&file, "x = 1\n").unwrap();
 
-        let viols = vec![
-            serde_json::json!({"rule":"KIS001","line":1,"message":"KIS001: m",
-            "level":"error","help":null,"range":{"start_line":1,"start_character":1,
-            "end_line":1,"end_character":0},"fixable":false}),
-        ];
+        let viols = vec![Violation::for_test("KIS001", 1, "KIS001: m")];
 
         {
             let mut c = open_cache(tmp.path(), &[], &[]);
@@ -1226,12 +1240,8 @@ mod tests {
     fn large_cache_under_limit_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
         let mut c = open_cache(tmp.path(), &[], &[]);
-        let viol = serde_json::json!({
-            "rule": "KIS001", "line": 3, "message": "m".repeat(200),
-            "level": "error", "help": "h".repeat(200),
-            "range": {"start_line": 3, "start_character": 1, "end_line": 3, "end_character": 0},
-            "fixable": false,
-        });
+        let mut viol = Violation::for_test("KIS001", 3, &"m".repeat(200));
+        viol.help = Some("h".repeat(200));
         let f = tmp.path().join("a.py");
         std::fs::write(&f, "x = 1\n").unwrap();
         let key = FileCacheKey::from_path(&f).unwrap();

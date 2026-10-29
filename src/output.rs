@@ -9,7 +9,7 @@
 
 use crate::rules::Rule;
 use crate::theme;
-use crate::types::{ChangedFiles, Level};
+use crate::types::{ChangedFiles, Level, Violation};
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::Path;
@@ -105,13 +105,13 @@ fn rule_is_unsafe_fix(rules: &[Box<dyn Rule>], code: &str) -> bool {
 /// Used to decide whether the `--fix` hint should also suggest
 /// `--unsafe-fixes`.
 pub fn has_unsafe_fixable(
-    reported: &HashMap<String, Vec<serde_json::Value>>,
+    reported: &HashMap<String, Vec<Violation>>,
     rules: &[Box<dyn Rule>],
 ) -> bool {
-    reported.values().flatten().any(|v| {
-        v["fixable"].as_bool().unwrap_or(false)
-            && rule_is_unsafe_fix(rules, v["rule"].as_str().unwrap_or(""))
-    })
+    reported
+        .values()
+        .flatten()
+        .any(|v| v.fixable && rule_is_unsafe_fix(rules, v.rule.as_str()))
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +144,7 @@ pub fn has_unsafe_fixable(
 /// Returns `0` when no violation reaches the configured severity threshold,
 /// `1` otherwise.
 pub fn print_violations(
-    reported: &HashMap<String, Vec<serde_json::Value>>,
+    reported: &HashMap<String, Vec<Violation>>,
     changed_files: &ChangedFiles,
     level: Level,
     changed_files_level: Level,
@@ -209,20 +209,20 @@ pub fn print_violations(
         let violations = &reported[*file_path];
 
         // Sort violations by line number within each file.
-        let mut sorted: Vec<&serde_json::Value> = violations.iter().collect();
-        sorted.sort_by_key(|v| v["line"].as_u64().unwrap_or(0));
+        let mut sorted: Vec<&Violation> = violations.iter().collect();
+        sorted.sort_by_key(|v| v.line);
 
         for v in sorted {
-            let line = v["line"].as_u64().unwrap_or(0);
+            let line = v.line;
             // start_character is 1-based in the wire format.
-            let col = v["range"]["start_character"].as_u64().unwrap_or(1);
-            let raw_msg = v["message"].as_str().unwrap_or("");
-            let help = v["help"].as_str().unwrap_or("");
-            let vlevel = v["level"].as_str().unwrap_or("error");
-            let rule_code = v["rule"].as_str().unwrap_or("UNKNOWN");
-            let fixable = v["fixable"].as_bool().unwrap_or(false);
+            let col = v.col + 1;
+            let raw_msg = v.message.as_str();
+            let help = v.help.as_deref().unwrap_or("");
 
-            let is_error = vlevel == "error";
+            let rule_code = v.rule.as_str();
+            let fixable = v.fixable;
+
+            let is_error = v.level == Level::Error;
             if is_error {
                 error_count += 1;
             } else {
@@ -328,10 +328,10 @@ pub fn print_violations(
 /// order so the output is deterministic).
 pub fn emit_zuul_return(
     output_path: &Path,
-    reported: &HashMap<String, Vec<serde_json::Value>>,
+    reported: &HashMap<String, Vec<Violation>>,
     changed_files: &ChangedFiles,
 ) -> anyhow::Result<()> {
-    let mut file_comments: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    let mut file_comments: HashMap<String, Vec<Violation>> = HashMap::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut paths: Vec<&String> = reported.keys().collect();
     paths.sort();
@@ -341,8 +341,8 @@ pub fn emit_zuul_return(
             file_comments.insert(path.clone(), viols.clone());
         } else {
             for v in viols {
-                let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("");
-                let line = v.get("line").and_then(|l| l.as_u64()).unwrap_or(0);
+                let msg = &v.message;
+                let line = v.line;
                 warnings.push(format!("{path}:{line}: {msg}"));
             }
         }
@@ -354,7 +354,7 @@ pub fn emit_zuul_return(
 /// the report was written.
 pub fn emit_zuul_return_or_report(
     output_path: &Path,
-    reported: &HashMap<String, Vec<serde_json::Value>>,
+    reported: &HashMap<String, Vec<Violation>>,
     changed_files: &ChangedFiles,
 ) -> bool {
     match emit_zuul_return(output_path, reported, changed_files) {
@@ -372,7 +372,7 @@ pub fn emit_zuul_return_or_report(
 /// Write violations to a zuul_return.yaml file (create or merge).
 pub fn write_zuul_return(
     output_path: &Path,
-    file_comments: HashMap<String, Vec<serde_json::Value>>,
+    file_comments: HashMap<String, Vec<Violation>>,
     warnings: Vec<String>,
 ) -> anyhow::Result<()> {
     let mut zuul_data: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
@@ -383,7 +383,8 @@ pub fn write_zuul_return(
             .into_iter()
             .map(|(path, comments)| {
                 let cleaned_comments = comments
-                    .into_iter()
+                    .iter()
+                    .map(Violation::to_json)
                     .map(|mut c| {
                         // Always drop the key (it is `null` when there is no
                         // help); append string help to the message.
@@ -518,7 +519,7 @@ pub fn format_fix_hint(args: &[String], include_unsafe_fixes: bool) -> String {
 
 /// Concise single-line renderer: `file:line:col: level[RULE] message`.
 fn print_violations_concise(
-    reported: &HashMap<String, Vec<serde_json::Value>>,
+    reported: &HashMap<String, Vec<Violation>>,
     pal: &theme::Palette,
     changed_files: &ChangedFiles,
     level: Level,
@@ -532,18 +533,18 @@ fn print_violations_concise(
     paths.sort();
 
     for file_path in &paths {
-        let mut sorted: Vec<&serde_json::Value> = reported[*file_path].iter().collect();
-        sorted.sort_by_key(|v| v["line"].as_u64().unwrap_or(0));
+        let mut sorted: Vec<&Violation> = reported[*file_path].iter().collect();
+        sorted.sort_by_key(|v| v.line);
 
         for v in sorted {
-            let line = v["line"].as_u64().unwrap_or(0);
-            let col = v["range"]["start_character"].as_u64().unwrap_or(1);
-            let raw_msg = v["message"].as_str().unwrap_or("");
-            let vlevel = v["level"].as_str().unwrap_or("error");
-            let rule_code = v["rule"].as_str().unwrap_or("UNKNOWN");
-            let fixable = v["fixable"].as_bool().unwrap_or(false);
+            let line = v.line;
+            let col = v.col + 1;
+            let raw_msg = v.message.as_str();
 
-            let is_error = vlevel == "error";
+            let rule_code = v.rule.as_str();
+            let fixable = v.fixable;
+
+            let is_error = v.level == Level::Error;
             let level_str = if is_error {
                 pal.error("error")
             } else {
@@ -568,7 +569,7 @@ fn print_violations_concise(
 
 /// JSON renderer: writes a JSON array to **stdout**.
 fn print_violations_json(
-    reported: &HashMap<String, Vec<serde_json::Value>>,
+    reported: &HashMap<String, Vec<Violation>>,
     changed_files: &ChangedFiles,
     level: Level,
     changed_files_level: Level,
@@ -583,21 +584,21 @@ fn print_violations_json(
     paths.sort();
 
     for file_path in &paths {
-        let mut sorted: Vec<&serde_json::Value> = reported[*file_path].iter().collect();
-        sorted.sort_by_key(|v| v["line"].as_u64().unwrap_or(0));
+        let mut sorted: Vec<&Violation> = reported[*file_path].iter().collect();
+        sorted.sort_by_key(|v| v.line);
 
         for v in sorted {
             entries.push(serde_json::json!({
                 "filename": file_path,
-                "line":     v["line"],
-                "col":      v["range"]["start_character"].as_u64().unwrap_or(1),
-                "end_line": v["range"]["end_line"],
-                "rule":     v["rule"],
-                "message":  v["message"].as_str().unwrap_or("")
-                                .strip_prefix(&format!("{}: ", v["rule"].as_str().unwrap_or("")))
-                                .unwrap_or(v["message"].as_str().unwrap_or("")),
-                "level":    v["level"],
-                "fixable":  v["fixable"],
+                "line":     v.line,
+                "col":      v.col + 1,
+                "end_line": v.end_line,
+                "rule":     v.rule,
+                "message":  v.message.as_str()
+                                .strip_prefix(&format!("{}: ", v.rule.as_str()))
+                                .unwrap_or(v.message.as_str()),
+                "level":    v.level,
+                "fixable":  v.fixable,
             }));
         }
     }
@@ -611,7 +612,7 @@ fn print_violations_json(
 
 /// Shared exit-code computation used by all renderers.
 fn exit_code_for(
-    reported: &HashMap<String, Vec<serde_json::Value>>,
+    reported: &HashMap<String, Vec<Violation>>,
     changed_files: &ChangedFiles,
     level: Level,
     changed_files_level: Level,
@@ -624,12 +625,7 @@ fn exit_code_for(
             level
         };
         for v in violations {
-            let vl: Level = v
-                .get("level")
-                .and_then(|l| l.as_str())
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(Level::Warning);
-            if vl >= threshold {
+            if v.level >= threshold {
                 code = 1;
             }
         }
@@ -644,22 +640,22 @@ fn exit_code_for(
 ///
 /// Each violation becomes a `::error` or `::warning` command that GitHub
 /// Actions picks up as a PR annotation.  Written to **stdout**.
-pub fn render_github(reported: &HashMap<String, Vec<serde_json::Value>>) -> String {
+pub fn render_github(reported: &HashMap<String, Vec<Violation>>) -> String {
     let mut out = String::new();
     let mut paths: Vec<&String> = reported.keys().collect();
     paths.sort();
     for path in paths {
-        let mut viols: Vec<&serde_json::Value> = reported[path].iter().collect();
-        viols.sort_by_key(|v| v["line"].as_u64().unwrap_or(0));
+        let mut viols: Vec<&Violation> = reported[path].iter().collect();
+        viols.sort_by_key(|v| v.line);
         for v in viols {
-            let line = v["line"].as_u64().unwrap_or(1);
-            let col = v["range"]["start_character"].as_u64().unwrap_or(1);
-            let rule = v["rule"].as_str().unwrap_or("UNKNOWN");
-            let raw_msg = v["message"].as_str().unwrap_or("");
+            let line = v.line;
+            let col = v.col + 1;
+            let rule = v.rule.as_str();
+            let raw_msg = v.message.as_str();
             let msg = raw_msg
                 .strip_prefix(&format!("{rule}: "))
                 .unwrap_or(raw_msg);
-            let level = if v["level"].as_str().unwrap_or("error") == "warning" {
+            let level = if v.level == Level::Warning {
                 "warning"
             } else {
                 "error"
@@ -693,7 +689,7 @@ fn escape_github_property(s: &str) -> String {
 ///
 /// See <https://docs.gitlab.com/ee/ci/testing/code_quality.html#implement-a-custom-tool>.
 /// Written to **stdout**.
-pub fn render_gitlab(reported: &HashMap<String, Vec<serde_json::Value>>) -> String {
+pub fn render_gitlab(reported: &HashMap<String, Vec<Violation>>) -> String {
     use seahash::SeaHasher;
     use std::hash::{Hash, Hasher};
 
@@ -701,17 +697,17 @@ pub fn render_gitlab(reported: &HashMap<String, Vec<serde_json::Value>>) -> Stri
     let mut paths: Vec<&String> = reported.keys().collect();
     paths.sort();
     for path in paths {
-        let mut viols: Vec<&serde_json::Value> = reported[path].iter().collect();
-        viols.sort_by_key(|v| v["line"].as_u64().unwrap_or(0));
+        let mut viols: Vec<&Violation> = reported[path].iter().collect();
+        viols.sort_by_key(|v| v.line);
         for v in viols {
-            let line = v["line"].as_u64().unwrap_or(1);
-            let col = v["range"]["start_character"].as_u64().unwrap_or(1);
-            let rule = v["rule"].as_str().unwrap_or("UNKNOWN");
-            let raw_msg = v["message"].as_str().unwrap_or("");
+            let line = v.line;
+            let col = v.col + 1;
+            let rule = v.rule.as_str();
+            let raw_msg = v.message.as_str();
             let msg = raw_msg
                 .strip_prefix(&format!("{rule}: "))
                 .unwrap_or(raw_msg);
-            let severity = if v["level"].as_str().unwrap_or("error") == "warning" {
+            let severity = if v.level == Level::Warning {
                 "minor"
             } else {
                 "critical"
@@ -744,7 +740,7 @@ pub fn render_gitlab(reported: &HashMap<String, Vec<serde_json::Value>>) -> Stri
 ///
 /// See <https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html>.
 /// Written to **stdout**.
-pub fn render_sarif(reported: &HashMap<String, Vec<serde_json::Value>>) -> String {
+pub fn render_sarif(reported: &HashMap<String, Vec<Violation>>) -> String {
     use std::collections::BTreeSet;
 
     let mut results: Vec<serde_json::Value> = Vec::new();
@@ -752,17 +748,17 @@ pub fn render_sarif(reported: &HashMap<String, Vec<serde_json::Value>>) -> Strin
     let mut paths: Vec<&String> = reported.keys().collect();
     paths.sort();
     for path in paths {
-        let mut viols: Vec<&serde_json::Value> = reported[path].iter().collect();
-        viols.sort_by_key(|v| v["line"].as_u64().unwrap_or(0));
+        let mut viols: Vec<&Violation> = reported[path].iter().collect();
+        viols.sort_by_key(|v| v.line);
         for v in viols {
-            let line = v["line"].as_u64().unwrap_or(1);
-            let col = v["range"]["start_character"].as_u64().unwrap_or(1);
-            let rule = v["rule"].as_str().unwrap_or("UNKNOWN");
-            let raw_msg = v["message"].as_str().unwrap_or("");
+            let line = v.line;
+            let col = v.col + 1;
+            let rule = v.rule.as_str();
+            let raw_msg = v.message.as_str();
             let msg = raw_msg
                 .strip_prefix(&format!("{rule}: "))
                 .unwrap_or(raw_msg);
-            let level = v["level"].as_str().unwrap_or("error");
+            let level = v.level.to_string();
             rule_ids.insert(rule.to_owned());
             results.push(serde_json::json!({
                 "ruleId": rule,
@@ -809,19 +805,19 @@ pub fn render_sarif(reported: &HashMap<String, Vec<serde_json::Value>>) -> Strin
 ///
 /// Each violation becomes a `<testcase>` with a `<failure>` child.
 /// Written to **stdout**.
-pub fn render_junit(reported: &HashMap<String, Vec<serde_json::Value>>) -> String {
+pub fn render_junit(reported: &HashMap<String, Vec<Violation>>) -> String {
     let total: usize = reported.values().map(|v| v.len()).sum();
     let mut cases = String::new();
     let mut paths: Vec<&String> = reported.keys().collect();
     paths.sort();
     for path in paths {
-        let mut viols: Vec<&serde_json::Value> = reported[path].iter().collect();
-        viols.sort_by_key(|v| v["line"].as_u64().unwrap_or(0));
+        let mut viols: Vec<&Violation> = reported[path].iter().collect();
+        viols.sort_by_key(|v| v.line);
         for v in viols {
-            let line = v["line"].as_u64().unwrap_or(1);
-            let col = v["range"]["start_character"].as_u64().unwrap_or(1);
-            let rule = v["rule"].as_str().unwrap_or("UNKNOWN");
-            let raw_msg = v["message"].as_str().unwrap_or("");
+            let line = v.line;
+            let col = v.col + 1;
+            let rule = v.rule.as_str();
+            let raw_msg = v.message.as_str();
             let msg = raw_msg
                 .strip_prefix(&format!("{rule}: "))
                 .unwrap_or(raw_msg);
@@ -859,10 +855,7 @@ fn xml_escape(s: &str) -> String {
 ///
 /// All CI formats render to a string here; `Full`, `Concise` and `Zuul` fall
 /// back to JSON since they have no returnable string form.
-pub fn render_for_file(
-    reported: &HashMap<String, Vec<serde_json::Value>>,
-    format: OutputFormat,
-) -> String {
+pub fn render_for_file(reported: &HashMap<String, Vec<Violation>>, format: OutputFormat) -> String {
     match format {
         OutputFormat::Json => {
             // Reuse the same JSON shape as print_violations_json.
@@ -872,20 +865,20 @@ pub fn render_for_file(
                 paths
                     .into_iter()
                     .flat_map(|path| {
-                        let mut viols: Vec<&serde_json::Value> = reported[path].iter().collect();
-                        viols.sort_by_key(|v| v["line"].as_u64().unwrap_or(0));
+                        let mut viols: Vec<&Violation> = reported[path].iter().collect();
+                        viols.sort_by_key(|v| v.line);
                         viols.into_iter().map(move |v| {
-                            let rule = v["rule"].as_str().unwrap_or("");
-                            let raw = v["message"].as_str().unwrap_or("");
+                            let rule = v.rule.as_str();
+                            let raw = v.message.as_str();
                             let msg = raw.strip_prefix(&format!("{rule}: ")).unwrap_or(raw);
                             serde_json::json!({
                                 "filename": path,
-                                "line":     v["line"],
-                                "col":      v["range"]["start_character"].as_u64().unwrap_or(1),
+                                "line":     v.line,
+                                "col":      v.col + 1,
                                 "rule":     rule,
                                 "message":  msg,
-                                "level":    v["level"],
-                                "fixable":  v["fixable"],
+                                "level":    v.level,
+                                "fixable":  v.fixable,
                             })
                         })
                     })
@@ -906,13 +899,13 @@ pub fn render_for_file(
 }
 
 pub fn print_statistics(
-    reported: &HashMap<String, Vec<serde_json::Value>>,
+    reported: &HashMap<String, Vec<Violation>>,
     rule_names: &HashMap<String, String>,
 ) {
     let mut counts: HashMap<String, usize> = HashMap::new();
     for vs in reported.values() {
         for v in vs {
-            let code = v["rule"].as_str().unwrap_or("UNKNOWN").to_owned();
+            let code = v.rule.as_str().to_owned();
             *counts.entry(code).or_insert(0) += 1;
         }
     }
@@ -942,11 +935,21 @@ mod tests {
 
     // ── Zuul output ────────────────────────────────────────────────────────
 
-    fn zuul_viol(line: u64, message: &str) -> serde_json::Value {
-        serde_json::json!({"line": line, "message": message, "help": "do better"})
+    fn zuul_viol(line: usize, message: &str) -> Violation {
+        Violation {
+            rule: "KIS001".to_owned(),
+            line,
+            col: 0,
+            end_line: line,
+            end_col: 0,
+            message: message.to_owned(),
+            help: Some("do better".to_owned()),
+            level: Level::Error,
+            fixable: false,
+        }
     }
 
-    fn zuul_reported() -> HashMap<String, Vec<serde_json::Value>> {
+    fn zuul_reported() -> HashMap<String, Vec<Violation>> {
         HashMap::from([
             ("changed.py".to_owned(), vec![zuul_viol(3, "bad import")]),
             (
@@ -1062,9 +1065,7 @@ mod tests {
     fn zuul_format_prints_nothing_and_follows_the_level_for_the_exit_code() {
         let reported = HashMap::from([(
             "a.py".to_owned(),
-            vec![
-                serde_json::json!({"line": 1, "message": "m", "rule": "KIS001", "level": "error"}),
-            ],
+            vec![viol("a.py", 1, 0, "KIS001", Level::Error, "m")],
         )]);
         let code = print_violations(
             &reported,
@@ -1225,15 +1226,15 @@ mod tests {
     }
 
     /// Group violations by file into the `reported` map the writers consume.
-    fn reported(items: &[(&str, Violation)]) -> HashMap<String, Vec<serde_json::Value>> {
-        let mut map: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    fn reported(items: &[(&str, Violation)]) -> HashMap<String, Vec<Violation>> {
+        let mut map: HashMap<String, Vec<Violation>> = HashMap::new();
         for (file, v) in items {
-            map.entry((*file).to_owned()).or_default().push(v.to_json());
+            map.entry((*file).to_owned()).or_default().push(v.clone());
         }
         map
     }
 
-    fn sample() -> HashMap<String, Vec<serde_json::Value>> {
+    fn sample() -> HashMap<String, Vec<Violation>> {
         reported(&[
             (
                 "src/a.py",

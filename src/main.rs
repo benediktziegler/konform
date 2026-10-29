@@ -1661,7 +1661,7 @@ mod noqa_tests {
             0,
             0,
         );
-        recheck_batch(&[file.clone()], &ctx, &mut cache);
+        recheck_batch(std::slice::from_ref(&file), &ctx, &mut cache);
         assert!(cache
             .get(&file, &FileCacheKey::from_path(&file).unwrap())
             .is_some());

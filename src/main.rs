@@ -1636,6 +1636,37 @@ mod noqa_tests {
         }
     }
 
+    #[test]
+    fn recheck_batch_lints_the_changed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("mod.py");
+        std::fs::write(&file, "from os.path import join\n").unwrap();
+        let config = config::Config::default();
+        let active_rules = rules::all_rules(Arc::new(module_probe::ModuleProbe::default()), None);
+        let ctx = RecheckContext {
+            active_rules: &active_rules,
+            config: &config,
+            level: Level::Error,
+            changed_files_level: Level::Warning,
+            output_format: OutputFormat::Json,
+            no_cache: false,
+        };
+        let mut cache = Cache::open(
+            dir.path().to_path_buf(),
+            &dir.path().join(".cache"),
+            false,
+            "error",
+            &[],
+            &[],
+            0,
+            0,
+        );
+        recheck_batch(&[file.clone()], &ctx, &mut cache);
+        assert!(cache
+            .get(&file, &FileCacheKey::from_path(&file).unwrap())
+            .is_some());
+    }
+
     // add_noqa: lines that can't take a comment ------------------------------
 
     #[test]

@@ -40,13 +40,13 @@ use types::{ChangedFiles, Level, Violation};
 // ---------------------------------------------------------------------------
 
 fn walk_python_files(path: &Path, config: &config::Config) -> Vec<PathBuf> {
-    let mut files = Vec::new();
     let exclude_set = config.exclude_set();
 
     // Don't descend into excluded directories (`build`, `gen/**`); the file
     // check below still applies to the files given or walked.
     let walker = WalkBuilder::new(path)
         .standard_filters(true)
+        .threads(config.workers)
         .filter_entry({
             let exclude_set = exclude_set.clone();
             let config = config.clone();
@@ -58,20 +58,30 @@ fn walk_python_files(path: &Path, config: &config::Config) -> Vec<PathBuf> {
                         .is_some_and(|gs| config.is_excluded(gs, entry.path()))
             }
         })
-        .build();
-    for entry in walker.flatten() {
-        let p = strip_leading_curdir(entry.path().to_path_buf());
-        if p.extension().is_none_or(|e| e != "py" && e != "pyi") {
-            continue;
-        }
-        if exclude_set
-            .as_ref()
-            .is_some_and(|gs| config.is_excluded(gs, &p))
-        {
-            continue;
-        }
-        files.push(p);
-    }
+        .build_parallel();
+    // Directories are read on several threads.
+    let found = std::sync::Mutex::new(Vec::new());
+    walker.run(|| {
+        let exclude_set = &exclude_set;
+        let found = &found;
+        Box::new(move |entry| {
+            if let Ok(entry) = entry {
+                let p = strip_leading_curdir(entry.path().to_path_buf());
+                let is_python = p.extension().is_some_and(|e| e == "py" || e == "pyi");
+                if is_python
+                    && !exclude_set
+                        .as_ref()
+                        .is_some_and(|gs| config.is_excluded(gs, &p))
+                {
+                    found.lock().unwrap_or_else(|e| e.into_inner()).push(p);
+                }
+            }
+            ignore::WalkState::Continue
+        })
+    });
+    let mut files = found.into_inner().unwrap_or_else(|e| e.into_inner());
+    // Walk order is not deterministic across threads.
+    files.sort();
     files
 }
 
@@ -615,44 +625,39 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
     }
 
     // ── Check pass ────────────────────────────────────────────────────────
-    let mut violations: HashMap<String, Vec<Violation>> = HashMap::new();
-    let mut uncached: Vec<&PathBuf> = Vec::new();
-
-    for fp in &all_file_paths {
-        let file_key = FileCacheKey::from_path(fp);
-        let cache_hit = file_key.as_ref().and_then(|k| cache.get(fp, k));
-        if let Some(cached) = cache_hit {
-            if !cached.is_empty() {
-                violations.insert(fp.to_string_lossy().to_string(), cached);
-            }
-        } else {
-            uncached.push(fp);
-        }
-    }
-
     if config.workers > 0 {
         let _ = rayon::ThreadPoolBuilder::new()
             .num_threads(config.workers)
             .build_global();
     }
 
-    let new_results: Vec<(PathBuf, Vec<Violation>)> = uncached
+    // Cache lookups run on the workers too: each is a `stat` per file. The
+    // key is read before the file, so an edit made while it is being linted
+    // leaves a stale key and the file is linted again next run.
+    let results: Vec<(&PathBuf, Option<FileCacheKey>, Vec<Violation>)> = all_file_paths
         .par_iter()
         .map(|fp| {
-            let source = match std::fs::read_to_string(*fp) {
-                Ok(s) => s,
-                Err(_) => return ((*fp).clone(), vec![]),
+            let key = FileCacheKey::from_path(fp);
+            if let Some(cached) = key.as_ref().and_then(|k| cache.get(fp, k)) {
+                return (fp, None, cached);
+            }
+            let viols = match std::fs::read_to_string(fp) {
+                Ok(source) => {
+                    let mut input = CheckInput::new(fp, &source);
+                    input.ignore_noqa = config.ignore_noqa;
+                    engine::run_check(&input, &active_rules, &config)
+                }
+                Err(_) => vec![],
             };
-            let mut input = CheckInput::new(fp, &source);
-            input.ignore_noqa = config.ignore_noqa;
-            let viols = engine::run_check(&input, &active_rules, &config);
-            ((*fp).clone(), viols)
+            (fp, key, viols)
         })
         .collect();
 
-    for (fp, results) in new_results {
-        if let Some(key) = FileCacheKey::from_path(&fp) {
-            cache.set_linted(&fp, &key, &results);
+    let mut violations: HashMap<String, Vec<Violation>> = HashMap::new();
+    for (fp, key, results) in results {
+        // `key` is only set for files linted in this run.
+        if let Some(key) = key {
+            cache.set_linted(fp, &key, &results);
         }
         if !results.is_empty() {
             violations.insert(fp.to_string_lossy().to_string(), results);

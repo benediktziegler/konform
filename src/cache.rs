@@ -29,12 +29,12 @@ use owo_colors::OwoColorize;
 use rkyv::util::AlignedVec;
 use rkyv::{Archive, Deserialize, Serialize};
 use seahash::SeaHasher;
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::{fs, io};
 
 /// Cache sub-directory name equals the konform version string, so upgrading
@@ -502,7 +502,7 @@ pub struct Cache {
     pending: Vec<(String, u64, Vec<CachedViolation>)>,
     /// Keys of entries hit via [`Cache::get`]; their `last_seen` is refreshed
     /// in [`Cache::persist`].
-    touched: RefCell<HashSet<String>>,
+    touched: Mutex<HashSet<String>>,
     /// The in-memory cache differs from the file on disk (entry removed, or
     /// a corrupt file that should be replaced). Pending entries are tracked
     /// separately in `pending`.
@@ -587,7 +587,7 @@ impl Cache {
                     no_cache,
                     package: pkg,
                     pending: vec![],
-                    touched: RefCell::new(HashSet::new()),
+                    touched: Mutex::new(HashSet::new()),
                     dirty: false,
                 }
             }
@@ -615,7 +615,7 @@ impl Cache {
                 files: HashMap::new(),
             },
             pending: vec![],
-            touched: RefCell::new(HashSet::new()),
+            touched: Mutex::new(HashSet::new()),
             dirty: false,
         }
     }
@@ -634,11 +634,12 @@ impl Cache {
         if entry.key != key.hash() {
             return None; // mtime / permissions changed
         }
-        // Record the hit so persist() refreshes last_seen. `get` is only
-        // called from the sequential cache-lookup loop (never from the
-        // parallel lint workers), so interior mutability without a lock is
-        // enough; this makes `Cache` `!Sync` on purpose.
-        self.touched.borrow_mut().insert(k);
+        // Record the hit so persist() refreshes last_seen. Lookups run on
+        // the parallel lint workers, hence the lock.
+        self.touched
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(k);
         Some(entry.violations.iter().map(Violation::from).collect())
     }
 
@@ -674,7 +675,7 @@ impl Cache {
             return Ok(false);
         }
 
-        let touched = std::mem::take(self.touched.get_mut());
+        let touched = std::mem::take(self.touched.get_mut().unwrap_or_else(|e| e.into_inner()));
         let stale_hit = touched.iter().any(|k| {
             self.package
                 .files

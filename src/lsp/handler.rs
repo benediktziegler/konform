@@ -129,9 +129,28 @@ pub fn main_loop(connection: Connection, session: Arc<RwLock<Session>>) {
     show_config_errors(&connection, &session);
     show_probe_problem(&connection, &session);
 
-    for msg in &connection.receiver {
+    // Documents edited since their diagnostics were last published. While
+    // typing, edits arrive faster than a lint takes: linting only once the
+    // queue is drained skips the versions that are already outdated.
+    let mut stale: Vec<Uri> = Vec::new();
+
+    loop {
+        let msg = match connection.receiver.try_recv() {
+            Ok(msg) => msg,
+            Err(e) if e.is_empty() => {
+                flush_stale(&connection, &session, &mut stale);
+                match connection.receiver.recv() {
+                    Ok(msg) => msg,
+                    Err(_) => return,
+                }
+            }
+            Err(_) => return,
+        };
         match msg {
             Message::Request(req) => {
+                // Requests (code actions among them) read the published
+                // diagnostics, so bring those up to date first.
+                flush_stale(&connection, &session, &mut stale);
                 // handle_shutdown sends the shutdown response and returns true
                 // when the client has requested shutdown.
                 if connection.handle_shutdown(&req).unwrap_or(false) {
@@ -140,7 +159,14 @@ pub fn main_loop(connection: Connection, session: Arc<RwLock<Session>>) {
                 handle_request(&connection, &session, req);
             }
             Message::Notification(notif) => {
-                handle_notification(&connection, &session, notif, &mut pending, &mut next_id);
+                handle_notification(
+                    &connection,
+                    &session,
+                    notif,
+                    &mut pending,
+                    &mut next_id,
+                    &mut stale,
+                );
             }
             Message::Response(resp) => {
                 // Dispatch to the registered handler if we sent this request.
@@ -695,12 +721,20 @@ fn handle_range_formatting(
 // Notification dispatch
 // ---------------------------------------------------------------------------
 
+/// Publish diagnostics for every document in `stale`, then clear it.
+fn flush_stale(connection: &Connection, session: &Arc<RwLock<Session>>, stale: &mut Vec<Uri>) {
+    for uri in stale.drain(..) {
+        push_diagnostics(connection, session, &uri);
+    }
+}
+
 fn handle_notification(
     connection: &Connection,
     session: &Arc<RwLock<Session>>,
     notif: Notification,
     pending: &mut PendingMap,
     next_id: &mut u32,
+    stale: &mut Vec<Uri>,
 ) {
     match notif.method.as_str() {
         "textDocument/didOpen" => {
@@ -720,11 +754,15 @@ fn handle_notification(
                     .write()
                     .unwrap()
                     .update(&uri, version, p.content_changes);
-                push_diagnostics(connection, session, &uri);
+                // Published by `main_loop` once no newer message is queued.
+                if !stale.contains(&uri) {
+                    stale.push(uri);
+                }
             }
         }
         "textDocument/didClose" => {
             if let Ok(p) = serde_json::from_value::<DidCloseTextDocumentParams>(notif.params) {
+                stale.retain(|uri| *uri != p.text_document.uri);
                 session.write().unwrap().close(&p.text_document.uri);
                 // Clear diagnostics in the editor when the file is closed.
                 publish_empty_diagnostics(connection, &p.text_document.uri);

@@ -1719,3 +1719,75 @@ fn python_is_discovered_from_the_workspace_root_not_the_process_cwd() {
     assert_eq!(import_state(&server.next_diagnostics(&uri)), (1, 0));
     server.shutdown();
 }
+
+#[test]
+fn a_burst_of_edits_ends_on_the_diagnostics_of_the_last_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    server.initialize();
+
+    server.open(&uri, "import os.path\n");
+    assert!(server.next_diagnostics(&uri).diagnostics.is_empty());
+
+    // Queue edits faster than they can be linted; only the final text counts.
+    for version in 2..=20 {
+        let text = if version % 2 == 0 {
+            KIS001_SOURCE
+        } else {
+            "import os.path\n"
+        };
+        server.change(&uri, version, text);
+    }
+    server.change(&uri, 21, KIS001_SOURCE);
+
+    let mut publishes = 0;
+    loop {
+        publishes += 1;
+        if server.next_diagnostics(&uri).diagnostics.len() == 1 {
+            break;
+        }
+    }
+    assert!(publishes <= 20, "published {publishes} times for 20 edits");
+
+    server.shutdown();
+}
+
+#[test]
+fn closing_a_document_with_a_pending_edit_leaves_it_cleared() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri(&dir.path().join("mod.py"));
+    let other = file_uri(&dir.path().join("other.py"));
+    let mut server = TestServer::with_default_config(dir.path().to_path_buf());
+    server.initialize();
+
+    server.open(&uri, "import os.path\n");
+    assert!(server.next_diagnostics(&uri).diagnostics.is_empty());
+
+    server.change(&uri, 2, KIS001_SOURCE);
+    server.close(&uri);
+    server.open(&other, "import os.path\n");
+
+    // Messages arrive in order, so everything for `uri` precedes `other`.
+    let mut last = None;
+    loop {
+        let notif = server.next_notification();
+        if notif.method != "textDocument/publishDiagnostics" {
+            continue;
+        }
+        let params: PublishDiagnosticsParams = serde_json::from_value(notif.params).unwrap();
+        if params.uri == other {
+            break;
+        }
+        if params.uri == uri {
+            last = Some(params.diagnostics.len());
+        }
+    }
+    assert_eq!(
+        last,
+        Some(0),
+        "a closed document must end with no diagnostics"
+    );
+
+    server.shutdown();
+}

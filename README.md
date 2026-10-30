@@ -5,6 +5,7 @@
 [![Docs](https://github.com/benediktziegler/konform/actions/workflows/docs.yml/badge.svg)](https://benediktziegler.github.io/konform/)
 [![PyPI](https://img.shields.io/pypi/v/konform)](https://pypi.org/project/konform/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/benediktziegler/konform/blob/main/LICENSE)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/benediktziegler/konform?utm_source=badge)
 
 Multi-rule Python linter and language server: fast, configurable, and CI-ready.
 

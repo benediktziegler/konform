@@ -16,8 +16,8 @@ $ cargo run -- check path/to/file.py     # run the dev binary
 Two checks in `.github/workflows/benchmarks.yml` guard against slowdowns, the same
 split ruff and ty use:
 
-- **Benchmarks** (`benches/check.rs`): the engine on generated modules of three sizes,
-  each rule family on its own, and `--fix`. CI runs them under
+- **Benchmarks** (`benches/check.rs`): parsing and the engine on generated modules of
+  three sizes, a clean file, each rule family on its own, and `--fix`. CI runs them under
   [CodSpeed](https://codspeed.io), which counts instructions rather than timing them, so
   results are stable on shared runners; CodSpeed comments on the PR when a benchmark gets
   slower. A new rule is covered as soon as its family runs, but give the generated module

@@ -661,6 +661,10 @@ impl Rule for KstRule {
             .collect()
     }
 
+    fn codes(&self, cfg: &toml::Value) -> Vec<String> {
+        self.rules(cfg).iter().map(|r| r.id.clone()).collect()
+    }
+
     fn docs(&self) -> RuleDocs {
         RuleDocs {
             what_it_does: "Matches **code structure** (the syntax tree) against rules you define, \
@@ -1721,6 +1725,12 @@ invalid = ["x = 1\n", "def (:\n", "assert 1\n"]
         std::fs::write(&path, FILE_RULES.replace("assert", "raise")).unwrap();
         let after = KstRule::new(Some(dir.path().to_path_buf())).fingerprint(&cfg(""));
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn codes_are_the_user_rule_ids() {
+        assert!(rule().codes(&cfg("")).is_empty());
+        assert_eq!(rule().codes(&cfg(NO_ASSERT_IN_FIXTURE)), ["KST001"]);
     }
 
     #[test]

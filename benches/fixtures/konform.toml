@@ -1,0 +1,7 @@
+# Benchmark project config: every rule family on, opt-in KNQ rules included,
+# so a slowdown in any rule shows up in `check_file`.
+[konform.lint]
+select = ["KIS", "KNQ", "KPT", "KST"]
+
+[konform.lint.module-only-imports]
+exceptions = ["__future__", "typing"]

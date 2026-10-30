@@ -1,0 +1,15 @@
+[[rules]]
+id      = "KST001"
+message = "Do not use assert inside a pytest fixture."
+match   = { kind = "assert", inside = { decorated_with = "pytest.fixture", stop_by = { kind = "function" } } }
+
+[[rules]]
+id      = "KST002"
+message = "Use the project logger instead of print()"
+match   = { callee = "print" }
+fix     = { replace = "logger.info({args})", safe = true }
+
+[[rules]]
+id      = "KST003"
+message = "Do not call os.system."
+match   = { callee = "os.system", inside = { kind = "function" } }

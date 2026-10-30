@@ -116,9 +116,10 @@ impl Violation {
     }
 }
 
-#[cfg(test)]
 impl Violation {
-    /// An error of `rule` on `line` (column 0), for tests.
+    /// An error of `rule` on `line` (column 0), for tests (also the binary's,
+    /// which cannot see the library's `cfg(test)` items).
+    #[doc(hidden)]
     pub fn for_test(rule: &str, line: usize, message: &str) -> Self {
         Violation {
             rule: rule.to_owned(),

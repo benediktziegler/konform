@@ -1,0 +1,142 @@
+name: Benchmarks
+
+# Two complementary performance checks, modelled on ruff / ty:
+#
+# * `codspeed`: the micro-benchmarks in `benches/` under CodSpeed's
+#   simulation mode, which counts instructions instead of timing, so results
+#   are stable on shared runners. CodSpeed compares each PR with `main` and
+#   comments on the PR when a benchmark gets slower.
+# * `ecosystem`: the PR's binary against its base on real projects
+#   (`scripts/ecosystem_check.py`), end to end: file walking, parallelism,
+#   the cache and process start-up, which the micro-benchmarks don't cover.
+#   It also diffs the diagnostics, so a behaviour change is visible too.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, "feat/**", "fix/**", "chore/**"]
+    paths:
+      - "src/**"
+      - "benches/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "scripts/ecosystem_check.py"
+      - ".github/workflows/benchmarks.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  rust_version: "1.97"
+
+jobs:
+  codspeed:
+    name: CodSpeed
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC authentication with CodSpeed
+    steps:
+      - uses: actions/checkout@v7
+
+      # The benchmarks build a module probe for this interpreter; pin it so
+      # its sys.path (and so KIS001's work) is the same on every run.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.rust_version }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "benchmarks"
+
+      - name: Install cargo-codspeed
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
+
+      - name: Build benchmarks
+        run: cargo codspeed build -m simulation
+
+      - name: Run benchmarks
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: simulation
+          run: cargo codspeed run
+
+  ecosystem:
+    name: Ecosystem timing
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: candidate
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: baseline
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.rust_version }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ecosystem"
+          workspaces: "candidate -> ../target"
+
+      # Both builds share one target directory, so the base build reuses the
+      # dependencies compiled for the PR and only rebuilds konform itself.
+      - name: Build candidate
+        working-directory: candidate
+        run: |
+          cargo build --profile dev-release --target-dir ../target
+          cp ../target/dev-release/konform ../konform-candidate
+
+      - name: Build baseline
+        working-directory: baseline
+        run: |
+          cargo build --profile dev-release --target-dir ../target
+          cp ../target/dev-release/konform ../konform-baseline
+
+      - name: Compare on real projects
+        run: >
+          python3 candidate/scripts/ecosystem_check.py
+          konform-baseline konform-candidate
+          --projects-dir ecosystem-projects
+          --output ecosystem-report.md
+
+      - name: Publish report
+        if: always()
+        run: |
+          if [ -f ecosystem-report.md ]; then
+            cat ecosystem-report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ecosystem-report
+          path: ecosystem-report.md
+          if-no-files-found: ignore

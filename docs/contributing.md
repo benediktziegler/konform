@@ -11,6 +11,30 @@ $ cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings
 $ cargo run -- check path/to/file.py     # run the dev binary
 ```
 
+## Performance
+
+Two checks in `.github/workflows/benchmarks.yml` guard against slowdowns, the same
+split ruff and ty use:
+
+- **Benchmarks** (`benches/check.rs`): the engine on generated modules of three sizes,
+  each rule family on its own, and `--fix`. CI runs them under
+  [CodSpeed](https://codspeed.io), which counts instructions rather than timing them, so
+  results are stable on shared runners; CodSpeed comments on the PR when a benchmark gets
+  slower. A new rule is covered as soon as its family runs, but give the generated module
+  in `python_module` something for it to report.
+- **Ecosystem check** (`scripts/ecosystem_check.py`): the PR's binary against its base on
+  pinned real projects (django, sympy, flask), cold and warm. It fails when a cold run is
+  more than 15% slower, and diffs the diagnostics, so a behaviour change shows in the same
+  report (the job summary).
+
+```console
+$ cargo bench --bench check                      # wall-clock, local
+$ cargo bench --bench check -- check_rule_family # one group
+$ cargo build --profile dev-release && cp target/dev-release/konform /tmp/konform-new
+$ git switch main && cargo build --profile dev-release
+$ scripts/ecosystem_check.py target/dev-release/konform /tmp/konform-new
+```
+
 ## Build the Python package
 
 ```console

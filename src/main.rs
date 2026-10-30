@@ -1,17 +1,7 @@
-mod cache;
-mod cli;
-mod cli_docs;
-mod config;
-mod engine;
-mod git;
-mod lsp;
-mod markdown;
-mod migrations;
-mod module_probe;
-mod output;
-mod rules;
-mod theme;
-mod types;
+use konform::{
+    cache, cli, cli_docs, config, engine, git, lsp, markdown, module_probe, output, rules, theme,
+    types,
+};
 
 use cache::Cache;
 use cache::FileCacheKey;

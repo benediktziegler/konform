@@ -1,0 +1,15 @@
+[[rules]]
+id      = "KPT001"
+message = "Remove bare print(): use the project logger instead."
+pattern = '^\s*print\s*\('
+level   = "warning"
+
+[[rules]]
+id      = "KPT002"
+message = "Remove breakpoint(): debugging artefact must not be committed."
+pattern = '^\s*breakpoint\s*\(\s*\)'
+
+[[rules]]
+id      = "KPT003"
+message = "Use the project HTTP client instead of requests."
+pattern = '\brequests\.(get|post|put|delete)\('

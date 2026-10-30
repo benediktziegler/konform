@@ -109,3 +109,10 @@ strip         = false
 tempfile = "3"
 assert_cmd = "2.0"
 predicates = "3"
+# Benchmarks. The CodSpeed fork is a drop-in `divan`: plain wall-clock runs
+# under `cargo bench`, instruction counts under `cargo codspeed` in CI.
+divan = { package = "codspeed-divan-compat", version = "6" }
+
+[[bench]]
+name    = "check"
+harness = false

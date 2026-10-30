@@ -14,7 +14,7 @@ use divan::{black_box, Bencher};
 use konform::config::{load_config, resolve_python, Config};
 use konform::engine::{run_check, run_fix, CheckInput};
 use konform::module_probe::ModuleProbe;
-use konform::rules::{all_rules, Rule};
+use konform::rules::{all_rules, FileContext, Rule};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
@@ -63,6 +63,40 @@ fn check_file(bencher: Bencher, size: usize) {
     });
 }
 
+/// Parsing alone (AST and line index), the floor under every check.
+#[divan::bench(args = SIZES)]
+fn parse_file(bencher: Bencher, size: usize) {
+    let source = python_module(size);
+    let path = path();
+    bencher.bench(|| {
+        let ctx = FileContext::from_source(path.clone(), black_box(source.clone()));
+        black_box(ctx.stmts().len())
+    });
+}
+
+/// A file with nothing to report under the default config, the common case
+/// in CI and the editor.
+#[divan::bench(args = SIZES)]
+fn check_clean_file(bencher: Bencher, size: usize) {
+    let project = &*PROJECT;
+    let config = Config::default();
+    let mut source = String::from("\"\"\"Clean module.\"\"\"\nimport json\nimport os.path\n");
+    for i in 0..size * 10 {
+        write!(
+            source,
+            "\n\ndef func_{i}(values: list[int]) -> str:\n    \"\"\"Doc.\"\"\"\n    \
+             total = sum(v * {i} for v in values)\n    \
+             return json.dumps({{\"path\": os.path.join(\"a\", str(total))}})\n"
+        )
+        .unwrap();
+    }
+    let path = path();
+    bencher.bench(|| {
+        let input = CheckInput::new(&path, black_box(&source));
+        black_box(run_check(&input, &project.rules, &config))
+    });
+}
+
 #[divan::bench(args = FAMILIES)]
 fn check_rule_family(bencher: Bencher, family: &str) {
     let project = &*PROJECT;
@@ -99,6 +133,7 @@ fn python_module(repeat: usize) -> String {
          from __future__ import annotations\n\n\
          import os\n\
          import json\n\
+         import logging\n\
          from collections import abc\n\
          from os.path import join, dirname\n\
          from json import loads  # noqa: KIS001\n\
@@ -143,6 +178,7 @@ class Service{i}:
 
     def run(self, command: str) -> int:
         result = os.system(command)  # noqa: KST003
+        logging.warn("ran %s: %s", command, result)
         print(f"ran {{command}}: {{result}}")
         return result
 

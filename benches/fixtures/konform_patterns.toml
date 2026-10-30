@@ -13,3 +13,9 @@ pattern = '^\s*breakpoint\s*\(\s*\)'
 id      = "KPT003"
 message = "Use the project HTTP client instead of requests."
 pattern = '\brequests\.(get|post|put|delete)\('
+
+[[rules]]
+id          = "KPT004"
+message     = "Use logging.warning instead of logging.warn."
+pattern     = 'logging\.warn\('
+replacement = "logging.warning("

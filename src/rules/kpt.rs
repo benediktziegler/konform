@@ -527,6 +527,10 @@ impl Rule for KptRule {
             .collect()
     }
 
+    fn codes(&self, cfg: &toml::Value) -> Vec<String> {
+        self.patterns(cfg).iter().map(|p| p.id.clone()).collect()
+    }
+
     fn docs(&self) -> RuleDocs {
         RuleDocs {
             what_it_does: "Checks every source file against regular expressions (Rust \
@@ -929,6 +933,18 @@ mod tests {
     }
 
     // ── catalog (rule --list / --explain) ──────────────────────────────────
+
+    #[test]
+    fn codes_are_the_pattern_ids() {
+        assert!(rule()
+            .codes(&toml::Value::Table(toml::map::Map::new()))
+            .is_empty());
+        let cfg = cfg_with_rules(
+            "[[rules]]\nid = \"KPT010\"\nmessage = \"m\"\npattern = 'x'\n\n\
+             [[rules]]\nid = \"KPT011\"\nmessage = \"m\"\npattern = 'y'\n",
+        );
+        assert_eq!(rule().codes(&cfg), ["KPT010", "KPT011"]);
+    }
 
     #[test]
     fn catalog_without_patterns_is_the_umbrella_rule() {

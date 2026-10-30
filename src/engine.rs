@@ -140,16 +140,14 @@ pub fn enabled_codes(rules: &[Box<dyn Rule>], config: &Config) -> Vec<String> {
     let selection = config.selection();
     active_rules(rules, config)
         .flat_map(|r| {
+            let codes = r.codes(config.rule_config(r.config_name()));
             if r.gates_per_violation() {
-                // Without user rules the catalog holds only the umbrella
-                // entry (named like the rule itself), which reports nothing.
-                r.catalog(config.rule_config(r.config_name()))
+                codes
                     .into_iter()
-                    .filter(|doc| doc.name != r.name() && selection.is_enabled(&doc.code))
-                    .map(|doc| doc.code)
+                    .filter(|code| selection.is_enabled(code))
                     .collect()
             } else {
-                vec![r.code().to_owned()]
+                codes
             }
         })
         .collect()

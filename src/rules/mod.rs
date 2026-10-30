@@ -403,6 +403,16 @@ pub trait Rule: Send + Sync {
         vec![RuleDoc::of(self)]
     }
 
+    /// The codes this rule can report under `cfg`: [`Rule::code`], or for
+    /// a rule that [gates per violation](Rule::gates_per_violation), the codes
+    /// from its configuration (none when it has no user rules).
+    ///
+    /// The engine asks for these on every checked file, so overrides must be
+    /// cheap; unlike [`Rule::catalog`] they render no documentation.
+    fn codes(&self, _cfg: &toml::Value) -> Vec<String> {
+        vec![self.code().to_owned()]
+    }
+
     /// Hash of everything besides the checked file that decides this rule's
     /// output and is not part of `cfg` itself -- e.g. patterns loaded from an
     /// external file. Folded into the cache key so editing such inputs

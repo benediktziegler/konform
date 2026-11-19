@@ -99,23 +99,36 @@ impl ServerProcess {
         }
     }
 
+    /// Handshake as a client that can watch files for the server.
     fn initialize(&mut self) -> Value {
+        let caps =
+            json!({ "workspace": { "didChangeWatchedFiles": { "dynamicRegistration": true } } });
+        let (resp, reg) = self.initialize_with(caps);
+        // The server registers its config/rule-file watchers right after the
+        // handshake (regression guard: this used to never happen).
+        let watchers = reg["params"]["registrations"][0]["registerOptions"]["watchers"].to_string();
+        assert!(watchers.contains("konform_rules.toml"), "{watchers}");
+        resp
+    }
+
+    /// Handshake with `capabilities`; returns the initialize response and
+    /// the server's `client/registerCapability` request (answered).
+    fn initialize_with(&mut self, capabilities: Value) -> (Value, Value) {
         send(
             &mut self.stdin,
             "initialize",
             Some(1),
-            json!({ "processId": null, "rootUri": file_uri(&self.root), "capabilities": {} }),
+            json!({ "processId": null, "rootUri": file_uri(&self.root), "capabilities": capabilities }),
         );
         let resp = read_message(&mut self.reader);
         assert_eq!(resp["id"], 1, "unexpected response id: {resp}");
         send(&mut self.stdin, "initialized", None, json!({}));
-        // The server registers its config/rule-file watchers right after the
-        // handshake (regression guard: this used to never happen).
         let reg = read_message(&mut self.reader);
         assert_eq!(reg["method"], "client/registerCapability", "{reg}");
-        let watchers = reg["params"]["registrations"][0]["registerOptions"]["watchers"].to_string();
-        assert!(watchers.contains("konform_rules.toml"), "{watchers}");
-        resp
+        let body = json!({ "jsonrpc": "2.0", "id": reg["id"], "result": null }).to_string();
+        write!(self.stdin, "Content-Length: {}\r\n\r\n{}", body.len(), body).unwrap();
+        self.stdin.flush().unwrap();
+        (resp, reg)
     }
 
     fn shutdown_and_exit(mut self) {
@@ -196,4 +209,52 @@ fn server_exits_promptly_after_shutdown_and_exit() {
         start.elapsed() < Duration::from_secs(5),
         "server took too long to exit after shutdown/exit"
     );
+}
+
+/// A client that cannot register file watchers (here: one that declares no
+/// capabilities) still gets diagnostics refreshed when the config changes:
+/// the server watches the config files itself.
+#[test]
+fn config_changes_are_picked_up_without_client_file_watching() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut server = ServerProcess::spawn(&root);
+    let (_, reg) = server.initialize_with(json!({}));
+    let methods = reg["params"]["registrations"].to_string();
+    assert!(!methods.contains("didChangeWatchedFiles"), "{methods}");
+
+    let uri = file_uri(&root.join("mod.py"));
+    send(
+        &mut server.stdin,
+        "textDocument/didOpen",
+        None,
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "python",
+                "version": 1,
+                "text": "from os.path import join\n",
+            }
+        }),
+    );
+    let notif = read_notification(&mut server.reader, "textDocument/publishDiagnostics");
+    assert_eq!(notif["params"]["diagnostics"].as_array().unwrap().len(), 1);
+
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[tool.konform.lint]\nignore = [\"KIS001\"]\n",
+    )
+    .unwrap();
+    // A slow file system may report the file before its content is written,
+    // so allow an intermediate reload before the final one.
+    let cleared = (0..5).any(|_| {
+        let notif = read_notification(&mut server.reader, "textDocument/publishDiagnostics");
+        notif["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+    assert!(cleared, "KIS001 should be ignored after the config change");
+
+    server.shutdown_and_exit();
 }

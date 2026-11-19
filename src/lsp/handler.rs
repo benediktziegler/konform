@@ -32,9 +32,12 @@ use std::sync::{Arc, RwLock};
 // ---------------------------------------------------------------------------
 
 /// Identifies the purpose of a server-initiated request awaiting a response.
+#[derive(Debug, PartialEq, Eq)]
 enum PendingKind {
     /// A `workspace/configuration` request sent after `workspace/didChangeConfiguration`.
     WorkspaceConfiguration,
+    /// The `client/registerCapability` request for the config file watchers.
+    RegisterWatchers,
 }
 
 /// Maps request IDs that the server sent to the client to their [`PendingKind`].
@@ -120,8 +123,17 @@ pub fn main_loop(connection: Connection, session: Arc<RwLock<Session>>) {
 
     // `Connection::initialize` already consumed the client's `initialized`
     // notification, so the post-handshake work happens here.
-    let config = Arc::clone(&session.read().unwrap().config);
-    register_watchers(&connection, &config);
+    let (config, client_watches_files) = {
+        let sess = session.read().unwrap();
+        (Arc::clone(&sess.config), sess.client_watches_files)
+    };
+    register_watchers(&connection, &config, client_watches_files, &mut pending);
+    // When the editor cannot watch files for us, watch them ourselves.
+    let mut fallback_watcher = if client_watches_files {
+        None
+    } else {
+        start_fallback_watcher(&connection, &session)
+    };
     let notices = std::mem::take(&mut session.write().unwrap().notices);
     for notice in notices {
         show_message(&connection, MessageType::WARNING, notice);
@@ -140,9 +152,25 @@ pub fn main_loop(connection: Connection, session: Arc<RwLock<Session>>) {
             // Nothing queued (or the client is gone): publish, then wait.
             Err(_) => {
                 flush_stale(&connection, &session, &mut stale);
-                match connection.receiver.recv() {
-                    Ok(msg) => msg,
-                    Err(_) => return,
+                let never = crossbeam_channel::never();
+                let changes = fallback_watcher.as_ref().map_or(&never, |w| w.changes());
+                crossbeam_channel::select! {
+                    recv(connection.receiver) -> msg => match msg {
+                        Ok(msg) => msg,
+                        Err(_) => return,
+                    },
+                    recv(changes) -> _ => {
+                        // One save fires several events (create, write,
+                        // rename): wait for them to settle, then reload once.
+                        while changes
+                            .recv_timeout(std::time::Duration::from_millis(50))
+                            .is_ok()
+                        {}
+                        reload_and_relint(&connection, &session);
+                        // The reload may name other pattern files to watch.
+                        fallback_watcher = start_fallback_watcher(&connection, &session);
+                        continue;
+                    }
                 }
             }
         };
@@ -170,7 +198,13 @@ pub fn main_loop(connection: Connection, session: Arc<RwLock<Session>>) {
             }
             Message::Response(resp) => {
                 // Dispatch to the registered handler if we sent this request.
-                if let Some(kind) = pending.remove(&resp.id) {
+                let kind = pending.remove(&resp.id);
+                if kind == Some(PendingKind::RegisterWatchers) {
+                    // The editor refused to watch the config files.
+                    if resp.response_result.is_err() && fallback_watcher.is_none() {
+                        fallback_watcher = start_fallback_watcher(&connection, &session);
+                    }
+                } else if let Some(kind) = kind {
                     handle_pending_response(
                         kind,
                         resp.response_result
@@ -180,8 +214,7 @@ pub fn main_loop(connection: Connection, session: Arc<RwLock<Session>>) {
                         &session,
                     );
                 }
-                // Responses to other server-initiated requests (e.g.
-                // client/registerCapability) are silently discarded.
+                // Responses to other server-initiated requests are discarded.
             }
         }
     }
@@ -774,25 +807,7 @@ fn handle_notification(
                 push_diagnostics(connection, session, &p.text_document.uri);
             }
         }
-        "workspace/didChangeWatchedFiles" => {
-            // A config file changed: reload and re-lint all open documents.
-            // Rebuilding the module probe runs the Python interpreter, so do
-            // the slow part without the lock (requests keep being served by
-            // the old state meanwhile) and only swap under it.
-            let snapshot = session.read().unwrap().reload_snapshot();
-            let prepared = snapshot.prepare();
-            let uris: Vec<Uri> = {
-                let mut sess = session.write().unwrap();
-                sess.apply_reload(prepared);
-                // Collect open document URIs (can't borrow sess while pushing diags).
-                sess.documents.keys().cloned().collect()
-            };
-            show_config_errors(connection, session);
-            show_probe_problem(connection, session);
-            for uri in uris {
-                push_diagnostics(connection, session, &uri);
-            }
-        }
+        "workspace/didChangeWatchedFiles" => reload_and_relint(connection, session),
         "workspace/didChangeConfiguration" => {
             // The editor signals that its settings have changed.  Send a
             // workspace/configuration request to fetch the current "konform"
@@ -829,6 +844,8 @@ fn handle_pending_response(
     session: &Arc<RwLock<Session>>,
 ) {
     match kind {
+        // Handled in `main_loop`, which owns the fallback watcher.
+        PendingKind::RegisterWatchers => {}
         PendingKind::WorkspaceConfiguration => {
             // The result is an array with one element per requested item.
             // We requested one item ({"section": "konform"}), so result[0]
@@ -987,10 +1004,65 @@ fn watch_globs(config: &crate::config::Config) -> Vec<String> {
     globs
 }
 
+/// A config file changed: reload it and re-lint all open documents.
+///
+/// Rebuilding the module probe runs the Python interpreter, so the slow part
+/// runs without the lock (requests keep being served by the old state
+/// meanwhile) and only the swap happens under it.
+fn reload_and_relint(connection: &Connection, session: &Arc<RwLock<Session>>) {
+    let snapshot = session.read().unwrap().reload_snapshot();
+    let prepared = snapshot.prepare();
+    let uris: Vec<Uri> = {
+        let mut sess = session.write().unwrap();
+        sess.apply_reload(prepared);
+        // Collect open document URIs (can't borrow sess while pushing diags).
+        sess.documents.keys().cloned().collect()
+    };
+    show_config_errors(connection, session);
+    show_probe_problem(connection, session);
+    for uri in uris {
+        push_diagnostics(connection, session, &uri);
+    }
+}
+
+/// Watch the config and pattern files from the server, for editors that
+/// cannot watch them for us. Tells the user when that fails too.
+fn start_fallback_watcher(
+    connection: &Connection,
+    session: &Arc<RwLock<Session>>,
+) -> Option<super::watch::ConfigWatcher> {
+    let (root, globs) = {
+        let sess = session.read().unwrap();
+        (sess.root.clone(), watch_globs(&sess.config))
+    };
+    match super::watch::ConfigWatcher::start(&root, &globs) {
+        Ok(watcher) => Some(watcher),
+        Err(e) => {
+            show_message(
+                connection,
+                MessageType::WARNING,
+                format!(
+                    "konform: cannot watch the config files ({e}); restart the server \
+                     after changing them."
+                ),
+            );
+            None
+        }
+    }
+}
+
 /// Dynamically register file watchers for the config and pattern files
 /// (see [`watch_globs`]) and opt-in to `workspace/didChangeConfiguration`
 /// notifications after the server is initialized.
-fn register_watchers(connection: &Connection, config: &crate::config::Config) {
+///
+/// The file watchers are left out when the client said it cannot register
+/// them (`client_watches_files`); the server watches the files itself then.
+fn register_watchers(
+    connection: &Connection,
+    config: &crate::config::Config,
+    client_watches_files: bool,
+    pending: &mut PendingMap,
+) {
     use lsp_types::{FileSystemWatcher, GlobPattern, Registration, RegistrationParams, WatchKind};
 
     let watchers: Vec<FileSystemWatcher> = watch_globs(config)
@@ -1019,10 +1091,14 @@ fn register_watchers(connection: &Connection, config: &crate::config::Config) {
         register_options: None,
     };
 
-    let params = RegistrationParams {
-        registrations: vec![file_watcher_reg, settings_change_reg],
+    let registrations = if client_watches_files {
+        vec![file_watcher_reg, settings_change_reg]
+    } else {
+        vec![settings_change_reg]
     };
+    let params = RegistrationParams { registrations };
     let req_id = lsp_server::RequestId::from("konform-watch-config".to_owned());
+    pending.insert(req_id.clone(), PendingKind::RegisterWatchers);
     let req = Request {
         id: req_id,
         method: "client/registerCapability".into(),

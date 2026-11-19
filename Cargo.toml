@@ -83,6 +83,9 @@ filetime = "0.2"
 lsp-server  = "0.10"
 # LSP protocol types (Diagnostic, Position, …)
 lsp-types   = "0.97"
+# select! over client messages and the fallback config file watcher
+# (the same channel crate lsp-server is built on).
+crossbeam-channel = "0.5"
 
 # ---------------------------------------------------------------------------
 # Watch mode (step 26)

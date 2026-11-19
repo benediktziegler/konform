@@ -8,6 +8,7 @@
 pub mod convert;
 pub mod handler;
 pub mod session;
+mod watch;
 
 use session::Session;
 use std::path::PathBuf;
@@ -36,6 +37,7 @@ pub fn run() {
     // ── Build the shared session ───────────────────────────────────────────
     let mut session = Session::start(root);
     session.notices = notices;
+    session.client_watches_files = client_watches_files(&init_params);
     let session = Arc::new(RwLock::new(session));
 
     eprintln!("konform server: initialized");
@@ -46,6 +48,15 @@ pub fn run() {
     // ── Wait for I/O threads to finish ────────────────────────────────────
     io_threads.join().expect("I/O threads panicked");
     eprintln!("konform server: exiting");
+}
+
+/// Whether the client can register `workspace/didChangeWatchedFiles`
+/// watchers dynamically, as the server asks it to after the handshake.
+fn client_watches_files(init_params: &serde_json::Value) -> bool {
+    init_params
+        .pointer("/capabilities/workspace/didChangeWatchedFiles/dynamicRegistration")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// The session root for an `initialize` request, plus messages for the user.

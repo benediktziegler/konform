@@ -816,6 +816,7 @@ dependencies = [
  "filetime",
  "globset",
  "ignore",
+ "libc",
  "lsp-server",
  "lsp-types",
  "notify",

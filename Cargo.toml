@@ -91,6 +91,10 @@ lsp-types   = "0.97"
 notify = "8"
 terminal_size = "0.4.4"
 
+# Restore the default SIGPIPE action for CLI commands (see main.rs).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [profile.release]
 lto           = "thin"  # fat (lto=true) saves ~1-2 % binary size but costs 3-5 min; thin gives 90 % of the gain
 codegen-units = 4       # 1 disables all parallelism; 4 is a good balance for a binary this size

@@ -1376,3 +1376,35 @@ fn check_clean_file_prints_success_line_in_bold_green() {
         .success()
         .stderr(contains("\x1b[1m\x1b[32mAll checks passed!"));
 }
+
+/// A reader that stops early (`konform check ... | head`) must not make
+/// konform panic with "failed printing to stdout: Broken pipe".
+#[cfg(unix)]
+#[test]
+fn closed_stdout_pipe_does_not_panic() {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("big.py");
+    let source: String = (0..5000)
+        .map(|i| format!("from os.path import join{i}\n"))
+        .collect();
+    std::fs::write(&file, source).unwrap();
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("konform"))
+        .args(["check", "--no-cache", "--output-format", "json"])
+        .arg(&file)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut first = [0u8; 16];
+    stdout.read_exact(&mut first).unwrap();
+    drop(stdout);
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_ne!(out.status.code(), Some(101), "{stderr}");
+}

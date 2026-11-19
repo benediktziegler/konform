@@ -1520,6 +1520,22 @@ fn run_clean(args: CleanArgs) {
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Let a closed output pipe end the process quietly, as it does for `cat`.
+///
+/// Rust ignores SIGPIPE, so `konform check --output-format json | head`
+/// used to panic with "failed printing to stdout: Broken pipe" once `head`
+/// exited. Restoring the default action makes the kernel end the process
+/// instead. The language server keeps Rust's default: there a closed pipe
+/// is an I/O error that `lsp-server` reports and the server shuts down.
+fn restore_default_sigpipe() {
+    #[cfg(unix)]
+    // SAFETY: called on the main thread before any other thread starts;
+    // `signal` with SIG_DFL has no other preconditions.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 fn main() {
     let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     inject_default_subcommand(&mut args);
@@ -1540,6 +1556,10 @@ fn main() {
 
     // Expose --isolated for config loading.
     let isolated = cli.isolated;
+
+    if !matches!(cli.command, Some(Command::Server) | None) {
+        restore_default_sigpipe();
+    }
 
     match cli.command {
         Some(Command::Server) | None => lsp::run(),

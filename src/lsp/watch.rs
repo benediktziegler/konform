@@ -121,17 +121,21 @@ mod tests {
 
     #[test]
     fn only_absolute_globs_outside_the_root_add_directories() {
-        let root = Path::new("/ws");
+        // Absolute on every platform (`/ws` is not absolute on Windows).
+        let base = std::env::temp_dir();
+        let root = base.join("ws");
+        let shared = base.join("shared");
+        let glob = |p: PathBuf| p.to_string_lossy().into_owned();
         let dirs = outside_dirs(
-            root,
+            &root,
             &[
                 "**/pyproject.toml".into(),
-                "/ws/base.toml".into(),
-                "/shared/base.toml".into(),
-                "/shared/other.toml".into(),
+                glob(root.join("base.toml")),
+                glob(shared.join("base.toml")),
+                glob(shared.join("other.toml")),
             ],
         );
-        assert_eq!(dirs, [PathBuf::from("/shared")]);
+        assert_eq!(dirs, [shared]);
     }
 
     #[test]

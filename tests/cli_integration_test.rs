@@ -1441,3 +1441,24 @@ fn color_environment_variables_are_honored() {
     assert!(fixed.contains("fixed"), "{fixed}");
     assert!(!fixed.contains('\u{1b}'), "{fixed:?}");
 }
+
+/// A typo in a rule selector used to be accepted without a word.
+#[test]
+fn unknown_rule_selectors_are_warned_about() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    std::fs::write(&file, "import os\n").unwrap();
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[tool.konform.lint]\nignore = [\"XYZ9\"]\n",
+    )
+    .unwrap();
+    let mut cmd = Command::cargo_bin("konform").unwrap();
+    cmd.args(["check", "--no-cache", "--select", "KIS,FOO123"])
+        .arg(&file)
+        .assert()
+        .success()
+        .stderr(contains("unknown rule selector `FOO123` in `lint.select`"))
+        .stderr(contains("unknown rule selector `XYZ9` in `lint.ignore`"))
+        .stderr(contains("`KIS`").not());
+}

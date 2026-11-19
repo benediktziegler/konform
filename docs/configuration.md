@@ -46,6 +46,12 @@ server shows it. konform never silently falls back to the defaults.
 `konform check --show-settings .` prints the settings in effect, after `extend` and any
 CLI flags, along with the config file used and the enabled rules.
 
+Rule selectors (`select`, `extend-select`, `ignore`, `fixable`, `unfixable` and the
+codes in `per-file-ignores`) match codes by prefix. A selector that matches no rule
+code, built-in or user-defined, is most likely a typo: `check` warns about it, and so
+does the language server. When konform renames a rule code, the old code keeps working
+in these settings and in `# noqa` comments, with a warning to update it.
+
 ## Per-rule tables
 
 Each rule's settings live in a table keyed by a stable *config name* (shown by

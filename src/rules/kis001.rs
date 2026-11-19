@@ -1218,6 +1218,23 @@ fn apply_fixes(ctx: &FileContext, probe: &ModuleProbe, exceptions: &[String]) ->
         }
     }
 
+    // ── Phase 4b: drop top-level import lines that phase 3 emptied ────────
+    // Phase 3 blanks a fully removed import instead of deleting it, so line
+    // indices stay stable for the phases above. An empty string keeps the
+    // slot (later inserts still line up) but writes nothing, so the fix does
+    // not leave a stray blank line where the old `from X import y` stood.
+    for imp in imports.iter().filter(|imp| imp.is_top_level) {
+        let start = imp.start_line - 1;
+        if !aliases_to_remove.contains_key(&start) {
+            continue;
+        }
+        for i in start..imp.end_line.min(lines_out.len()) {
+            if lines_out[i] == eol && !lines[i].trim().is_empty() {
+                lines_out[i].clear();
+            }
+        }
+    }
+
     // ── Phase 5a: inject deferred nested-scope imports in place ───────────
     deferred_nested_inserts.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     for (nested_insert_offset, (insert_pos, line)) in deferred_nested_inserts.iter().enumerate() {
@@ -1627,6 +1644,25 @@ mod tests {
         let source = "import os\nx = 1\n";
         let result = rule().fix(&ctx(source), &empty_cfg()).unwrap();
         assert!(result.is_none(), "clean file should not be modified");
+    }
+
+    // ── regression tests: removed top-level imports leave no blank line ───
+
+    #[test]
+    fn fully_removed_import_leaves_no_blank_line() {
+        let source = "from os.path import join\nprint(join('a'))\n";
+        let fixed = rule().fix(&ctx(source), &empty_cfg()).unwrap().unwrap();
+        assert_eq!(fixed, "import os.path\nprint(os.path.join('a'))\n");
+    }
+
+    #[test]
+    fn fully_removed_paren_import_leaves_no_blank_lines() {
+        let source = "from os.path import (\n    join,\n    exists,\n)\nimport sys\n\nprint(join('a'), exists('b'), sys)\n";
+        let fixed = rule().fix(&ctx(source), &empty_cfg()).unwrap().unwrap();
+        assert_eq!(
+            fixed,
+            "import os.path\nimport sys\n\nprint(os.path.join('a'), os.path.exists('b'), sys)\n"
+        );
     }
 
     // ── regression tests: new-import anchor only uses top-level imports ───

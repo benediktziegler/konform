@@ -16,10 +16,14 @@ use std::path::Path;
 
 /// Returns `true` when stderr should emit ANSI colour codes.
 ///
-/// Mirrors ruff / ripgrep behaviour:
-/// * Strip colours when stderr is not a TTY.
-/// * Always strip when `NO_COLOR` is set (<https://no-color.org>).
-/// * Always strip when `TERM=dumb`.
+/// `--color always|never` (or `KONFORM_COLOR`) decides outright. Otherwise,
+/// as in Ruff and ty (and <https://no-color.org>, <https://force-color.org>,
+/// <https://bixense.com/clicolors/>), the first of these that applies wins:
+/// 1. `NO_COLOR` set and non-empty: no colour.
+/// 2. `FORCE_COLOR` set and non-empty, or `CLICOLOR_FORCE` set and not `0`:
+///    colour, even when piped.
+/// 3. `TERM=dumb` or `CLICOLOR=0`: no colour.
+/// 4. Colour when the stream is a terminal.
 pub fn colors_enabled() -> bool {
     colors_enabled_for(std::io::stderr().is_terminal())
 }
@@ -34,15 +38,44 @@ fn colors_enabled_for(is_terminal: bool) -> bool {
     match COLOR_PREFERENCE.get().copied().unwrap_or(ColorWhen::Auto) {
         ColorWhen::Always => true,
         ColorWhen::Never => false,
-        ColorWhen::Auto => {
-            if std::env::var_os("NO_COLOR").is_some() {
-                return false;
-            }
-            if std::env::var("TERM").is_ok_and(|t| t == "dumb") {
-                return false;
-            }
-            is_terminal
-        }
+        ColorWhen::Auto => auto_colors(|name| std::env::var_os(name), is_terminal),
+    }
+}
+
+/// The `--color auto` decision, with the environment passed in for tests.
+fn auto_colors(var: impl Fn(&str) -> Option<std::ffi::OsString>, is_terminal: bool) -> bool {
+    let set = |name: &str| var(name).is_some_and(|v| !v.is_empty());
+    let is = |name: &str, value: &str| var(name).is_some_and(|v| v == value);
+    if set("NO_COLOR") {
+        return false;
+    }
+    if set("FORCE_COLOR") || (set("CLICOLOR_FORCE") && !is("CLICOLOR_FORCE", "0")) {
+        return true;
+    }
+    if is("TERM", "dumb") || is("CLICOLOR", "0") {
+        return false;
+    }
+    is_terminal
+}
+
+/// `s` styled by `style` when stderr gets colour (see [`colors_enabled`]).
+///
+/// For one-off messages such as `warning:` or `fixed` that do not go
+/// through the [`theme::Palette`] of the violation renderer.
+pub fn paint_stderr(s: &str, style: impl FnOnce(&str) -> String) -> String {
+    if colors_enabled() {
+        style(s)
+    } else {
+        s.to_owned()
+    }
+}
+
+/// Like [`paint_stderr`], for output written to stdout.
+pub fn paint_stdout(s: &str, style: impl FnOnce(&str) -> String) -> String {
+    if stdout_colors_enabled() {
+        style(s)
+    } else {
+        s.to_owned()
     }
 }
 
@@ -941,6 +974,55 @@ pub fn print_statistics(
 
 #[cfg(test)]
 mod tests {
+    // ── colour environment variables ─────────────────────────────────────
+
+    fn auto_with(vars: &[(&str, &str)], is_terminal: bool) -> bool {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        super::auto_colors(
+            |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.into()),
+            is_terminal,
+        )
+    }
+
+    #[test]
+    fn colors_follow_the_terminal_by_default() {
+        assert!(auto_with(&[], true));
+        assert!(!auto_with(&[], false));
+    }
+
+    #[test]
+    fn no_color_wins_over_force_color() {
+        assert!(!auto_with(&[("NO_COLOR", "1"), ("FORCE_COLOR", "1")], true));
+        assert!(!auto_with(
+            &[("NO_COLOR", "1"), ("CLICOLOR_FORCE", "1")],
+            true
+        ));
+    }
+
+    #[test]
+    fn empty_no_color_is_ignored() {
+        assert!(auto_with(&[("NO_COLOR", "")], true));
+    }
+
+    #[test]
+    fn force_color_and_clicolor_force_color_a_pipe() {
+        assert!(auto_with(&[("FORCE_COLOR", "1")], false));
+        assert!(auto_with(&[("CLICOLOR_FORCE", "1")], false));
+        assert!(!auto_with(&[("CLICOLOR_FORCE", "0")], false));
+        assert!(!auto_with(&[("FORCE_COLOR", "")], false));
+        assert!(auto_with(&[("FORCE_COLOR", "1"), ("TERM", "dumb")], false));
+    }
+
+    #[test]
+    fn clicolor_zero_and_dumb_terminals_turn_colour_off() {
+        assert!(!auto_with(&[("CLICOLOR", "0")], true));
+        assert!(!auto_with(&[("TERM", "dumb")], true));
+        assert!(auto_with(&[("CLICOLOR", "1")], true));
+    }
+
     use super::*;
 
     // ── Zuul output ────────────────────────────────────────────────────────

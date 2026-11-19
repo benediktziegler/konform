@@ -540,7 +540,12 @@ impl Cache {
             ignore,
             env_fingerprint,
             rules_fingerprint,
-            &mut |msg| eprintln!("{} {msg}", "warning:".yellow().bold()),
+            &mut |msg| {
+                eprintln!(
+                    "{} {msg}",
+                    crate::output::paint_stderr("warning:", |s| s.yellow().bold().to_string())
+                )
+            },
         )
     }
 

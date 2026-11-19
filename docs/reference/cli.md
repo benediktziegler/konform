@@ -27,7 +27,7 @@ Available on every command.
 
 | Option | Description |
 | ------ | ----------- |
-| `--color <COLOR>` | Control when coloured output is used<br><br>• `auto`: Emit colours when stderr is a TTY and NO_COLOR is unset (default)<br>• `always`: Always emit ANSI colours<br>• `never`: Never emit ANSI colours<br><br>Default: `auto`<br><br>Environment variable: `KONFORM_COLOR` |
+| `--color <COLOR>` | Control when coloured output is used<br><br>• `auto`: Emit colours on a TTY, following NO_COLOR, FORCE_COLOR and CLICOLOR (default)<br>• `always`: Always emit ANSI colours<br>• `never`: Never emit ANSI colours<br><br>Default: `auto`<br><br>Environment variable: `KONFORM_COLOR` |
 | `--isolated` | Ignore all configuration files; use built-in defaults |
 
 ### Log levels

@@ -1408,3 +1408,36 @@ fn closed_stdout_pipe_does_not_panic() {
     assert!(!stderr.contains("panicked"), "{stderr}");
     assert_ne!(out.status.code(), Some(101), "{stderr}");
 }
+
+/// `FORCE_COLOR` colours piped output; `NO_COLOR` beats it, including the
+/// one-off `fixed` line that used to be coloured unconditionally.
+#[test]
+fn color_environment_variables_are_honored() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mod.py");
+    let run = |vars: &[(&str, &str)], fix: bool| {
+        std::fs::write(&file, "from os.path import join\nprint(join('a'))\n").unwrap();
+        let mut cmd = Command::cargo_bin("konform").unwrap();
+        cmd.env_remove("NO_COLOR")
+            .env_remove("FORCE_COLOR")
+            .env_remove("CLICOLOR_FORCE")
+            .env_remove("CLICOLOR")
+            .env_remove("KONFORM_COLOR")
+            .args(["check", "--no-cache"]);
+        if fix {
+            cmd.arg("--fix");
+        }
+        for (k, v) in vars {
+            cmd.env(k, v);
+        }
+        let out = cmd.arg(&file).output().unwrap();
+        String::from_utf8(out.stderr).unwrap()
+    };
+    assert!(!run(&[], false).contains('\u{1b}'));
+    assert!(run(&[("FORCE_COLOR", "1")], false).contains('\u{1b}'));
+    assert!(run(&[("CLICOLOR_FORCE", "1")], false).contains('\u{1b}'));
+    assert!(!run(&[("FORCE_COLOR", "1"), ("NO_COLOR", "1")], false).contains('\u{1b}'));
+    let fixed = run(&[], true);
+    assert!(fixed.contains("fixed"), "{fixed}");
+    assert!(!fixed.contains('\u{1b}'), "{fixed:?}");
+}

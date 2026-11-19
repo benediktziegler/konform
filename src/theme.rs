@@ -203,7 +203,7 @@ use std::sync::OnceLock;
 /// User-specified colour output preference (from `--color`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum ColorWhen {
-    /// Emit colours when stderr is a TTY and NO_COLOR is unset (default).
+    /// Emit colours on a TTY, following NO_COLOR, FORCE_COLOR and CLICOLOR (default).
     #[default]
     Auto,
     /// Always emit ANSI colours.

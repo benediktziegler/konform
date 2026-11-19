@@ -44,11 +44,37 @@ fn read_message(reader: &mut impl BufRead) -> Value {
     serde_json::from_slice(&buf).expect("valid JSON-RPC message")
 }
 
+/// Messages from the server, read on a background thread so that a test
+/// waiting for a message that never comes fails instead of hanging CI.
+struct Messages(std::sync::mpsc::Receiver<Value>);
+
+impl Messages {
+    fn spawn(mut reader: BufReader<std::process::ChildStdout>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(msg) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_message(&mut reader)))
+            {
+                if tx.send(msg).is_err() {
+                    break;
+                }
+            }
+        });
+        Self(rx)
+    }
+
+    fn next(&self) -> Value {
+        self.0
+            .recv_timeout(Duration::from_secs(30))
+            .expect("no message from the server within 30 s (or it exited)")
+    }
+}
+
 /// Read messages until one whose `method` matches `method`, discarding
 /// anything else (e.g. server-initiated `client/registerCapability`).
-fn read_notification(reader: &mut impl BufRead, method: &str) -> Value {
+fn read_notification(reader: &Messages, method: &str) -> Value {
     for _ in 0..20 {
-        let msg = read_message(reader);
+        let msg = reader.next();
         if msg.get("method").and_then(Value::as_str) == Some(method) {
             return msg;
         }
@@ -75,7 +101,7 @@ struct ServerProcess {
     root: std::path::PathBuf,
     child: Child,
     stdin: ChildStdin,
-    reader: BufReader<std::process::ChildStdout>,
+    reader: Messages,
 }
 
 impl ServerProcess {
@@ -90,7 +116,7 @@ impl ServerProcess {
             .spawn()
             .expect("failed to spawn `konform server`");
         let stdin = child.stdin.take().expect("piped stdin");
-        let reader = BufReader::new(child.stdout.take().expect("piped stdout"));
+        let reader = Messages::spawn(BufReader::new(child.stdout.take().expect("piped stdout")));
         Self {
             root: root.to_path_buf(),
             child,
@@ -120,10 +146,10 @@ impl ServerProcess {
             Some(1),
             json!({ "processId": null, "rootUri": file_uri(&self.root), "capabilities": capabilities }),
         );
-        let resp = read_message(&mut self.reader);
+        let resp = self.reader.next();
         assert_eq!(resp["id"], 1, "unexpected response id: {resp}");
         send(&mut self.stdin, "initialized", None, json!({}));
-        let reg = read_message(&mut self.reader);
+        let reg = self.reader.next();
         assert_eq!(reg["method"], "client/registerCapability", "{reg}");
         let body = json!({ "jsonrpc": "2.0", "id": reg["id"], "result": null }).to_string();
         write!(self.stdin, "Content-Length: {}\r\n\r\n{}", body.len(), body).unwrap();
@@ -133,7 +159,7 @@ impl ServerProcess {
 
     fn shutdown_and_exit(mut self) {
         send(&mut self.stdin, "shutdown", Some(999), Value::Null);
-        let resp = read_message(&mut self.reader);
+        let resp = self.reader.next();
         assert_eq!(resp["id"], 999, "unexpected response to shutdown: {resp}");
         send(&mut self.stdin, "exit", None, Value::Null);
 
@@ -181,7 +207,7 @@ fn did_open_over_real_stdio_publishes_diagnostics() {
         }),
     );
 
-    let notif = read_notification(&mut server.reader, "textDocument/publishDiagnostics");
+    let notif = read_notification(&server.reader, "textDocument/publishDiagnostics");
     let diagnostics = notif["params"]["diagnostics"]
         .as_array()
         .expect("diagnostics array");
@@ -217,7 +243,7 @@ fn server_exits_promptly_after_shutdown_and_exit() {
 #[test]
 fn config_changes_are_picked_up_without_client_file_watching() {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
+    let root = dir.path().to_path_buf();
     let mut server = ServerProcess::spawn(&root);
     let (_, reg) = server.initialize_with(json!({}));
     let methods = reg["params"]["registrations"].to_string();
@@ -237,7 +263,7 @@ fn config_changes_are_picked_up_without_client_file_watching() {
             }
         }),
     );
-    let notif = read_notification(&mut server.reader, "textDocument/publishDiagnostics");
+    let notif = read_notification(&server.reader, "textDocument/publishDiagnostics");
     assert_eq!(notif["params"]["diagnostics"].as_array().unwrap().len(), 1);
 
     std::fs::write(
@@ -248,7 +274,7 @@ fn config_changes_are_picked_up_without_client_file_watching() {
     // A slow file system may report the file before its content is written,
     // so allow an intermediate reload before the final one.
     let cleared = (0..5).any(|_| {
-        let notif = read_notification(&mut server.reader, "textDocument/publishDiagnostics");
+        let notif = read_notification(&server.reader, "textDocument/publishDiagnostics");
         notif["params"]["diagnostics"]
             .as_array()
             .unwrap()

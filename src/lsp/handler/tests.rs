@@ -1060,7 +1060,7 @@ fn workspace_configuration_round_trip_updates_diagnostics() {
 #[test]
 fn rejected_watcher_registration_falls_back_to_server_side_watching() {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
+    let root = dir.path().to_path_buf();
     let uri = file_uri(&root.join("mod.py"));
     let mut server = TestServer::with_default_config(root.clone());
 

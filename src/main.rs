@@ -452,7 +452,7 @@ fn run_check(args: CheckArgs, isolated: bool) {
             "{} could not run Python interpreter {:?} to resolve imports for KIS001 -- \
 every import will be reported as unresolvable and left un-fixed. \
 Check `[tool.konform] python` (or your virtualenv) and try again.",
-            "warning:".yellow().bold(),
+            output::paint_stderr("warning:", |s| s.yellow().bold().to_string()),
             python
         );
     }
@@ -557,7 +557,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
                 Err(e) => {
                     eprintln!(
                         "{} {}: {e}",
-                        "fix failed".yellow().bold(),
+                        output::paint_stderr("fix failed", |s| s.yellow().bold().to_string()),
                         stdin_display.display()
                     );
                     // Echo original on error to avoid breaking the pipe.
@@ -573,7 +573,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
                 Err(e) => {
                     eprintln!(
                         "{} {}: {e}",
-                        "fix failed".yellow().bold(),
+                        output::paint_stderr("fix failed", |s| s.yellow().bold().to_string()),
                         file_path.display()
                     );
                     continue;
@@ -585,11 +585,15 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
                     if let Err(e) = std::fs::write(file_path, &new_source) {
                         eprintln!(
                             "{} {}: {e}",
-                            "fix failed".yellow().bold(),
+                            output::paint_stderr("fix failed", |s| s.yellow().bold().to_string()),
                             file_path.display()
                         );
                     } else {
-                        eprintln!("{} {}", "fixed".green().bold(), file_path.display());
+                        eprintln!(
+                            "{} {}",
+                            output::paint_stderr("fixed", |s| s.green().bold().to_string()),
+                            file_path.display()
+                        );
                         cache.invalidate(file_path);
                         fixed_any = true;
                     }
@@ -598,7 +602,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
                 Err(e) => {
                     eprintln!(
                         "{} {}: {e}",
-                        "fix failed".yellow().bold(),
+                        output::paint_stderr("fix failed", |s| s.yellow().bold().to_string()),
                         file_path.display()
                     );
                 }
@@ -674,7 +678,7 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
                 eprintln!(
                     "{} {}:{line}: cannot add `# noqa` here (the line ends inside a string or \
 after a `\\` continuation); suppress it on another line or fix it",
-                    "warning:".yellow().bold(),
+                    output::paint_stderr("warning:", |s| s.yellow().bold().to_string()),
                     path.display()
                 );
             }
@@ -977,7 +981,10 @@ fn settings_toml(config: &config::Config, rules: &[Box<dyn rules::Rule>], python
 /// that can still do their job on the defaults.
 fn warn_config_errors(config: &config::Config) {
     for e in &config.errors {
-        eprintln!("{} {e}", "warning:".yellow().bold());
+        eprintln!(
+            "{} {e}",
+            output::paint_stderr("warning:", |s| s.yellow().bold().to_string())
+        );
     }
 }
 
@@ -996,7 +1003,10 @@ fn exit_on_config_errors(config: &config::Config, rules: &[Box<dyn rules::Rule>]
         return;
     }
     for e in &errors {
-        eprintln!("{} {e}", "error:".red().bold());
+        eprintln!(
+            "{} {e}",
+            output::paint_stderr("error:", |s| s.red().bold().to_string())
+        );
     }
     std::process::exit(2);
 }
@@ -1007,7 +1017,7 @@ fn run_ast(args: cli::AstArgs) {
         Err(e) => {
             eprintln!(
                 "{} cannot read {}: {e}",
-                "error:".red().bold(),
+                output::paint_stderr("error:", |s| s.red().bold().to_string()),
                 args.file.display()
             );
             std::process::exit(2);
@@ -1017,7 +1027,11 @@ fn run_ast(args: cli::AstArgs) {
     match rules::kst::dump_ast(&ctx) {
         Ok(tree) => print!("{tree}"),
         Err(e) => {
-            eprintln!("{} {}: {e}", "error:".red().bold(), args.file.display());
+            eprintln!(
+                "{} {}: {e}",
+                output::paint_stderr("error:", |s| s.red().bold().to_string()),
+                args.file.display()
+            );
             std::process::exit(1);
         }
     }
@@ -1036,7 +1050,7 @@ fn run_rule_tests(config: &config::Config, all: &[Box<dyn rules::Rule>]) -> ! {
             println!(
                 "{:8}  {}  {}/{total} passed",
                 r.code,
-                "FAIL".red().bold(),
+                output::paint_stdout("FAIL", |s| s.red().bold().to_string()),
                 r.passed
             );
             for f in &r.failures {
@@ -1046,10 +1060,14 @@ fn run_rule_tests(config: &config::Config, all: &[Box<dyn rules::Rule>]) -> ! {
             println!(
                 "{:8}  {}  no test.valid / test.invalid / test.fixed snippets",
                 r.code,
-                "skip".yellow()
+                output::paint_stdout("skip", |s| s.yellow().to_string())
             );
         } else {
-            println!("{:8}  {}    {total} passed", r.code, "ok".green());
+            println!(
+                "{:8}  {}    {total} passed",
+                r.code,
+                output::paint_stdout("ok", |s| s.green().to_string())
+            );
         }
     }
     if reports.is_empty() {

@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn reports_a_config_file_change() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
+        let root = dir.path().to_path_buf();
         let watcher = ConfigWatcher::start(&root, &globs()).unwrap();
         std::fs::write(root.join("pyproject.toml"), "[tool.konform]\n").unwrap();
         watcher

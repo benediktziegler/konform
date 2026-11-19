@@ -75,6 +75,39 @@ impl Default for LintConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Renamed rules
+// ---------------------------------------------------------------------------
+
+/// Rule codes that konform renamed, as `(old, new)`.
+///
+/// An old code keeps working wherever a code is accepted (`select`,
+/// `ignore`, `fixable`, `per-file-ignores`, `# noqa`), and `konform check`
+/// and the language server warn that it should be updated, as Ruff and ty
+/// do for their renamed rules. Add an entry whenever a rule code changes;
+/// never reuse an old code for a different rule.
+#[cfg(not(test))]
+pub const RULE_REDIRECTS: &[(&str, &str)] = &[];
+/// Test builds redirect a made-up code so the redirect paths are covered.
+#[cfg(test)]
+pub const RULE_REDIRECTS: &[(&str, &str)] = &[("KXX001", "KIS001")];
+
+/// The current code for `selector` when it names a renamed rule.
+pub fn redirected(selector: &str) -> Option<&'static str> {
+    RULE_REDIRECTS
+        .iter()
+        .find(|(old, _)| *old == selector)
+        .map(|(_, new)| *new)
+}
+
+/// `selectors` with every renamed code replaced by its current code.
+fn redirect_all(selectors: &[String]) -> Vec<String> {
+    selectors
+        .iter()
+        .map(|s| redirected(s).map_or_else(|| s.clone(), str::to_owned))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // RuleSelection
 // ---------------------------------------------------------------------------
 
@@ -204,7 +237,7 @@ impl PerFileIgnores {
             .filter_map(|(pat, codes)| {
                 Glob::new(pat)
                     .ok()
-                    .map(|g| (g.compile_matcher(), codes.clone()))
+                    .map(|g| (g.compile_matcher(), redirect_all(codes)))
             })
             .collect();
         Self {
@@ -266,9 +299,9 @@ impl Config {
     /// passing to rules via [`crate::rules::FileContext::selection`].
     pub fn selection(&self) -> RuleSelection {
         RuleSelection {
-            select: self.lint.select.clone(),
-            extend_select: self.lint.extend_select.clone(),
-            ignore: self.lint.ignore.clone(),
+            select: redirect_all(&self.lint.select),
+            extend_select: redirect_all(&self.lint.extend_select),
+            ignore: redirect_all(&self.lint.ignore),
         }
     }
 
@@ -334,10 +367,46 @@ impl Config {
     /// when [`RuleSelection::is_enabled`] says so.
     pub fn fix_selection(&self) -> RuleSelection {
         RuleSelection {
-            select: self.lint.fixable.clone(),
+            select: redirect_all(&self.lint.fixable),
             extend_select: vec![],
-            ignore: self.lint.unfixable.clone(),
+            ignore: redirect_all(&self.lint.unfixable),
         }
+    }
+
+    /// `lint.noqa-aliases` plus an alias from every renamed code in
+    /// [`RULE_REDIRECTS`] to its current code, so old `# noqa` comments keep
+    /// working. The project's own aliases win.
+    pub fn noqa_aliases(&self) -> HashMap<String, String> {
+        let mut aliases = self.lint.noqa_aliases.clone();
+        for (old, new) in RULE_REDIRECTS {
+            aliases
+                .entry((*old).to_owned())
+                .or_insert_with(|| (*new).to_owned());
+        }
+        aliases
+    }
+
+    /// Every rule selector in the lint settings, with the setting it is in.
+    pub fn rule_selectors(&self) -> Vec<(String, &str)> {
+        let lint = &self.lint;
+        let mut out: Vec<(String, &str)> = [
+            ("select", &lint.select),
+            ("extend-select", &lint.extend_select),
+            ("ignore", &lint.ignore),
+            ("fixable", &lint.fixable),
+            ("unfixable", &lint.unfixable),
+        ]
+        .into_iter()
+        .flat_map(|(key, list)| list.iter().map(move |s| (key.to_owned(), s.as_str())))
+        .collect();
+        let mut patterns: Vec<_> = lint.per_file_ignores.iter().collect();
+        patterns.sort();
+        for (pattern, codes) in patterns {
+            for code in codes {
+                out.push((format!("per-file-ignores.\"{pattern}\""), code.as_str()));
+            }
+        }
+        out
     }
 
     /// Return the raw TOML configuration blob for a rule, looked up by its

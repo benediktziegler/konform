@@ -99,7 +99,7 @@ pub fn run_check(
     if config.ignore_noqa {
         ctx.ignore_noqa = true;
     }
-    ctx.noqa_aliases = config.lint.noqa_aliases.clone();
+    ctx.noqa_aliases = config.noqa_aliases();
     ctx.selection = config.selection();
     let active: Vec<&dyn Rule> = active_rules(rules, config).collect();
     if active.iter().any(|r| r.audits_noqa()) {
@@ -166,6 +166,37 @@ pub fn enabled_codes(rules: &[Box<dyn Rule>], config: &Config) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Warnings about the rule selectors in `config`: renamed codes (which keep
+/// working through [`crate::config::RULE_REDIRECTS`]) and selectors that
+/// match no code at all, which usually are typos. Selectors match codes by
+/// prefix, so `KIS` and `KIS00` are fine; user-defined KPT / KST ids count.
+pub fn selector_warnings(rules: &[Box<dyn Rule>], config: &Config) -> Vec<String> {
+    let known: Vec<String> = rules
+        .iter()
+        .flat_map(|r| {
+            let mut codes = r.codes(config.rule_config(r.config_name()));
+            codes.push(r.code().to_owned());
+            codes.push(r.category().to_owned());
+            codes
+        })
+        .collect();
+    let mut warnings = Vec::new();
+    for (setting, selector) in config.rule_selectors() {
+        if let Some(new) = crate::config::redirected(selector) {
+            warnings.push(format!(
+                "`{selector}` in `lint.{setting}` has been renamed to `{new}`; \
+                 update your configuration"
+            ));
+        } else if !known.iter().any(|code| code.starts_with(selector)) {
+            warnings.push(format!(
+                "unknown rule selector `{selector}` in `lint.{setting}`: \
+                 no konform rule code starts with it"
+            ));
+        }
+    }
+    warnings
 }
 
 /// Drop the violations that `config.lint.per_file_ignores` suppresses for `path`.
@@ -257,7 +288,7 @@ pub fn run_fix(
         }) {
             let mut ctx = FileContext::from_source(input.path.to_path_buf(), src.clone());
             ctx.ignore_noqa = input.ignore_noqa || config.ignore_noqa;
-            ctx.noqa_aliases = config.lint.noqa_aliases.clone();
+            ctx.noqa_aliases = config.noqa_aliases();
             ctx.selection = config.selection();
             ctx.fix_selection = fix_selection.clone();
             ctx.unsafe_fixes = unsafe_fixes;
@@ -516,6 +547,68 @@ mod tests {
             violations.is_empty(),
             "noqa_aliases should let IS001 suppress KIS001"
         );
+    }
+
+    // ── renamed and unknown rule selectors ───────────────────────────────
+    // Test builds redirect the made-up code KXX001 to KIS001.
+
+    #[test]
+    fn renamed_code_still_selects_ignores_and_suppresses() {
+        let rules = all_rules(probe(), None);
+        let p = path();
+        let src = "from os.path import join\n";
+
+        let mut config = Config::default();
+        config.lint.select = vec!["KXX001".into()];
+        let found = run_check(&CheckInput::new(&p, src), &rules, &config);
+        assert!(found.iter().any(|v| v.rule == "KIS001"), "{found:?}");
+
+        let mut config = Config::default();
+        config.lint.ignore = vec!["KXX001".into()];
+        let found = run_check(&CheckInput::new(&p, src), &rules, &config);
+        assert!(found.iter().all(|v| v.rule != "KIS001"), "{found:?}");
+
+        let mut config = Config::default();
+        config
+            .lint
+            .per_file_ignores
+            .insert("*.py".into(), vec!["KXX001".into()]);
+        let found = run_check(&CheckInput::new(&p, src), &rules, &config);
+        assert!(found.iter().all(|v| v.rule != "KIS001"), "{found:?}");
+
+        let noqa = "from os.path import join  # noqa: KXX001\n";
+        let found = run_check(&CheckInput::new(&p, noqa), &rules, &Config::default());
+        assert!(found.iter().all(|v| v.rule != "KIS001"), "{found:?}");
+    }
+
+    #[test]
+    fn selector_warnings_name_renamed_and_unknown_selectors() {
+        let rules = all_rules(probe(), None);
+        let mut config = Config::default();
+        config.lint.select = vec!["KIS".into(), "KXX001".into(), "FOO123".into()];
+        config.lint.unfixable = vec!["KIS00".into()];
+        config
+            .lint
+            .per_file_ignores
+            .insert("tests/**".into(), vec!["E501".into(), "KNQ".into()]);
+        let warnings = selector_warnings(&rules, &config);
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings[0].contains("`KXX001` in `lint.select` has been renamed to `KIS001`"));
+        assert!(warnings[1].contains("unknown rule selector `FOO123` in `lint.select`"));
+        assert!(warnings[2].contains("`E501` in `lint.per-file-ignores.\"tests/**\"`"));
+    }
+
+    #[test]
+    fn selector_warnings_accept_user_defined_codes() {
+        let rules = all_rules(probe(), None);
+        let mut config = Config::default();
+        config.lint.rules.insert(
+            "user-defined-patterns".into(),
+            toml::from_str("[[rules]]\nid = \"ACME001\"\nmessage = \"m\"\npattern = 'x'\n")
+                .unwrap(),
+        );
+        config.lint.select = vec!["ACME001".into(), "ACME".into()];
+        assert!(selector_warnings(&rules, &config).is_empty());
     }
 
     #[test]

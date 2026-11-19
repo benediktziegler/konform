@@ -457,6 +457,14 @@ Check `[tool.konform] python` (or your virtualenv) and try again.",
         );
     }
     let active_rules = all_rules(Arc::clone(&probe), config.config_dir.clone());
+    if !theme::is_quiet() {
+        for warning in engine::selector_warnings(&active_rules, &config) {
+            eprintln!(
+                "{} {warning}",
+                output::paint_stderr("warning:", |s| s.yellow().bold().to_string())
+            );
+        }
+    }
     if args.show_settings {
         warn_config_errors(&config);
         print!("{}", settings_toml(&config, &active_rules, &python));

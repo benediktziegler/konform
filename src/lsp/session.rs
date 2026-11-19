@@ -319,8 +319,9 @@ impl Session {
         })
     }
 
-    /// Configuration problems: a broken `extend` chain, or ones reported by
-    /// the rules (e.g. invalid KST rules). The valid remainder keeps running.
+    /// Configuration problems: a broken `extend` chain, ones reported by the
+    /// rules (e.g. invalid KST rules), and unknown or renamed rule selectors.
+    /// The valid remainder keeps running.
     pub fn config_errors(&self) -> Vec<String> {
         let rule_errors = self
             .rules
@@ -331,6 +332,7 @@ impl Session {
             .iter()
             .cloned()
             .chain(rule_errors)
+            .chain(crate::engine::selector_warnings(&self.rules, &self.config))
             .collect()
     }
 
@@ -434,6 +436,18 @@ mod tests {
         // Reloading the same file again does not.
         session.reload_config();
         assert!(Arc::ptr_eq(&session.probe, &rebuilt));
+    }
+
+    #[test]
+    fn config_errors_include_unknown_rule_selectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("konform.toml"), "ignore = [\"KIS9X\"]\n").unwrap();
+        let config = load_config(Some(&root), None);
+        let session = Session::new(config, Arc::new(ModuleProbe::default()), root);
+        let errors = session.config_errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("`KIS9X`"), "{errors:?}");
     }
 
     #[test]

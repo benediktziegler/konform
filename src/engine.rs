@@ -56,9 +56,24 @@ impl<'a> CheckInput<'a> {
     }
 }
 
+/// UTF-8 byte order mark. Some Windows editors write it at the start of a file.
+const BOM: &str = "\u{feff}";
+
+/// `source` without a leading byte order mark, and whether it had one.
+///
+/// Rules see the source without the BOM, so line 1 columns start at 0 and
+/// fixes never have to step around it (as in Ruff). [`run_fix`] puts it back.
+fn strip_bom(source: &str) -> (&str, bool) {
+    match source.strip_prefix(BOM) {
+        Some(rest) => (rest, true),
+        None => (source, false),
+    }
+}
+
 impl From<&CheckInput<'_>> for FileContext {
     fn from(input: &CheckInput<'_>) -> Self {
-        let mut ctx = FileContext::from_source(input.path.to_path_buf(), input.source.to_owned());
+        let source = strip_bom(input.source).0;
+        let mut ctx = FileContext::from_source(input.path.to_path_buf(), source.to_owned());
         ctx.ignore_noqa = input.ignore_noqa;
         ctx
     }
@@ -217,7 +232,8 @@ pub fn run_fix(
     config: &Config,
     unsafe_fixes: bool,
 ) -> Result<Option<String>> {
-    let mut src = input.source.to_owned();
+    let (source, had_bom) = strip_bom(input.source);
+    let mut src = source.to_owned();
     let mut changed = false;
     let fix_selection = config.fix_selection();
 
@@ -274,6 +290,9 @@ pub fn run_fix(
         }
     }
 
+    if had_bom {
+        src.insert_str(0, BOM);
+    }
     Ok(changed.then_some(src))
 }
 
@@ -350,6 +369,31 @@ mod tests {
         let violations = run_check(&input, &rules, &Config::default());
         assert!(!violations.is_empty());
         assert_eq!(violations[0].rule, "KIS001");
+    }
+
+    #[test]
+    fn bom_does_not_shift_line_one_columns() {
+        let rules = all_rules(probe(), None);
+        let p = path();
+        let input = CheckInput::new(&p, "\u{feff}from os.path import join\n");
+        let violations = run_check(&input, &rules, &Config::default());
+        assert_eq!(violations[0].rule, "KIS001");
+        assert_eq!((violations[0].line, violations[0].col), (1, 0));
+    }
+
+    #[test]
+    fn fix_keeps_the_bom_and_converges() {
+        let rules = all_rules(probe(), None);
+        let p = path();
+        let src = "\u{feff}from os.path import join\nprint(join(\"a\", \"b\"))\n";
+        let fixed = run_fix(&CheckInput::new(&p, src), &rules, &Config::default(), false)
+            .unwrap()
+            .expect("KIS001 is fixable");
+        assert!(fixed.starts_with('\u{feff}'), "BOM must be kept: {fixed:?}");
+        assert_eq!(fixed.matches("import os.path").count(), 1, "{fixed:?}");
+        assert!(!fixed.contains("from os.path"), "{fixed:?}");
+        let rest = run_check(&CheckInput::new(&p, &fixed), &rules, &Config::default());
+        assert!(rest.iter().all(|v| v.rule != "KIS001"), "{rest:?}");
     }
 
     #[test]

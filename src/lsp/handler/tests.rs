@@ -1055,6 +1055,52 @@ fn workspace_configuration_round_trip_updates_diagnostics() {
     server.shutdown();
 }
 
+/// An editor that rejects the watcher registration still gets diagnostics
+/// refreshed on config changes: the server falls back to watching itself.
+#[test]
+fn rejected_watcher_registration_falls_back_to_server_side_watching() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let uri = file_uri(&root.join("mod.py"));
+    let mut server = TestServer::with_default_config(root.clone());
+
+    let id = server.fresh_id();
+    let params = serde_json::json!({ "capabilities": {}, "processId": null, "rootUri": null });
+    server
+        .client
+        .sender
+        .send(Message::Request(Request {
+            id,
+            method: "initialize".into(),
+            params,
+        }))
+        .unwrap();
+    server.notify("initialized", serde_json::json!({}));
+    loop {
+        match server.client.receiver.recv_timeout(TIMEOUT) {
+            Ok(Message::Request(req)) if req.method == "client/registerCapability" => {
+                let err =
+                    Response::new_err(req.id, -32601, "dynamic registration unsupported".into());
+                server.client.sender.send(Message::Response(err)).unwrap();
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => panic!("server did not register its watchers"),
+        }
+    }
+
+    server.open(&uri, KIS001_SOURCE);
+    assert_eq!(server.next_diagnostics(&uri).diagnostics.len(), 1);
+
+    std::fs::write(root.join("konform.toml"), "ignore = [\"KIS001\"]\n").unwrap();
+    // A slow file system may report the file before its content is written,
+    // so allow an intermediate reload before the final one.
+    let cleared = (0..5).any(|_| server.next_diagnostics(&uri).diagnostics.is_empty());
+    assert!(cleared, "KIS001 should be ignored after the config change");
+
+    server.shutdown();
+}
+
 #[test]
 fn did_change_watched_files_reloads_config_from_disk() {
     let dir = tempfile::tempdir().unwrap();

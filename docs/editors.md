@@ -25,7 +25,10 @@ Hovering a code in a `# noqa` comment shows that rule's documentation; a prefix 
 The server reloads rules when `pyproject.toml`, `konform.toml`,
 `konform_patterns.toml`/`.yaml`, `konform_rules.toml`, the configured `rules_file`
 (of either rule) or a file pulled in through `extend` changes. If you
-point `rules_file` or `extend` at a new path, restart the server.
+point `rules_file` or `extend` at a new path, restart the server. The editor
+normally watches these files for the server; when it can't (no dynamic
+registration for `workspace/didChangeWatchedFiles`, or it rejects the request),
+the server watches them itself.
 
 ## Workspace root and folders
 

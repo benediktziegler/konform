@@ -109,6 +109,10 @@ pub struct Session {
     /// Messages for the user queued before the main loop starts (e.g. why a
     /// fallback root was chosen); the loop shows and clears them.
     pub notices: Vec<String>,
+    /// Whether the client can register file watchers for us
+    /// (`workspace.didChangeWatchedFiles.dynamicRegistration`). When it
+    /// cannot, the server watches the config files itself.
+    pub client_watches_files: bool,
 }
 
 /// What a config reload needs from the live session, copied out so the
@@ -185,6 +189,7 @@ impl Session {
             probe_inputs,
             root,
             notices: Vec::new(),
+            client_watches_files: true,
         }
     }
 

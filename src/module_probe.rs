@@ -337,6 +337,12 @@ pub struct ModuleProbe {
     root_cache: DashMap<String, bool>,
     /// Caches [`ModuleProbe::package_exports`] per dotted package name.
     exports_cache: DashMap<String, Option<Arc<PackageExports>>>,
+    /// Caches [`resolve_path`] results for [`ModuleProbe::file_in_package`].
+    resolved_paths: DashMap<PathBuf, PathBuf>,
+    /// Caches [`ModuleProbe::package_dirs`] per dotted package name.
+    package_dirs_cache: DashMap<String, Arc<Vec<PathBuf>>>,
+    /// Caches [`ModuleProbe::reexporting_packages`] per `(module, name)`.
+    reexporters_cache: DashMap<(String, String), Arc<Vec<String>>>,
     /// `true` if the interpreter at `python` could not be invoked at all
     /// (missing binary, not executable, crashed, etc.), as opposed to
     /// running fine but simply not having a given package installed. When
@@ -417,6 +423,9 @@ impl ModuleProbe {
             cache: DashMap::new(),
             root_cache: DashMap::new(),
             exports_cache: DashMap::new(),
+            resolved_paths: DashMap::new(),
+            package_dirs_cache: DashMap::new(),
+            reexporters_cache: DashMap::new(),
             probe_unusable,
         }
     }
@@ -430,6 +439,9 @@ impl ModuleProbe {
             cache: DashMap::new(),
             root_cache: DashMap::new(),
             exports_cache: DashMap::new(),
+            resolved_paths: DashMap::new(),
+            package_dirs_cache: DashMap::new(),
+            reexporters_cache: DashMap::new(),
             probe_unusable: false,
         }
     }
@@ -747,6 +759,18 @@ impl ModuleProbe {
         }
         false
     }
+    /// [`resolve_path`], cached: it is asked about the same file once per
+    /// import and resolving costs one syscall per path component.
+    fn resolved(&self, path: &Path) -> PathBuf {
+        if let Some(v) = self.resolved_paths.get(path) {
+            return v.clone();
+        }
+        let resolved = resolve_path(path);
+        self.resolved_paths
+            .insert(path.to_path_buf(), resolved.clone());
+        resolved
+    }
+
     /// What `package/__init__.py` publishes: its literal `__all__` and the
     /// names its imports bind, each mapped to the absolute dotted path it
     /// came from.
@@ -758,10 +782,13 @@ impl ModuleProbe {
         if let Some(v) = self.exports_cache.get(package) {
             return v.clone();
         }
-        let result = self.read_package_exports(package).map(Arc::new);
+        // `entry` holds the shard lock while the file is read, so threads
+        // racing on the same package parse it once. `read_package_exports`
+        // never re-enters the cache, so this can't deadlock.
         self.exports_cache
-            .insert(package.to_owned(), result.clone());
-        result
+            .entry(package.to_owned())
+            .or_insert_with(|| self.read_package_exports(package).map(Arc::new))
+            .clone()
     }
 
     fn read_package_exports(&self, package: &str) -> Option<PackageExports> {
@@ -802,6 +829,62 @@ impl ModuleProbe {
         current
     }
 
+    /// The strict ancestor packages of `module`, nearest first and never a
+    /// top-level one, whose `__init__.py` lists `name` in `__all__` and binds
+    /// it to the same object as `module.name` (followed through further
+    /// re-exports). Cached per `(module, name)`.
+    pub fn reexporting_packages(&self, module: &str, name: &str) -> Arc<Vec<String>> {
+        let key = (module.to_owned(), name.to_owned());
+        if let Some(v) = self.reexporters_cache.get(&key) {
+            return v.clone();
+        }
+        let parts: Vec<&str> = module.split('.').collect();
+        let mut found = Vec::new();
+        let mut origin: Option<String> = None;
+        for len in (2..parts.len()).rev() {
+            let package = parts[..len].join(".");
+            let Some(exports) = self.package_exports(&package) else {
+                continue;
+            };
+            if !exports.all.contains(name) {
+                continue;
+            }
+            let Some(bound) = exports.bindings.get(name) else {
+                continue;
+            };
+            let origin =
+                origin.get_or_insert_with(|| self.canonical_origin(&format!("{module}.{name}")));
+            if self.canonical_origin(bound) == *origin {
+                found.push(package);
+            }
+        }
+        let found = Arc::new(found);
+        self.reexporters_cache.insert(key, found.clone());
+        found
+    }
+
+    /// Every directory `package` occupies in `sys_path`, both as found and
+    /// with symlinks resolved. Cached per package.
+    fn package_dirs(&self, package: &str) -> Arc<Vec<PathBuf>> {
+        if let Some(v) = self.package_dirs_cache.get(package) {
+            return v.clone();
+        }
+        let package_dir = package.replace('.', "/");
+        let mut dirs = Vec::new();
+        for base in &self.sys_path {
+            let dir = base.join(&package_dir);
+            let resolved = resolve_path(&dir);
+            if resolved != dir {
+                dirs.push(resolved);
+            }
+            dirs.push(dir);
+        }
+        let dirs = Arc::new(dirs);
+        self.package_dirs_cache
+            .insert(package.to_owned(), dirs.clone());
+        dirs
+    }
+
     /// `true` when `file` lies inside the directory of `package` in any
     /// `sys_path` entry, i.e. the file is part of that package itself.
     ///
@@ -809,13 +892,9 @@ impl ModuleProbe {
     /// symlinks (macOS's `/var` -> `/private/var`) and files not yet on
     /// disk (an unsaved editor buffer) still match.
     pub fn file_in_package(&self, file: &Path, package: &str) -> bool {
-        let files = [file.to_path_buf(), resolve_path(file)];
-        let package_dir = package.replace('.', "/");
-        self.sys_path.iter().any(|base| {
-            let dir = base.join(&package_dir);
-            let dirs = [resolve_path(&dir), dir];
-            files.iter().any(|f| dirs.iter().any(|d| f.starts_with(d)))
-        })
+        let dirs = self.package_dirs(package);
+        let matches = |f: &Path| dirs.iter().any(|d| f.starts_with(d));
+        matches(file) || matches(&self.resolved(file))
     }
 }
 
@@ -988,6 +1067,9 @@ mod tests {
             cache: DashMap::new(),
             root_cache: DashMap::new(),
             exports_cache: DashMap::new(),
+            resolved_paths: DashMap::new(),
+            package_dirs_cache: DashMap::new(),
+            reexporters_cache: DashMap::new(),
             probe_unusable: false,
         }
     }
@@ -1002,6 +1084,9 @@ mod tests {
             cache: DashMap::new(),
             root_cache: DashMap::new(),
             exports_cache: DashMap::new(),
+            resolved_paths: DashMap::new(),
+            package_dirs_cache: DashMap::new(),
+            reexporters_cache: DashMap::new(),
             probe_unusable: false,
         }
     }
@@ -1268,6 +1353,9 @@ mod tests {
             cache: DashMap::new(),
             root_cache: DashMap::new(),
             exports_cache: DashMap::new(),
+            resolved_paths: DashMap::new(),
+            package_dirs_cache: DashMap::new(),
+            reexporters_cache: DashMap::new(),
             probe_unusable: false,
         };
         assert!(probe.is_module("tests.mocks", "mock_adb_server"));
@@ -1338,6 +1426,9 @@ mod tests {
             cache: DashMap::new(),
             root_cache: DashMap::new(),
             exports_cache: DashMap::new(),
+            resolved_paths: DashMap::new(),
+            package_dirs_cache: DashMap::new(),
+            reexporters_cache: DashMap::new(),
             probe_unusable: false,
         };
 
@@ -1369,6 +1460,9 @@ mod tests {
             cache: DashMap::new(),
             root_cache: DashMap::new(),
             exports_cache: DashMap::new(),
+            resolved_paths: DashMap::new(),
+            package_dirs_cache: DashMap::new(),
+            reexporters_cache: DashMap::new(),
             probe_unusable: false,
         };
 

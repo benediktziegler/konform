@@ -258,28 +258,11 @@ fn reexporting_package_fix(
     probe: &ModuleProbe,
     file: &Path,
 ) -> Option<FixInfo> {
-    let parts: Vec<&str> = module.split('.').collect();
-    if parts.len() < 3 {
-        return None; // no strict ancestor below the top level
-    }
-    let origin = probe.canonical_origin(&format!("{module}.{attr_name}"));
-    for len in (2..parts.len()).rev() {
-        let package = parts[..len].join(".");
-        let Some(exports) = probe.package_exports(&package) else {
-            continue;
-        };
-        if !exports.all.contains(attr_name) {
-            continue;
-        }
-        let Some(bound) = exports.bindings.get(attr_name) else {
-            continue;
-        };
-        if probe.canonical_origin(bound) != origin || probe.file_in_package(file, &package) {
-            continue;
-        }
-        return package_import_fix(&package, attr_name);
-    }
-    None
+    probe
+        .reexporting_packages(module, attr_name)
+        .iter()
+        .find(|package| !probe.file_in_package(file, package))
+        .and_then(|package| package_import_fix(package, attr_name))
 }
 
 /// The fix KIS001 plans for `alias` of `imp`, if it is a non-module import

@@ -186,11 +186,13 @@ fn planned_fix(
     if name == "*" || !package.contains('.') {
         return None;
     }
-    if probe.check(package, name) != ModuleCheck::Module {
-        return None;
-    }
+    // Cheapest first: the package's (cached) exports rule out almost every
+    // import before the filesystem is probed.
     let exports = probe.package_exports(package)?;
     if !exports.all.contains(name) || !exports.bindings.contains_key(name) {
+        return None;
+    }
+    if probe.check(package, name) != ModuleCheck::Module {
         return None;
     }
     if probe.file_in_package(file, package) {
@@ -249,27 +251,24 @@ impl<'a> Analysis<'a> {
     fn for_each_candidate(&self, mut visit: impl FnMut(&ParsedImport, &ParsedAlias, Candidate)) {
         let file = self.ctx.path.as_path();
         let probe = self.probe;
-        let bound_targets = bound_import_targets(&self.imports, |imp, alias| {
-            planned_fix(imp, alias, probe, file)
-        });
+        // Built only once a candidate turns up: most files have none.
+        let bound_targets = std::cell::OnceCell::new();
         let load_names = self.ctx.load_names();
         let scope_index = self.ctx.scope_index();
 
         for imp in &self.imports {
-            if self.skip_statement(imp) {
-                continue;
-            }
             for alias in &imp.aliases {
+                // Cheapest filter first: almost no import is a candidate.
+                let Some(fix) = planned_fix(imp, alias, probe, file) else {
+                    continue;
+                };
                 let effective = alias.effective();
                 if self.all_exports.contains(effective) || self.all_exports.contains(&alias.name) {
                     continue; // re-exported by this file on purpose
                 }
-                if self.noqa_on_line(alias.line) {
+                if self.skip_statement(imp) || self.noqa_on_line(alias.line) {
                     continue;
                 }
-                let Some(fix) = planned_fix(imp, alias, probe, file) else {
-                    continue;
-                };
                 let unsafe_reason =
                     if shadowed_at_occurrences_of(effective, effective, load_names, scope_index) {
                         Some(UnsafeReason::Shadowed(effective.to_owned()))
@@ -280,7 +279,14 @@ impl<'a> Analysis<'a> {
                         scope_index,
                     ) {
                         Some(UnsafeReason::Shadowed(fix.new_bound_name.clone()))
-                    } else if overlaps_existing_import(&fix, &bound_targets) {
+                    } else if overlaps_existing_import(
+                        &fix,
+                        bound_targets.get_or_init(|| {
+                            bound_import_targets(&self.imports, |imp, alias| {
+                                planned_fix(imp, alias, probe, file)
+                            })
+                        }),
+                    ) {
                         Some(UnsafeReason::ImportOverlap(fix.new_bound_name.clone()))
                     } else {
                         None

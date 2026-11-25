@@ -1,4 +1,4 @@
-//! Shared import rewriter for the import-style rules (KIS001).
+//! Shared import rewriter for the import-style rules (KIS001, KIS003).
 //!
 //! Both rules replace `from X import name` with an import of a module plus
 //! qualified uses of `name`. This module owns the import collection, the

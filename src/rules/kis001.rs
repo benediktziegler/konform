@@ -114,7 +114,8 @@ impl Rule for Kis001Rule {
                         `alib/models/__init__.py` re-exporting `Foo`), the fix imports the \
                         nearest such package instead: `from alib import models` and \
                         `models.Foo`. It never picks a top-level package or a package that \
-                        contains the file being fixed.",
+                        contains the file being fixed. Submodules a package re-exports are \
+                        handled by [KIS003](kis003.md).",
                 },
                 DocSection {
                     title: "Unresolved imports",

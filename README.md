@@ -25,8 +25,9 @@ encode a specific style (such as the
 module-only imports) rather than universal correctness, and the list keeps
 growing.
 
-- **Opinionated import rules**: enforce module-only imports (KIS001) and flag
-  needless `from X import Y as Z` aliases (KIS002).
+- **Opinionated import rules**: enforce module-only imports (KIS001), flag
+  needless `from X import Y as Z` aliases (KIS002) and route re-exported
+  submodules through their package (KIS003).
 - **Project-specific rules**: define your own regex rules (KPT) in TOML, with
   messages, file globs and optional replacements. No plugin code.
 - **Auto-fixes** with a Ruff-style safe/unsafe split.

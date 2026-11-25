@@ -26,6 +26,7 @@ pub mod docs;
 mod import_fix;
 pub mod kis001;
 pub mod kis002;
+pub mod kis003;
 pub mod knq001;
 pub mod knq002;
 pub mod knq003;
@@ -730,8 +731,9 @@ pub fn all_rules(
     config_dir: Option<std::path::PathBuf>,
 ) -> Vec<Box<dyn Rule>> {
     vec![
-        Box::new(kis001::Kis001Rule::new(probe)),
+        Box::new(kis001::Kis001Rule::new(probe.clone())),
         Box::new(kis002::Kis002Rule::new()),
+        Box::new(kis003::Kis003Rule::new(probe)),
         Box::new(knq001::Knq001Rule::new()),
         Box::new(knq002::Knq002Rule::new()),
         Box::new(knq003::Knq003Rule::new()),

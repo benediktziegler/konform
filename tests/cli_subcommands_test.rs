@@ -478,7 +478,10 @@ fn show_settings_prints_the_merged_settings_as_toml() {
         .as_str()
         .unwrap()
         .ends_with("base.toml"));
-    assert_eq!(resolved["enabled-rules"], toml::Value::from(vec!["KIS001"]));
+    assert_eq!(
+        resolved["enabled-rules"],
+        toml::Value::from(vec!["KIS001", "KIS003"])
+    );
     let lint = &doc["konform"]["lint"];
     assert_eq!(lint["select"], toml::Value::from(vec!["KIS"]));
     assert_eq!(lint["ignore"], toml::Value::from(vec!["KIS002"]));

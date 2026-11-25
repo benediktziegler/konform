@@ -8,6 +8,7 @@ konform enables the following rules by default (when no `select` is configured).
 
 - [`module-only-imports`](kis001.md) (`KIS001`)
 - [`import-alias-policy`](kis002.md) (`KIS002`)
+- [`prefer-package-imports`](kis003.md) (`KIS003`)
 
 ## User-defined patterns (KPT)
 

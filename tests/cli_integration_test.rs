@@ -1462,3 +1462,69 @@ fn unknown_rule_selectors_are_warned_about() {
         .stderr(contains("unknown rule selector `XYZ9` in `lint.ignore`"))
         .stderr(contains("`KIS`").not());
 }
+
+/// A project whose `alib.models` package publishes its submodules and a
+/// class through `__all__`.
+fn reexport_project(app: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for (path, body) in [
+        ("pyproject.toml", "[tool.konform]\n"),
+        ("alib/__init__.py", ""),
+        (
+            "alib/models/__init__.py",
+            "from . import suba, subb\nfrom .suba import Foo\n__all__ = ['suba', 'subb', 'Foo']\n",
+        ),
+        ("alib/models/suba.py", "class Foo: ...\ndef run(): ...\n"),
+        ("alib/models/subb.py", "def run(): ...\n"),
+        ("app.py", app),
+    ] {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+    dir
+}
+
+/// KIS003 reports re-exported submodules with the import to use instead.
+#[test]
+fn kis003_reports_reexported_submodule_imports() {
+    let dir = reexport_project("from alib.models import suba\n\nsuba.run()\n");
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["check", "app.py"])
+        .assert()
+        .stderr(contains("warning[KIS003]"))
+        .stderr(contains("`from alib import models`"));
+}
+
+/// KIS001 and KIS003 fixes together converge on one package import.
+#[test]
+fn kis001_and_kis003_fixes_converge_on_the_package_import() {
+    let dir = reexport_project(
+        "from alib.models import suba\nfrom alib.models import subb\nfrom alib.models.suba import Foo\n\n\
+         suba.run()\nsubb.run()\nFoo()\n",
+    );
+    Command::cargo_bin("konform")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["check", "--fix", "app.py"])
+        .assert()
+        .success();
+    let after = std::fs::read_to_string(dir.path().join("app.py")).unwrap();
+    assert_eq!(
+        after,
+        "from alib import models\n\nmodels.suba.run()\nmodels.subb.run()\nmodels.Foo()\n"
+    );
+}
+
+/// `rule --explain KIS003` renders the new rule's documentation.
+#[test]
+fn kis003_has_rule_docs() {
+    Command::cargo_bin("konform")
+        .unwrap()
+        .args(["rule", "--explain", "KIS003"])
+        .assert()
+        .success()
+        .stdout(contains("prefer-package-imports"));
+}

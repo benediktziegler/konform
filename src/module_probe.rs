@@ -12,10 +12,11 @@ use ruff_python_ast::Stmt;
 use ruff_python_parser::parse_module;
 use seahash::SeaHasher;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// How long the interpreter may take to answer one probe query before it is
@@ -213,6 +214,113 @@ fn store_info(file: &Path, key: u64, info: &InterpreterInfo) {
     }
 }
 
+/// `path` with symlinks resolved; for a path that doesn't exist, its
+/// nearest existing ancestor is resolved and the rest appended. Falls back to
+/// `path` unchanged.
+fn resolve_path(path: &Path) -> PathBuf {
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return resolved;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+            resolve_path(parent).join(name)
+        }
+        _ => path.to_path_buf(),
+    }
+}
+
+/// The public surface of one package, read from its `__init__.py`.
+///
+/// See [`ModuleProbe::package_exports`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PackageExports {
+    /// Names listed in a literal `__all__` (list/tuple assignment or `+=`).
+    pub all: HashSet<String>,
+    /// Every name a top-level import in `__init__.py` binds in the package
+    /// namespace, mapped to the absolute dotted path it refers to. Relative
+    /// imports are resolved against the package. Importing a submodule
+    /// (`from .suba import Foo`) also binds the submodule itself (`suba`),
+    /// as Python sets it as an attribute of the package.
+    pub bindings: HashMap<String, String>,
+}
+
+impl PackageExports {
+    fn from_init(package: &str, stmts: &[Stmt]) -> Self {
+        let mut bindings: HashMap<String, String> = HashMap::new();
+        // Submodules bound implicitly by importing them; explicit bindings win.
+        let mut implicit: HashMap<String, String> = HashMap::new();
+        let prefix = format!("{package}.");
+        let note_submodule = |module: &str, implicit: &mut HashMap<String, String>| {
+            if let Some(rest) = module.strip_prefix(&prefix) {
+                let child = rest.split('.').next().unwrap_or(rest);
+                implicit
+                    .entry(child.to_owned())
+                    .or_insert_with(|| format!("{package}.{child}"));
+            }
+        };
+        for stmt in stmts {
+            match stmt {
+                Stmt::ImportFrom(node) => {
+                    let level = node.level as usize;
+                    let module = node.module.as_ref().map(|m| m.as_str());
+                    let base = if level == 0 {
+                        match module {
+                            Some(m) => m.to_owned(),
+                            None => continue,
+                        }
+                    } else {
+                        // In `pkg/__init__.py`, `.` is `pkg` itself.
+                        let parts: Vec<&str> = package.split('.').collect();
+                        let up = level - 1;
+                        if up >= parts.len() {
+                            continue;
+                        }
+                        let anchor = parts[..parts.len() - up].join(".");
+                        match module {
+                            Some(m) => format!("{anchor}.{m}"),
+                            None => anchor,
+                        }
+                    };
+                    note_submodule(&base, &mut implicit);
+                    for alias in &node.names {
+                        let name = alias.name.as_str();
+                        if name == "*" {
+                            continue;
+                        }
+                        let local = alias.asname.as_deref().unwrap_or(name);
+                        let origin = format!("{base}.{name}");
+                        note_submodule(&origin, &mut implicit);
+                        bindings.insert(local.to_owned(), origin);
+                    }
+                }
+                Stmt::Import(node) => {
+                    for alias in &node.names {
+                        let name = alias.name.as_str();
+                        note_submodule(name, &mut implicit);
+                        match alias.asname.as_deref() {
+                            Some(local) => {
+                                bindings.insert(local.to_owned(), name.to_owned());
+                            }
+                            None => {
+                                let root = name.split('.').next().unwrap_or(name);
+                                bindings.insert(root.to_owned(), root.to_owned());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (name, origin) in implicit {
+            bindings.entry(name).or_insert(origin);
+        }
+        Self {
+            all: crate::rules::collect_all_exports(stmts),
+            bindings,
+        }
+    }
+}
+
 /// Caches `(module_name, attr_name) -> is_module` probe results.
 pub struct ModuleProbe {
     /// Ordered list of directories to search, from `python3 -c "import sys,json; print(json.dumps(sys.path))"`.
@@ -227,6 +335,14 @@ pub struct ModuleProbe {
     cache: DashMap<(String, String), bool>,
     /// Caches whether a root package name exists anywhere in `sys_path`.
     root_cache: DashMap<String, bool>,
+    /// Caches [`ModuleProbe::package_exports`] per dotted package name.
+    exports_cache: DashMap<String, Option<Arc<PackageExports>>>,
+    /// Caches [`resolve_path`] results for [`ModuleProbe::file_in_package`].
+    resolved_paths: DashMap<PathBuf, PathBuf>,
+    /// Caches [`ModuleProbe::package_dirs`] per dotted package name.
+    package_dirs_cache: DashMap<String, Arc<Vec<PathBuf>>>,
+    /// Caches [`ModuleProbe::reexporting_packages`] per `(module, name)`.
+    reexporters_cache: DashMap<(String, String), Arc<Vec<String>>>,
     /// `true` if the interpreter at `python` could not be invoked at all
     /// (missing binary, not executable, crashed, etc.), as opposed to
     /// running fine but simply not having a given package installed. When
@@ -306,7 +422,27 @@ impl ModuleProbe {
             builtin_modules,
             cache: DashMap::new(),
             root_cache: DashMap::new(),
+            exports_cache: DashMap::new(),
+            resolved_paths: DashMap::new(),
+            package_dirs_cache: DashMap::new(),
+            reexporters_cache: DashMap::new(),
             probe_unusable,
+        }
+    }
+
+    /// A probe that searches exactly `roots`, without asking an interpreter.
+    #[cfg(test)]
+    pub(crate) fn for_roots(roots: &[PathBuf]) -> Self {
+        Self {
+            sys_path: roots.to_vec(),
+            builtin_modules: HashSet::new(),
+            cache: DashMap::new(),
+            root_cache: DashMap::new(),
+            exports_cache: DashMap::new(),
+            resolved_paths: DashMap::new(),
+            package_dirs_cache: DashMap::new(),
+            reexporters_cache: DashMap::new(),
+            probe_unusable: false,
         }
     }
 
@@ -623,6 +759,143 @@ impl ModuleProbe {
         }
         false
     }
+    /// [`resolve_path`], cached: it is asked about the same file once per
+    /// import and resolving costs one syscall per path component.
+    fn resolved(&self, path: &Path) -> PathBuf {
+        if let Some(v) = self.resolved_paths.get(path) {
+            return v.clone();
+        }
+        let resolved = resolve_path(path);
+        self.resolved_paths
+            .insert(path.to_path_buf(), resolved.clone());
+        resolved
+    }
+
+    /// What `package/__init__.py` publishes: its literal `__all__` and the
+    /// names its imports bind, each mapped to the absolute dotted path it
+    /// came from.
+    ///
+    /// `None` when `package` has no `__init__.py` anywhere in `sys_path`
+    /// (a plain module, a namespace package, or not installed) or when that
+    /// file does not parse. One parse per package for the probe's lifetime.
+    pub fn package_exports(&self, package: &str) -> Option<Arc<PackageExports>> {
+        if let Some(v) = self.exports_cache.get(package) {
+            return v.clone();
+        }
+        // `entry` holds the shard lock while the file is read, so threads
+        // racing on the same package parse it once. `read_package_exports`
+        // never re-enters the cache, so this can't deadlock.
+        self.exports_cache
+            .entry(package.to_owned())
+            .or_insert_with(|| self.read_package_exports(package).map(Arc::new))
+            .clone()
+    }
+
+    fn read_package_exports(&self, package: &str) -> Option<PackageExports> {
+        let package_dir = package.replace('.', "/");
+        let source = self.sys_path.iter().find_map(|base| {
+            std::fs::read_to_string(base.join(&package_dir).join("__init__.py")).ok()
+        })?;
+        let stmts = parse_module(&source).ok()?.into_suite();
+        Some(PackageExports::from_init(package, &stmts))
+    }
+
+    /// Follow `path` (`"pkg.mod.Name"`) through package `__init__.py`
+    /// re-exports to where it is actually defined, so two spellings of the
+    /// same object compare equal: `alib.models.Foo` and
+    /// `alib.models.suba.Foo` when `alib/models/__init__.py` does
+    /// `from .suba import Foo`.
+    ///
+    /// Stops at the first hop that is not a re-export, and after a fixed
+    /// number of hops so circular re-exports terminate.
+    pub fn canonical_origin(&self, path: &str) -> String {
+        const MAX_HOPS: usize = 16;
+        let mut current = path.to_owned();
+        for _ in 0..MAX_HOPS {
+            let Some((module, name)) = current.rsplit_once('.') else {
+                break;
+            };
+            let Some(next) = self
+                .package_exports(module)
+                .and_then(|exports| exports.bindings.get(name).cloned())
+            else {
+                break;
+            };
+            if next == current {
+                break;
+            }
+            current = next;
+        }
+        current
+    }
+
+    /// The strict ancestor packages of `module`, nearest first and never a
+    /// top-level one, whose `__init__.py` lists `name` in `__all__` and binds
+    /// it to the same object as `module.name` (followed through further
+    /// re-exports). Cached per `(module, name)`.
+    pub fn reexporting_packages(&self, module: &str, name: &str) -> Arc<Vec<String>> {
+        let key = (module.to_owned(), name.to_owned());
+        if let Some(v) = self.reexporters_cache.get(&key) {
+            return v.clone();
+        }
+        let parts: Vec<&str> = module.split('.').collect();
+        let mut found = Vec::new();
+        let mut origin: Option<String> = None;
+        for len in (2..parts.len()).rev() {
+            let package = parts[..len].join(".");
+            let Some(exports) = self.package_exports(&package) else {
+                continue;
+            };
+            if !exports.all.contains(name) {
+                continue;
+            }
+            let Some(bound) = exports.bindings.get(name) else {
+                continue;
+            };
+            let origin =
+                origin.get_or_insert_with(|| self.canonical_origin(&format!("{module}.{name}")));
+            if self.canonical_origin(bound) == *origin {
+                found.push(package);
+            }
+        }
+        let found = Arc::new(found);
+        self.reexporters_cache.insert(key, found.clone());
+        found
+    }
+
+    /// Every directory `package` occupies in `sys_path`, both as found and
+    /// with symlinks resolved. Cached per package.
+    fn package_dirs(&self, package: &str) -> Arc<Vec<PathBuf>> {
+        if let Some(v) = self.package_dirs_cache.get(package) {
+            return v.clone();
+        }
+        let package_dir = package.replace('.', "/");
+        let mut dirs = Vec::new();
+        for base in &self.sys_path {
+            let dir = base.join(&package_dir);
+            let resolved = resolve_path(&dir);
+            if resolved != dir {
+                dirs.push(resolved);
+            }
+            dirs.push(dir);
+        }
+        let dirs = Arc::new(dirs);
+        self.package_dirs_cache
+            .insert(package.to_owned(), dirs.clone());
+        dirs
+    }
+
+    /// `true` when `file` lies inside the directory of `package` in any
+    /// `sys_path` entry, i.e. the file is part of that package itself.
+    ///
+    /// Compares both the paths as given and their resolved forms, so
+    /// symlinks (macOS's `/var` -> `/private/var`) and files not yet on
+    /// disk (an unsaved editor buffer) still match.
+    pub fn file_in_package(&self, file: &Path, package: &str) -> bool {
+        let dirs = self.package_dirs(package);
+        let matches = |f: &Path| dirs.iter().any(|d| f.starts_with(d));
+        matches(file) || matches(&self.resolved(file))
+    }
 }
 
 impl Default for ModuleProbe {
@@ -793,6 +1066,10 @@ mod tests {
             builtin_modules: HashSet::new(),
             cache: DashMap::new(),
             root_cache: DashMap::new(),
+            exports_cache: DashMap::new(),
+            resolved_paths: DashMap::new(),
+            package_dirs_cache: DashMap::new(),
+            reexporters_cache: DashMap::new(),
             probe_unusable: false,
         }
     }
@@ -806,6 +1083,10 @@ mod tests {
             builtin_modules: builtin_modules.iter().map(|s| s.to_string()).collect(),
             cache: DashMap::new(),
             root_cache: DashMap::new(),
+            exports_cache: DashMap::new(),
+            resolved_paths: DashMap::new(),
+            package_dirs_cache: DashMap::new(),
+            reexporters_cache: DashMap::new(),
             probe_unusable: false,
         }
     }
@@ -1071,6 +1352,10 @@ mod tests {
             builtin_modules: HashSet::new(),
             cache: DashMap::new(),
             root_cache: DashMap::new(),
+            exports_cache: DashMap::new(),
+            resolved_paths: DashMap::new(),
+            package_dirs_cache: DashMap::new(),
+            reexporters_cache: DashMap::new(),
             probe_unusable: false,
         };
         assert!(probe.is_module("tests.mocks", "mock_adb_server"));
@@ -1140,6 +1425,10 @@ mod tests {
             builtin_modules: HashSet::new(),
             cache: DashMap::new(),
             root_cache: DashMap::new(),
+            exports_cache: DashMap::new(),
+            resolved_paths: DashMap::new(),
+            package_dirs_cache: DashMap::new(),
+            reexporters_cache: DashMap::new(),
             probe_unusable: false,
         };
 
@@ -1170,6 +1459,10 @@ mod tests {
             builtin_modules: HashSet::new(),
             cache: DashMap::new(),
             root_cache: DashMap::new(),
+            exports_cache: DashMap::new(),
+            resolved_paths: DashMap::new(),
+            package_dirs_cache: DashMap::new(),
+            reexporters_cache: DashMap::new(),
             probe_unusable: false,
         };
 
@@ -1207,5 +1500,145 @@ mod tests {
                  never a transient sentinel"
             );
         }
+    }
+
+    // ── package_exports / canonical_origin / file_in_package ─────────────
+
+    /// Write `files` (relative path, contents) under a fresh temp dir.
+    fn tree(files: &[(&str, &str)]) -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        for (path, body) in files {
+            let path = tmp.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+        tmp
+    }
+
+    #[test]
+    fn package_exports_reads_all_in_every_literal_form() {
+        let tmp = tree(&[(
+            "alib/models/__init__.py",
+            "__all__ = ['a']\n__all__ += ('b',)\n__all__ += ['c']\n",
+        )]);
+        let exports = probe_for(tmp.path())
+            .package_exports("alib.models")
+            .unwrap();
+        let mut all: Vec<_> = exports.all.iter().cloned().collect();
+        all.sort();
+        assert_eq!(all, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn package_exports_resolves_absolute_and_relative_bindings() {
+        let tmp = tree(&[(
+            "alib/models/__init__.py",
+            "from . import suba\n\
+             from .subb import Foo\n\
+             from .subc import Bar as Baz\n\
+             from alib.models.subd import Qux\n\
+             from ..other import helper\n\
+             import json as js\n",
+        )]);
+        let exports = probe_for(tmp.path())
+            .package_exports("alib.models")
+            .unwrap();
+        let b = &exports.bindings;
+        assert_eq!(b["suba"], "alib.models.suba");
+        assert_eq!(b["Foo"], "alib.models.subb.Foo");
+        assert_eq!(b["Baz"], "alib.models.subc.Bar");
+        assert_eq!(b["Qux"], "alib.models.subd.Qux");
+        assert_eq!(b["helper"], "alib.other.helper");
+        assert_eq!(b["js"], "json");
+        // Importing from a submodule binds the submodule on the package.
+        assert_eq!(b["subb"], "alib.models.subb");
+        assert_eq!(b["subc"], "alib.models.subc");
+        assert_eq!(b["subd"], "alib.models.subd");
+        assert!(!b.contains_key("other"), "a sibling package is not bound");
+    }
+
+    #[test]
+    fn package_exports_ignores_star_imports_and_out_of_range_levels() {
+        let tmp = tree(&[(
+            "alib/__init__.py",
+            "from .suba import *\nfrom ...far import x\n",
+        )]);
+        let exports = probe_for(tmp.path()).package_exports("alib").unwrap();
+        assert!(!exports.bindings.contains_key("*"));
+        assert!(!exports.bindings.contains_key("x"));
+        assert_eq!(exports.bindings["suba"], "alib.suba");
+    }
+
+    #[test]
+    fn package_exports_is_none_without_a_parsable_init() {
+        let tmp = tree(&[
+            ("alib/plain.py", ""),
+            ("alib/ns/mod.py", ""),
+            ("alib/broken/__init__.py", "def (:\n"),
+        ]);
+        let probe = probe_for(tmp.path());
+        assert!(probe.package_exports("alib.plain").is_none());
+        assert!(probe.package_exports("alib.ns").is_none());
+        assert!(probe.package_exports("alib.broken").is_none());
+        assert!(probe.package_exports("missing").is_none());
+    }
+
+    #[test]
+    fn canonical_origin_follows_reexport_chains() {
+        let tmp = tree(&[
+            ("alib/__init__.py", "from .models import Foo\n"),
+            ("alib/models/__init__.py", "from .suba import Foo\n"),
+            ("alib/models/suba.py", "class Foo: ...\n"),
+        ]);
+        let probe = probe_for(tmp.path());
+        assert_eq!(probe.canonical_origin("alib.Foo"), "alib.models.suba.Foo");
+        assert_eq!(
+            probe.canonical_origin("alib.models.Foo"),
+            "alib.models.suba.Foo"
+        );
+        assert_eq!(
+            probe.canonical_origin("alib.models.suba.Foo"),
+            "alib.models.suba.Foo"
+        );
+    }
+
+    #[test]
+    fn canonical_origin_terminates_on_circular_reexports() {
+        let tmp = tree(&[
+            ("a/__init__.py", "from b import X\n"),
+            ("b/__init__.py", "from a import X\n"),
+        ]);
+        // Any answer is fine; it must not loop forever.
+        let _ = probe_for(tmp.path()).canonical_origin("a.X");
+    }
+
+    #[test]
+    fn file_in_package_matches_only_files_under_the_package_dir() {
+        let tmp = tree(&[
+            ("alib/models/__init__.py", ""),
+            ("alib/models/suba.py", ""),
+            ("alib/views.py", ""),
+        ]);
+        let probe = probe_for(tmp.path());
+        let root = tmp.path();
+        assert!(probe.file_in_package(&root.join("alib/models/suba.py"), "alib.models"));
+        assert!(probe.file_in_package(&root.join("alib/models/__init__.py"), "alib.models"));
+        assert!(!probe.file_in_package(&root.join("alib/views.py"), "alib.models"));
+        assert!(!probe.file_in_package(Path::new("test.py"), "alib.models"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_in_package_sees_through_symlinks_for_unsaved_files() {
+        let tmp = tree(&[("real/alib/models/__init__.py", "")]);
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(tmp.path().join("real"), &link).unwrap();
+        // sys_path names the symlink; the file is named via the real path
+        // and doesn't exist yet.
+        let probe = probe_for(&link);
+        let unsaved = tmp.path().join("real/alib/models/new.py");
+        assert!(probe.file_in_package(&unsaved, "alib.models"));
+        let probe = probe_for(&tmp.path().join("real"));
+        assert!(probe.file_in_package(&link.join("alib/models/new.py"), "alib.models"));
     }
 }

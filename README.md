@@ -25,8 +25,9 @@ encode a specific style (such as the
 module-only imports) rather than universal correctness, and the list keeps
 growing.
 
-- **Opinionated import rules**: enforce module-only imports (KIS001) and flag
-  needless `from X import Y as Z` aliases (KIS002).
+- **Opinionated import rules**: enforce module-only imports (KIS001), flag
+  needless `from X import Y as Z` aliases (KIS002) and route re-exported
+  submodules through their package (KIS003).
 - **Project-specific rules**: define your own regex rules (KPT) in TOML, with
   messages, file globs and optional replacements. No plugin code.
 - **Auto-fixes** with a Ruff-style safe/unsafe split.
@@ -70,7 +71,7 @@ print(join("a", "b"))
 $ konform check app.py
 error[KIS001][*]: Import 'join' from 'os.path' is not a module.
   --> app.py:1:1
-  help: Use only module imports, see: https://google.github.io/styleguide/pyguide.html#22-imports
+  help: Use only module imports, see: https://google.github.io/styleguide/pyguide.html#22-imports -- use `import os.path` and `os.path.join`
 
 Found 1 error.
 [*] 1 fixable with the `--fix` option.

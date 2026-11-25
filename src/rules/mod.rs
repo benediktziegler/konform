@@ -23,6 +23,7 @@ use ruff_text_size::Ranged;
 // Sub-modules
 // ---------------------------------------------------------------------------
 pub mod docs;
+mod import_fix;
 pub mod kis001;
 pub mod kis002;
 pub mod knq001;
@@ -31,6 +32,8 @@ pub mod knq003;
 pub mod kpt;
 pub mod kst;
 mod scope;
+
+pub(crate) use scope::collect_all_exports;
 
 // ---------------------------------------------------------------------------
 // FileContext

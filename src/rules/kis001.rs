@@ -14,17 +14,22 @@
 //! ```
 
 use super::docs::{DocSection, Example, RuleDocs, RuleOption};
-use super::scope::{collect_all_exports, offset_to_line_col, shadowed_at_occurrences_of};
+use super::import_fix::{
+    bound_import_targets, overlaps_existing_import, package_import_fix, parse_ast, rewrite_imports,
+    FixInfo, ParsedAlias, ParsedImport,
+};
+use super::scope::shadowed_at_occurrences_of;
 use super::{has_noqa, FileContext, Rule};
 use crate::module_probe::{ModuleCheck, ModuleProbe};
 use crate::types::{Level, Violation};
 use anyhow::Result;
-use ruff_python_ast::{Expr, Stmt};
+#[cfg(test)]
+use ruff_python_ast::Stmt;
 #[cfg(test)]
 use ruff_python_parser::parse_module;
-use ruff_text_size::Ranged;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -103,7 +108,13 @@ impl Rule for Kis001Rule {
                     body: "konform rewrites the import when it is safe to do so. It leaves the \
                         violation for you to fix by hand when the new import's name is already \
                         bound elsewhere in the file: as a local variable, or by a different \
-                        import that would then overlap with it.",
+                        import that would then overlap with it.\n\n\
+                        When a package publishes the imported object in its `__init__.py`'s \
+                        `__all__` (for example `from alib.models.suba import Foo`, with \
+                        `alib/models/__init__.py` re-exporting `Foo`), the fix imports the \
+                        nearest such package instead: `from alib import models` and \
+                        `models.Foo`. It never picks a top-level package or a package that \
+                        contains the file being fixed.",
                 },
                 DocSection {
                     title: "Unresolved imports",
@@ -186,200 +197,6 @@ fn parse_kis_config(cfg: &toml::Value) -> (Vec<String>, Level, Option<Level>) {
 }
 
 // ---------------------------------------------------------------------------
-// Internal data structures
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-struct ParsedAlias {
-    name: String,
-    asname: Option<String>,
-    /// 1-based line number where this alias appears.
-    line: usize,
-}
-
-#[derive(Debug)]
-struct ParsedImport {
-    module: String,
-    aliases: Vec<ParsedAlias>,
-    /// 1-based line of the `from` keyword.
-    start_line: usize,
-    /// 1-based line of the last line of this import statement.
-    end_line: usize,
-    /// 0-based column immediately past the last character of the statement.
-    end_col: usize,
-    /// 0-based column of the `from` keyword.
-    col: usize,
-    /// True when the import lives inside `if TYPE_CHECKING:`.
-    /// Tracked for future use (e.g. PT rules may treat TC imports differently).
-    #[allow(dead_code)]
-    in_type_checking: bool,
-    /// True when this import sits directly in the module's top-level body
-    /// (not nested inside an `if`/`def`/`class` block). New imports must
-    /// only ever be inserted at this level.
-    is_top_level: bool,
-    /// Identifies the enclosing compound-statement body this import lives
-    /// in: the byte offset of the first statement in that body. All sibling
-    /// imports sharing the same body share this id. Meaningless (0) for
-    /// top-level imports, which are never at risk of leaving an empty block.
-    block_id: u32,
-    /// Total number of statements (of any kind) in the enclosing body
-    /// identified by `block_id`. Used to detect when every statement in a
-    /// block turns out to be an import that gets fully removed, in which
-    /// case the block would otherwise end up empty (invalid Python) and one
-    /// line must be replaced with `pass` instead of being blanked.
-    block_size: usize,
-}
-
-#[derive(Debug, Clone)]
-struct FixInfo {
-    import_stmt: String,
-    import_key: String,
-    #[allow(dead_code)]
-    old_local: String,
-    new_qualified: String,
-    /// The name this fix's `import_stmt` binds into the file's namespace
-    /// (e.g. `plugin` for `from parent import plugin`, or `os` for
-    /// `import os.path`). If this name is already assigned/bound elsewhere
-    /// in the file, applying the fix would silently shadow it, so callers
-    /// must treat that case as unsafe to auto-fix.
-    new_bound_name: String,
-}
-
-// ---------------------------------------------------------------------------
-// AST-based import collection
-// ---------------------------------------------------------------------------
-
-/// Extract from the already-parsed `stmts` all absolute `from X import Y` statements
-/// together with the module's `__all__` exports.
-///
-/// Returns `(imports, all_exports)`.  On parse error both collections are
-/// empty so the caller silently skips the file.
-fn parse_ast(stmts: &[Stmt], line_starts: &[u32]) -> (Vec<ParsedImport>, HashSet<String>) {
-    if stmts.is_empty() {
-        return (vec![], HashSet::new());
-    }
-    let mut imports = Vec::new();
-    collect_imports(stmts, false, false, line_starts, &mut imports);
-    let exports = collect_all_exports(stmts);
-    (imports, exports)
-}
-
-/// Returns `true` iff `expr` is `TYPE_CHECKING` or `typing.TYPE_CHECKING`.
-fn is_type_checking_guard(expr: &Expr) -> bool {
-    match expr {
-        Expr::Name(n) => n.id.as_str() == "TYPE_CHECKING",
-        Expr::Attribute(a) => a.attr.as_str() == "TYPE_CHECKING",
-        _ => false,
-    }
-}
-
-/// Recursively walk `stmts` and collect all absolute `from X import Y`
-/// statements into `out`, tagging each with whether it is inside an
-/// `if TYPE_CHECKING:` block.
-fn collect_imports(
-    stmts: &[Stmt],
-    in_type_checking: bool,
-    // True when `stmts` is itself the body of a compound statement (if/def/
-    // class/etc.) rather than the module's top-level statement list.
-    nested: bool,
-    line_starts: &[u32],
-    out: &mut Vec<ParsedImport>,
-) {
-    // Identifies this exact body (shared by every statement directly in
-    // it) so fixes can later tell whether *all* statements in the body are
-    // imports that end up fully removed, which would otherwise leave an
-    // empty (invalid) indented block.
-    let block_id = stmts.first().map_or(0, |s| u32::from(s.range().start()));
-    let block_size = stmts.len();
-
-    for stmt in stmts {
-        match stmt {
-            // ── from X import Y ──────────────────────────────────────────
-            Stmt::ImportFrom(node) => {
-                // Skip relative imports (level > 0) and bare `from . import X`
-                // (no module name).
-                let module = match &node.module {
-                    Some(m) => m.as_str().to_owned(),
-                    None => continue, // bare `from . import X`
-                };
-                if node.level != 0 {
-                    continue;
-                }
-
-                let start_off = u32::from(node.range().start());
-                // end() points one past the last byte; use saturating_sub to
-                // stay on the closing token.
-                let end_off = u32::from(node.range().end()).saturating_sub(1);
-                let (start_line, col) = offset_to_line_col(line_starts, start_off);
-                let (end_line, end_col_inclusive) = offset_to_line_col(line_starts, end_off);
-                // end_col_inclusive points at the last byte; add 1 so the
-                // LSP range is exclusive (covers the final character).
-                let end_col = end_col_inclusive + 1;
-
-                let aliases = node
-                    .names
-                    .iter()
-                    .map(|alias| {
-                        let alias_off = u32::from(alias.range().start());
-                        let (alias_line, _) = offset_to_line_col(line_starts, alias_off);
-                        ParsedAlias {
-                            name: alias.name.as_str().to_owned(),
-                            asname: alias.asname.as_deref().map(str::to_owned),
-                            line: alias_line,
-                        }
-                    })
-                    .collect();
-
-                out.push(ParsedImport {
-                    module,
-                    aliases,
-                    start_line,
-                    end_line,
-                    end_col,
-                    col,
-                    in_type_checking,
-                    is_top_level: !nested,
-                    block_id,
-                    block_size,
-                });
-            }
-
-            // ── if TYPE_CHECKING: … ──────────────────────────────────────
-            Stmt::If(node) => {
-                let guard = is_type_checking_guard(&node.test);
-                collect_imports(
-                    &node.body,
-                    in_type_checking || guard,
-                    true,
-                    line_starts,
-                    out,
-                );
-                // elif/else branches are NOT considered TYPE_CHECKING scope.
-                for clause in &node.elif_else_clauses {
-                    collect_imports(&clause.body, in_type_checking, true, line_starts, out);
-                }
-            }
-
-            // ── walk into function / class bodies ────────────────────────
-            // Unusual but legal: imports can appear in nested scopes.
-            // In ruff's AST, async functions share `Stmt::FunctionDef` with
-            // an `is_async` flag instead of a separate `AsyncFunctionDef`.
-            Stmt::FunctionDef(node) => {
-                collect_imports(&node.body, in_type_checking, true, line_starts, out);
-            }
-            Stmt::ClassDef(node) => {
-                collect_imports(&node.body, in_type_checking, true, line_starts, out);
-            }
-
-            _ => {}
-        }
-    }
-}
-
-// Load/Store-name collection and the two-level scope index used to check
-// whether a rename would collide with an existing binding now live in
-// `super::scope` (shared with KIS002).
-// ---------------------------------------------------------------------------
 // AST-based fix resolution
 // ---------------------------------------------------------------------------
 
@@ -389,10 +206,16 @@ fn collect_imports(
 
 /// Attempt to find an automatic fix for importing `attr_name` from `module`.
 ///
+/// Strategy 0 (public re-export): the nearest ancestor package of `module`
+/// that lists `attr_name` in its `__all__` and binds it to the same object
+/// (see [`reexporting_package_fix`]).
 /// Strategy 1 (from-parent): walk the dotted module path looking for the
 /// deepest parent.child split where child is itself a module.
 /// Strategy 2 (bare import): fall back to `import {module}`.
-fn can_fix(module: &str, attr_name: &str, probe: &ModuleProbe) -> Option<FixInfo> {
+fn can_fix(module: &str, attr_name: &str, probe: &ModuleProbe, file: &Path) -> Option<FixInfo> {
+    if let Some(fix) = reexporting_package_fix(module, attr_name, probe, file) {
+        return Some(fix);
+    }
     let parts: Vec<&str> = module.split('.').collect();
 
     for split in (1..parts.len()).rev() {
@@ -402,7 +225,6 @@ fn can_fix(module: &str, attr_name: &str, probe: &ModuleProbe) -> Option<FixInfo
             return Some(FixInfo {
                 import_stmt: format!("from {parent} import {child}"),
                 import_key: format!("{parent}.{child}"),
-                old_local: attr_name.to_owned(),
                 new_qualified: format!("{child}.{attr_name}"),
                 new_bound_name: child.to_owned(),
             });
@@ -412,7 +234,6 @@ fn can_fix(module: &str, attr_name: &str, probe: &ModuleProbe) -> Option<FixInfo
     Some(FixInfo {
         import_stmt: format!("import {module}"),
         import_key: module.to_owned(),
-        old_local: attr_name.to_owned(),
         new_qualified: format!("{module}.{attr_name}"),
         // `import a.b.c` only binds the top-level name `a` in the
         // namespace; access is always via `a.b.c...`.
@@ -420,56 +241,58 @@ fn can_fix(module: &str, attr_name: &str, probe: &ModuleProbe) -> Option<FixInfo
     })
 }
 
-/// For every alias across all `from X import Y` statements in the file, the
-/// name it will ultimately bind into the namespace, mapped to the concrete
-/// module path(s) it resolves to (`"module.attr"`, or a fixable violation's
-/// own `FixInfo::import_key`/`new_bound_name` once konform's own rewrite is
-/// applied).
+/// `from alib.models.suba import Foo`, where `alib/models/__init__.py`
+/// re-exports `Foo` through `__all__`, is better written against the public
+/// package: `from alib import models` and `models.Foo`.
 ///
-/// Two *different* module paths landing on the same bound name means
-/// applying a fix there would create overlapping imports: two `from X
-/// import Y` statements silently binding the same name to two different
-/// modules. Python has no scoping mechanism to disambiguate that -- unlike a
-/// shadowed local variable, there's no rename that fixes it -- so it must be
-/// treated as unsafe to auto-fix, the same way a shadowed name is.
-fn bound_import_targets(
-    imports: &[ParsedImport],
+/// Picks the nearest strict ancestor package of `module` whose `__all__`
+/// lists `attr_name` and whose `__init__.py` binds it to the same object
+/// (followed through further re-exports). Top-level packages are never
+/// picked, so a fix never turns into a bare `import alib`, and neither is a
+/// package that contains the file being fixed, since importing your own
+/// package from inside it invites circular imports.
+fn reexporting_package_fix(
+    module: &str,
+    attr_name: &str,
     probe: &ModuleProbe,
-) -> HashMap<String, HashSet<String>> {
-    let mut targets: HashMap<String, HashSet<String>> = HashMap::new();
-    for imp in imports {
-        for alias in &imp.aliases {
-            let effective = alias.asname.as_deref().unwrap_or(alias.name.as_str());
-            let check = probe.check(&imp.module, &alias.name);
-            let (bound_name, target) = if check == ModuleCheck::NotModule {
-                match can_fix(&imp.module, &alias.name, probe) {
-                    Some(fix) => (fix.new_bound_name, fix.import_key),
-                    None => (
-                        effective.to_owned(),
-                        format!("{}.{}", imp.module, alias.name),
-                    ),
-                }
-            } else {
-                (
-                    effective.to_owned(),
-                    format!("{}.{}", imp.module, alias.name),
-                )
-            };
-            targets.entry(bound_name).or_default().insert(target);
-        }
+    file: &Path,
+) -> Option<FixInfo> {
+    let parts: Vec<&str> = module.split('.').collect();
+    if parts.len() < 3 {
+        return None; // no strict ancestor below the top level
     }
-    targets
+    let origin = probe.canonical_origin(&format!("{module}.{attr_name}"));
+    for len in (2..parts.len()).rev() {
+        let package = parts[..len].join(".");
+        let Some(exports) = probe.package_exports(&package) else {
+            continue;
+        };
+        if !exports.all.contains(attr_name) {
+            continue;
+        }
+        let Some(bound) = exports.bindings.get(attr_name) else {
+            continue;
+        };
+        if probe.canonical_origin(bound) != origin || probe.file_in_package(file, &package) {
+            continue;
+        }
+        return package_import_fix(&package, attr_name);
+    }
+    None
 }
 
-/// Would applying `fix` bind `fix.new_bound_name` to a module other than
-/// `fix.import_key` somewhere else in the file?
-fn overlaps_existing_import(
-    fix: &FixInfo,
-    bound_targets: &HashMap<String, HashSet<String>>,
-) -> bool {
-    bound_targets
-        .get(&fix.new_bound_name)
-        .is_some_and(|paths| paths.iter().any(|path| path != &fix.import_key))
+/// The fix KIS001 plans for `alias` of `imp`, if it is a non-module import
+/// at all (no safety checks).
+fn planned_fix(
+    imp: &ParsedImport,
+    alias: &ParsedAlias,
+    probe: &ModuleProbe,
+    file: &Path,
+) -> Option<FixInfo> {
+    if probe.check(&imp.module, &alias.name) != ModuleCheck::NotModule {
+        return None;
+    }
+    can_fix(&imp.module, &alias.name, probe, file)
 }
 
 // ---------------------------------------------------------------------------
@@ -515,8 +338,11 @@ fn make_violation(
         end_line: span.end_line,
         end_col: span.end_col,
         message: format!("KIS001: Import '{alias_name}' from '{module}' is not a module."),
-        help: Some(if fixable {
-            format!("{base_help} (fixable)")
+        help: Some(if let Some(fix) = fix {
+            format!(
+                "{base_help} -- use `{}` and `{}` (fixable)",
+                fix.import_stmt, fix.new_qualified
+            )
         } else {
             match unsafe_to_fix {
                 Some(UnsafeReason::Shadowed(colliding_name)) => format!(
@@ -583,7 +409,9 @@ fn check_imports(
     let mut violations = Vec::new();
 
     let exception_set: HashSet<&str> = exceptions.iter().map(String::as_str).collect();
-    let bound_targets = bound_import_targets(&imports, probe);
+    let file = ctx.path.as_path();
+    let bound_targets =
+        bound_import_targets(&imports, |imp, alias| planned_fix(imp, alias, probe, file));
 
     for imp in &imports {
         if exception_set.contains(imp.module.as_str()) {
@@ -637,7 +465,7 @@ fn check_imports(
             let candidate_fix = if name_shadowed {
                 None
             } else {
-                can_fix(&imp.module, &alias.name, probe)
+                can_fix(&imp.module, &alias.name, probe, file)
             };
             // Even when the *old* alias name isn't shadowed, the fix may
             // introduce a *new* bound name (e.g. `plugin` from
@@ -698,577 +526,85 @@ fn check_imports(
 }
 
 // ---------------------------------------------------------------------------
-// apply_fixes: six-phase source rewriter
+// apply_fixes
 // ---------------------------------------------------------------------------
-//
-// The rewriter operates on the source *text* (not the AST) for phases 3-6;
-// the AST is used only in phase 1 to discover which imports to fix.
-
-/// Strip a trailing `#` comment from a code line.  Used by phase 3 only.
-fn strip_comment(s: &str) -> &str {
-    let mut in_single = false;
-    let mut in_double = false;
-    for (i, &b) in s.as_bytes().iter().enumerate() {
-        match b {
-            b'\'' if !in_double => in_single = !in_single,
-            b'"' if !in_single => in_double = !in_double,
-            b'#' if !in_single && !in_double => return s[..i].trim_end(),
-            _ => {}
-        }
-    }
-    s.trim_end()
-}
-
-/// Fill in the anchor line for an import block whose aliases were all
-/// removed: the first pending nested-scope import if there is one, else a
-/// `pass` if the block would otherwise be left with an empty body, else a
-/// blank line (matching the pre-blanked/absent line already there). Any
-/// nested imports beyond the first are returned as deferred
-/// `(insert_after_line, text)` pairs for the caller to queue.
-fn emptied_import_line(
-    nested_new_imports: &[String],
-    needs_pass: bool,
-    line_idx: usize,
-    leading: &str,
-    eol: &str,
-) -> (String, Vec<(usize, String)>) {
-    if let Some(first_stmt) = nested_new_imports.first() {
-        let deferred = nested_new_imports[1..]
-            .iter()
-            .map(|stmt| (line_idx + 1, format!("{leading}{stmt}{eol}")))
-            .collect();
-        (format!("{leading}{first_stmt}{eol}"), deferred)
-    } else if needs_pass {
-        // This block would otherwise become empty: a blank body is not
-        // valid Python, so leave a `pass` behind.
-        (format!("{leading}pass{eol}"), Vec::new())
-    } else {
-        (eol.to_owned(), Vec::new()) // blank preserves line numbers
-    }
-}
-
-/// Queue every pending nested-scope import to be inserted right after
-/// `after_line`.
-fn queue_nested_imports(
-    nested_new_imports: &[String],
-    after_line: usize,
-    leading: &str,
-    eol: &str,
-    deferred_nested_inserts: &mut Vec<(usize, String)>,
-) {
-    for stmt in nested_new_imports {
-        deferred_nested_inserts.push((after_line, format!("{leading}{stmt}{eol}")));
-    }
-}
 
 fn apply_fixes(ctx: &FileContext, probe: &ModuleProbe, exceptions: &[String]) -> Option<String> {
-    let source = ctx.source.as_str();
     let ignore_noqa = ctx.ignore_noqa;
     let noqa_aliases = &ctx.noqa_aliases;
-    let lines: Vec<&str> = source.lines().collect();
     let noqa = ctx.noqa_lines();
-    let stmts = ctx.stmts();
-    let (imports, all_exports) = parse_ast(stmts, ctx.line_starts());
+    let (imports, all_exports) = parse_ast(ctx.stmts(), ctx.line_starts());
     let scope_index = ctx.scope_index();
     let load_names = ctx.load_names();
     let exception_set: HashSet<&str> = exceptions.iter().map(String::as_str).collect();
-    let bound_targets = bound_import_targets(&imports, probe);
+    let file = ctx.path.as_path();
+    let bound_targets =
+        bound_import_targets(&imports, |imp, alias| planned_fix(imp, alias, probe, file));
 
-    // ── Phase 1: collect fix instructions ────────────────────────────────
-    // aliases_to_remove : 0-based line index → set of alias names to delete
-    let mut aliases_to_remove: HashMap<usize, HashSet<String>> = HashMap::new();
-    // import_spans       : 0-based start_line → 0-based end_line
-    let mut import_spans: HashMap<usize, usize> = HashMap::new();
-    // top_level_new_imports : import_key -> import statement string (deduped)
-    let mut top_level_new_imports: HashMap<String, String> = HashMap::new();
-    // nested_import_anchors : (enclosing block, import statement) -> earliest
-    // line in that block where this new import must be inserted.
-    let mut nested_import_anchors: HashMap<(u32, String), usize> = HashMap::new();
-    // renames            : old_local_name → new_qualified_name
-    let mut renames: HashMap<String, String> = HashMap::new();
-    let mut last_import_line: Option<usize> = None;
-
-    for imp in &imports {
+    let skip_statement = |imp: &ParsedImport| {
         if exception_set.contains(imp.module.as_str()) {
-            continue;
+            return true;
         }
         let start_line_str = noqa
             .get(imp.start_line.saturating_sub(1))
             .copied()
             .unwrap_or("");
-        if !ignore_noqa && has_noqa(start_line_str, "KIS001", noqa_aliases) {
-            continue;
-        }
-
-        // A KIS001 violation spans the whole statement, so a targeted fix
-        // rewrites every alias in it. Untargeted imports still fall through
-        // to the span/anchor bookkeeping below.
-        let targeted = ctx.wants_fix("KIS001", imp.start_line, imp.col);
-        for alias in &imp.aliases {
-            if !targeted {
-                continue;
-            }
-            let check = probe.check(&imp.module, &alias.name);
-            if check != ModuleCheck::NotModule {
-                continue;
-            }
-            let effective = alias.asname.as_deref().unwrap_or(alias.name.as_str());
-            if all_exports.contains(effective) || all_exports.contains(&alias.name) {
-                continue;
-            }
-            if shadowed_at_occurrences_of(effective, effective, load_names, scope_index) {
-                // `effective`'s own occurrences aren't reliably reads of the
-                // import: a local binding of the same name shares the scope
-                // of at least one of them, and with no full scope resolution
-                // we can't tell which `Load` occurrences refer to the import
-                // versus that local binding -- renaming would silently
-                // change behaviour rather than raise a syntax error. Skip
-                // the fix; `check_imports` reports this same condition as a
-                // non-fixable violation with an explanatory `help` message.
-                continue;
-            }
-            let alias_line_str = noqa
-                .get(alias.line.saturating_sub(1))
-                .copied()
-                .unwrap_or("");
-            if !ignore_noqa && has_noqa(alias_line_str, "KIS001", noqa_aliases) {
-                continue;
-            }
-
-            if let Some(fix) = can_fix(&imp.module, &alias.name, probe) {
-                if shadowed_at_occurrences_of(
-                    &fix.new_bound_name,
-                    effective,
-                    load_names,
-                    scope_index,
-                ) {
-                    // The fix would replace `effective`'s occurrences with
-                    // `fix.new_bound_name.attr` -- but at (at least) one of
-                    // those exact spots, `fix.new_bound_name` is itself
-                    // shadowed by a local binding, so the qualified
-                    // replacement wouldn't resolve to our new import there.
-                    // Skip the fix; `check_imports` reports this same
-                    // condition as a non-fixable violation.
-                    continue;
-                }
-                if overlaps_existing_import(&fix, &bound_targets) {
-                    // `fix.new_bound_name` is already bound to a *different*
-                    // module by another import elsewhere in this file --
-                    // applying this fix would create two overlapping
-                    // imports sharing one name, which konform cannot
-                    // resolve by renaming. Skip the fix; `check_imports`
-                    // reports this same condition as a non-fixable
-                    // violation.
-                    continue;
-                }
-                let old_local = alias
-                    .asname
-                    .as_deref()
-                    .unwrap_or(alias.name.as_str())
-                    .to_owned();
-                renames
-                    .entry(old_local)
-                    .or_insert_with(|| fix.new_qualified.clone());
-                if imp.is_top_level {
-                    top_level_new_imports
-                        .entry(fix.import_key.clone())
-                        .or_insert_with(|| fix.import_stmt.clone());
-                } else {
-                    nested_import_anchors
-                        .entry((imp.block_id, fix.import_stmt.clone()))
-                        .and_modify(|line| *line = (*line).min(imp.start_line - 1))
-                        .or_insert(imp.start_line - 1);
-                }
-                aliases_to_remove
-                    .entry(imp.start_line - 1) // 0-based
-                    .or_default()
-                    .insert(alias.name.clone());
-            }
-        }
-
-        let end_idx = imp.end_line - 1;
-        import_spans.insert(imp.start_line - 1, end_idx);
-        if imp.is_top_level {
-            // Only a module-top-level import is a safe place to anchor the
-            // insertion of new `import X` statements (phase 5). Imports
-            // nested inside `if TYPE_CHECKING:` / a function / a class body
-            // must never be used as the anchor, or the new statement would
-            // land inside that indented block at column 0.
-            last_import_line = Some(last_import_line.map_or(end_idx, |prev| prev.max(end_idx)));
-        }
-    }
-
-    if renames.is_empty() {
-        return None;
-    }
-
-    let mut nested_new_imports_by_line: HashMap<usize, Vec<String>> = HashMap::new();
-    for ((_, stmt), line_idx) in nested_import_anchors {
-        nested_new_imports_by_line
-            .entry(line_idx)
-            .or_default()
-            .push(stmt);
-    }
-    for stmts in nested_new_imports_by_line.values_mut() {
-        stmts.sort();
-        stmts.dedup();
-    }
-
-    let mut block_removed_count: HashMap<u32, usize> = HashMap::new();
-    let mut block_first_removed_line: HashMap<u32, usize> = HashMap::new();
-    for imp in &imports {
-        if imp.is_top_level {
-            continue;
-        }
-        let line_idx = imp.start_line - 1;
-        let removed = match aliases_to_remove.get(&line_idx) {
-            Some(r) => r,
-            None => continue,
-        };
-        if removed.len() != imp.aliases.len() {
-            continue;
-        }
-        *block_removed_count.entry(imp.block_id).or_insert(0) += 1;
-        block_first_removed_line
-            .entry(imp.block_id)
-            .and_modify(|l| *l = (*l).min(line_idx))
-            .or_insert(line_idx);
-    }
-    let mut pass_line: HashSet<usize> = HashSet::new();
-    for imp in &imports {
-        if imp.is_top_level {
-            continue;
-        }
-        let removed_in_block = block_removed_count.get(&imp.block_id).copied().unwrap_or(0);
-        if removed_in_block == imp.block_size {
-            if let Some(first) = block_first_removed_line.get(&imp.block_id) {
-                pass_line.insert(*first);
-            }
-        }
-    }
-
-    // ── Phase 2: drop top-level imports already present in the file ───────
-    for line in &lines {
-        let trimmed = line.trim();
-        for key in top_level_new_imports.clone().keys() {
-            if key.contains('.') {
-                if let Some((parent, child)) = key.split_once('.') {
-                    let pat = format!("from {parent} import {child}");
-                    if trimmed == pat || trimmed.starts_with(&format!("{pat} ")) {
-                        top_level_new_imports.remove(key);
-                    }
-                }
-            } else {
-                let pat = format!("import {key}");
-                if trimmed == pat || trimmed.starts_with(&format!("{pat} ")) {
-                    top_level_new_imports.remove(key);
-                }
-            }
-        }
-    }
-
-    // ── Phase 3: rewrite import lines ──────────────────────────────────
-    let eol = if source.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
+        !ignore_noqa && has_noqa(start_line_str, "KIS001", noqa_aliases)
     };
-    let mut lines_out: Vec<String> = source.lines().map(|l| format!("{l}{eol}")).collect();
-    let mut deferred_nested_inserts: Vec<(usize, String)> = Vec::new();
 
-    for (line_idx, remove_set) in &aliases_to_remove {
-        if *line_idx >= lines_out.len() {
-            continue;
+    let plan_alias = |imp: &ParsedImport, alias: &ParsedAlias| -> Option<FixInfo> {
+        // A KIS001 violation spans the whole statement, so a targeted fix
+        // rewrites every alias in it.
+        if !ctx.wants_fix("KIS001", imp.start_line, imp.col) {
+            return None;
         }
-        let nested_new_imports = nested_new_imports_by_line
-            .get(line_idx)
-            .cloned()
-            .unwrap_or_default();
-        let original = lines[*line_idx];
-        let trimmed = original.trim_start();
-        let leading = &original[..original.len() - trimmed.len()];
-        let code = strip_comment(trimmed);
-
-        if code.contains('(') {
-            // Paren-style import: single-line `(a, b)` or multi-line block.
-            let end_line_idx = import_spans.get(line_idx).copied().unwrap_or(*line_idx);
-
-            // Collect all text between '(' and ')' across the span, stripping
-            // inline comments from each line.  Tokens are comma-separated.
-            let mut raw_content = String::new();
-            for i in *line_idx..=end_line_idx {
-                if i >= lines.len() {
-                    break;
-                }
-                let raw_line = lines[i];
-                let stripped = strip_comment(raw_line.trim_end());
-                let seg: &str = if i == *line_idx && i == end_line_idx {
-                    // Open and close on the same line.
-                    let a = stripped.find('(').map(|p| p + 1).unwrap_or(stripped.len());
-                    let b = stripped.rfind(')').unwrap_or(stripped.len());
-                    if a <= b {
-                        &stripped[a..b]
-                    } else {
-                        ""
-                    }
-                } else if i == *line_idx {
-                    let a = stripped.find('(').map(|p| p + 1).unwrap_or(stripped.len());
-                    &stripped[a..]
-                } else if i == end_line_idx {
-                    let b = stripped.rfind(')').unwrap_or(stripped.len());
-                    &stripped[..b]
-                } else {
-                    stripped
-                };
-                raw_content.push_str(seg);
-                // Inject a comma between lines so adjacent line-tokens split
-                // cleanly (extra empty tokens from trailing commas are filtered).
-                if i < end_line_idx {
-                    raw_content.push(',');
-                }
-            }
-
-            // Parse alias tokens from the collected content.
-            let alias_tokens: Vec<String> = raw_content
-                .split(',')
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty())
-                .collect();
-
-            // Determine the module name from the start line.
-            let module_part = code
-                .strip_prefix("from ")
-                .and_then(|s| s.split_once(" import "))
-                .map(|(m, _)| m)
-                .unwrap_or("");
-
-            // Filter survivors: keep aliases NOT in the remove set.
-            let survivors: Vec<&str> = alias_tokens
-                .iter()
-                .map(String::as_str)
-                .filter(|s| {
-                    let name = s.split_whitespace().next().unwrap_or(s);
-                    !remove_set.contains(name)
-                })
-                .collect();
-
-            if survivors.is_empty() {
-                // Blank every line in the span.
-                for i in *line_idx..=end_line_idx {
-                    if i < lines_out.len() {
-                        lines_out[i] = eol.to_owned();
-                    }
-                }
-                let (anchor_line, deferred) = emptied_import_line(
-                    &nested_new_imports,
-                    pass_line.contains(line_idx),
-                    *line_idx,
-                    leading,
-                    eol,
-                );
-                lines_out[*line_idx] = anchor_line;
-                deferred_nested_inserts.extend(deferred);
-            } else if survivors.len() == 1 {
-                // Collapse to a single line.
-                lines_out[*line_idx] =
-                    format!("{leading}from {module_part} import {}{eol}", survivors[0]);
-                for i in (*line_idx + 1)..=end_line_idx {
-                    if i < lines_out.len() {
-                        lines_out[i] = eol.to_owned();
-                    }
-                }
-                queue_nested_imports(
-                    &nested_new_imports,
-                    end_line_idx + 1,
-                    leading,
-                    eol,
-                    &mut deferred_nested_inserts,
-                );
-            } else {
-                // Reconstruct a parenthesised block.
-                let mut new_block: Vec<String> = Vec::new();
-                new_block.push(format!("{leading}from {module_part} import ({eol}"));
-                for alias in &survivors {
-                    new_block.push(format!("{leading}    {alias},{eol}"));
-                }
-                new_block.push(format!("{leading}){eol}"));
-
-                // Overwrite existing lines with the new block.
-                for (offset, new_line) in new_block.iter().enumerate() {
-                    let target = line_idx + offset;
-                    if target <= end_line_idx && target < lines_out.len() {
-                        lines_out[target] = new_line.clone();
-                    }
-                }
-                // Blank any trailing lines that are no longer needed.
-                for i in (line_idx + new_block.len())..=end_line_idx {
-                    if i < lines_out.len() {
-                        lines_out[i] = eol.to_owned();
-                    }
-                }
-                queue_nested_imports(
-                    &nested_new_imports,
-                    end_line_idx + 1,
-                    leading,
-                    eol,
-                    &mut deferred_nested_inserts,
-                );
-            }
-        } else {
-            // No parens: handle only single-line imports.
-            // Multi-line backslash-continuation imports are skipped.
-            let end_line_idx = import_spans.get(line_idx).copied().unwrap_or(*line_idx);
-            if *line_idx != end_line_idx {
-                continue; // backslash-continuation: leave as-is
-            }
-
-            if let Some(after_from) = code.strip_prefix("from ") {
-                if let Some((module_part, names_part)) = after_from.split_once(" import ") {
-                    let survivors: Vec<&str> = names_part
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| {
-                            let name = s.split_whitespace().next().unwrap_or(*s);
-                            !remove_set.contains(name)
-                        })
-                        .collect();
-
-                    if survivors.is_empty() {
-                        let (anchor_line, deferred) = emptied_import_line(
-                            &nested_new_imports,
-                            pass_line.contains(line_idx),
-                            *line_idx,
-                            leading,
-                            eol,
-                        );
-                        lines_out[*line_idx] = anchor_line;
-                        deferred_nested_inserts.extend(deferred);
-                    } else {
-                        lines_out[*line_idx] = format!(
-                            "{leading}from {module_part} import {}{eol}",
-                            survivors.join(", ")
-                        );
-                        queue_nested_imports(
-                            &nested_new_imports,
-                            end_line_idx + 1,
-                            leading,
-                            eol,
-                            &mut deferred_nested_inserts,
-                        );
-                    }
-                }
-            }
+        if probe.check(&imp.module, &alias.name) != ModuleCheck::NotModule {
+            return None;
         }
-    }
-
-    // ── Phase 4: rename bare name usages via precise AST Load-context spans ──
-    //
-    // This runs *before* new imports are injected (phase 5 below) because the
-    // spans below are byte offsets into the original `source`, which map
-    // 1:1 onto `lines_out`'s current line numbers only as long as no lines
-    // have been inserted or removed yet (phase 3 only ever rewrites content
-    // in place, never changing the line count).
-    //
-    // Renaming is restricted to `Expr::Name` occurrences in **Load** context
-    // collected straight from the AST, rather than a textual word-boundary
-    // scan. This is deliberate: a plain-text scan cannot distinguish a value
-    // being *read* (safe to qualify, e.g. `join(...)` -> `os.path.join(...)`)
-    // from a name being *bound* (a plain assignment target, a `:=` walrus
-    // target, a `for`/`as`/parameter binding) -- Python does not allow a
-    // dotted path in any of those binding positions, so rewriting them
-    // produces a `SyntaxError`. It also cannot tell a real code reference
-    // apart from the same text appearing inside a string, docstring or
-    // comment. AST Load-context spans have neither problem.
-    let line_starts = ctx.line_starts();
-    let mut replacements: Vec<(usize, usize, usize, String)> = Vec::new();
-
-    for occ in load_names {
-        let Some(new_qualified) = renames.get(&occ.name) else {
-            continue;
-        };
-        let (start_line, col_start) = offset_to_line_col(line_starts, occ.start);
-        let (end_line, col_end) = offset_to_line_col(line_starts, occ.end);
-        if start_line != end_line {
-            continue; // a bare Name never spans multiple lines
+        let effective = alias.effective();
+        if all_exports.contains(effective) || all_exports.contains(&alias.name) {
+            return None;
         }
-        replacements.push((start_line - 1, col_start, col_end, new_qualified.clone()));
-    }
-
-    replacements.sort_by_key(|&(li, col, _, _)| (li, std::cmp::Reverse(col)));
-    for (line_idx, col_start, col_end, replacement) in replacements {
-        if line_idx >= lines_out.len() {
-            continue;
+        if shadowed_at_occurrences_of(effective, effective, load_names, scope_index) {
+            // `effective`'s own occurrences aren't reliably reads of the
+            // import: a local binding of the same name shares the scope
+            // of at least one of them, and with no full scope resolution
+            // we can't tell which `Load` occurrences refer to the import
+            // versus that local binding -- renaming would silently
+            // change behaviour rather than raise a syntax error. Skip
+            // the fix; `check_imports` reports this same condition as a
+            // non-fixable violation with an explanatory `help` message.
+            return None;
         }
-        let line = &lines_out[line_idx];
-        let line_eol = if line.ends_with("\r\n") {
-            "\r\n"
-        } else if line.ends_with('\n') {
-            "\n"
-        } else {
-            ""
-        };
-        let bare = &line[..line.len() - line_eol.len()];
-        if col_end <= bare.len() {
-            lines_out[line_idx] = format!(
-                "{}{}{}{line_eol}",
-                &bare[..col_start],
-                replacement,
-                &bare[col_end..]
-            );
+        let alias_line_str = noqa
+            .get(alias.line.saturating_sub(1))
+            .copied()
+            .unwrap_or("");
+        if !ignore_noqa && has_noqa(alias_line_str, "KIS001", noqa_aliases) {
+            return None;
         }
-    }
-
-    // ── Phase 4b: drop top-level import lines that phase 3 emptied ────────
-    // Phase 3 blanks a fully removed import instead of deleting it, so line
-    // indices stay stable for the phases above. An empty string keeps the
-    // slot (later inserts still line up) but writes nothing, so the fix does
-    // not leave a stray blank line where the old `from X import y` stood.
-    for imp in imports.iter().filter(|imp| imp.is_top_level) {
-        let start = imp.start_line - 1;
-        if !aliases_to_remove.contains_key(&start) {
-            continue;
+        let fix = can_fix(&imp.module, &alias.name, probe, file)?;
+        if shadowed_at_occurrences_of(&fix.new_bound_name, effective, load_names, scope_index) {
+            // The fix would replace `effective`'s occurrences with
+            // `fix.new_bound_name.attr` -- but at (at least) one of
+            // those exact spots, `fix.new_bound_name` is itself
+            // shadowed by a local binding, so the qualified
+            // replacement wouldn't resolve to our new import there.
+            // `check_imports` reports this as a non-fixable violation.
+            return None;
         }
-        for i in start..imp.end_line.min(lines_out.len()) {
-            if lines_out[i] == eol && !lines[i].trim().is_empty() {
-                lines_out[i].clear();
-            }
+        if overlaps_existing_import(&fix, &bound_targets) {
+            // `fix.new_bound_name` is already bound to a *different*
+            // module by another import elsewhere in this file --
+            // applying this fix would create two overlapping imports
+            // sharing one name, which konform cannot resolve by
+            // renaming. `check_imports` reports this as non-fixable.
+            return None;
         }
-    }
+        Some(fix)
+    };
 
-    // ── Phase 5a: inject deferred nested-scope imports in place ───────────
-    deferred_nested_inserts.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    for (nested_insert_offset, (insert_pos, line)) in deferred_nested_inserts.iter().enumerate() {
-        let pos = (*insert_pos + nested_insert_offset).min(lines_out.len());
-        lines_out.insert(pos, line.clone());
-    }
-
-    // ── Phase 5b: inject top-level imports after the last top-level import ─
-    if !top_level_new_imports.is_empty() {
-        // When there is no top-level import to anchor on (e.g. every import
-        // in the file lives inside `if TYPE_CHECKING:` or a function), the
-        // only always-safe place to add a new `import X` statement is the
-        // very top of the file (position 0) -- never "after line 0", since
-        // line 0 could be the first line of an unrelated block (as in the
-        // `if TYPE_CHECKING:` case) rather than a docstring/shebang.
-        let base_inject_pos = match last_import_line {
-            Some(line) => (line + 1).min(lines_out.len()),
-            None => 0,
-        };
-        let nested_lines_before_anchor = deferred_nested_inserts
-            .iter()
-            .filter(|(insert_pos, _)| *insert_pos < base_inject_pos)
-            .count();
-        let inject_pos = (base_inject_pos + nested_lines_before_anchor).min(lines_out.len());
-
-        let mut sorted: Vec<&String> = top_level_new_imports.values().collect();
-        sorted.sort();
-        for (offset, stmt) in sorted.into_iter().enumerate() {
-            lines_out.insert(inject_pos + offset, format!("{stmt}{eol}"));
-        }
-    }
-
-    // ── Phase 6: write result ──────────────────────────────────────────────
-    Some(lines_out.concat())
+    rewrite_imports(ctx, &imports, skip_statement, plan_alias)
 }
 
 // ---------------------------------------------------------------------------
@@ -2263,6 +1599,159 @@ mod tests {
         assert!(
             result.is_none(),
             "file has no safely-fixable violations, fix() must return None"
+        );
+    }
+
+    // ── fix target: the package that re-exports the object ───────────────
+
+    /// A KIS001 rule over a temp tree of `files`, plus a context for
+    /// `source` at `rel` inside that tree.
+    fn reexport_project(files: &[(&str, &str)]) -> (tempfile::TempDir, Kis001Rule) {
+        let dir = tempfile::TempDir::new().unwrap();
+        for (path, body) in files {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        let probe = ModuleProbe::for_roots(&[dir.path().to_path_buf()]);
+        (dir, Kis001Rule::new(Arc::new(probe)))
+    }
+
+    fn ctx_in(dir: &tempfile::TempDir, rel: &str, source: &str) -> FileContext {
+        FileContext::from_source(dir.path().join(rel), source.to_owned())
+    }
+
+    const ALIB: &[(&str, &str)] = &[
+        ("alib/__init__.py", ""),
+        (
+            "alib/models/__init__.py",
+            "from .suba import Foo\nfrom .suba import Other as Renamed\n\
+             def bar(): ...\n__all__ = ['Foo', 'bar', 'Renamed', 'Gone']\n",
+        ),
+        (
+            "alib/models/suba.py",
+            "class Foo: ...\nclass Other: ...\ndef bar(): ...\n",
+        ),
+    ];
+
+    #[test]
+    fn fix_prefers_the_package_that_reexports_the_object() {
+        let (dir, rule) = reexport_project(ALIB);
+        let source = "from alib.models.suba import Foo\n\nFoo()\n";
+        let ctx = ctx_in(&dir, "app.py", source);
+        let v = rule.check(&ctx, &empty_cfg());
+        assert_eq!(v.len(), 1);
+        assert!(v[0].fixable);
+        let help = v[0].help.as_deref().unwrap();
+        assert!(
+            help.contains("use `from alib import models` and `models.Foo`"),
+            "{help}"
+        );
+        let fixed = rule.fix(&ctx, &empty_cfg()).unwrap().unwrap();
+        assert_eq!(fixed, "from alib import models\n\nmodels.Foo()\n");
+    }
+
+    #[test]
+    fn fix_follows_reexport_under_an_alias_name_only_when_it_matches() {
+        let (dir, rule) = reexport_project(ALIB);
+        // `Renamed` is `suba.Other`; importing `Other` itself is not
+        // published under that name, so the fix stays on `suba`.
+        let source = "from alib.models.suba import Other\n\nOther()\n";
+        let fixed = rule
+            .fix(&ctx_in(&dir, "app.py", source), &empty_cfg())
+            .unwrap()
+            .unwrap();
+        assert_eq!(fixed, "from alib.models import suba\n\nsuba.Other()\n");
+    }
+
+    #[test]
+    fn fix_ignores_a_reexport_of_a_different_object_with_the_same_name() {
+        let (dir, rule) = reexport_project(ALIB);
+        // `alib.models.bar` is defined in the package, not `suba.bar`.
+        let source = "from alib.models.suba import bar\n\nbar()\n";
+        let fixed = rule
+            .fix(&ctx_in(&dir, "app.py", source), &empty_cfg())
+            .unwrap()
+            .unwrap();
+        assert_eq!(fixed, "from alib.models import suba\n\nsuba.bar()\n");
+    }
+
+    #[test]
+    fn fix_needs_the_name_in_all() {
+        let (dir, rule) = reexport_project(&[
+            ("alib/__init__.py", ""),
+            ("alib/models/__init__.py", "from .suba import Foo\n"),
+            ("alib/models/suba.py", "class Foo: ...\n"),
+        ]);
+        let source = "from alib.models.suba import Foo\n\nFoo()\n";
+        let fixed = rule
+            .fix(&ctx_in(&dir, "app.py", source), &empty_cfg())
+            .unwrap()
+            .unwrap();
+        assert_eq!(fixed, "from alib.models import suba\n\nsuba.Foo()\n");
+    }
+
+    #[test]
+    fn fix_picks_the_nearest_reexporting_package() {
+        let (dir, rule) = reexport_project(&[
+            ("alib/__init__.py", ""),
+            (
+                "alib/core/__init__.py",
+                "from .models import Foo\n__all__ = ['Foo']\n",
+            ),
+            (
+                "alib/core/models/__init__.py",
+                "from .suba import Foo\n__all__ = ['Foo']\n",
+            ),
+            ("alib/core/models/suba.py", "class Foo: ...\n"),
+        ]);
+        let source = "from alib.core.models.suba import Foo\n\nFoo()\n";
+        let fixed = rule
+            .fix(&ctx_in(&dir, "app.py", source), &empty_cfg())
+            .unwrap()
+            .unwrap();
+        assert_eq!(fixed, "from alib.core import models\n\nmodels.Foo()\n");
+    }
+
+    #[test]
+    fn fix_never_climbs_to_a_top_level_package() {
+        let (dir, rule) = reexport_project(&[
+            (
+                "alib/__init__.py",
+                "from .suba import Foo\n__all__ = ['Foo']\n",
+            ),
+            ("alib/suba.py", "class Foo: ...\n"),
+        ]);
+        let source = "from alib.suba import Foo\n\nFoo()\n";
+        let fixed = rule
+            .fix(&ctx_in(&dir, "app.py", source), &empty_cfg())
+            .unwrap()
+            .unwrap();
+        assert_eq!(fixed, "from alib import suba\n\nsuba.Foo()\n");
+    }
+
+    #[test]
+    fn fix_inside_the_reexporting_package_keeps_the_submodule() {
+        let (dir, rule) = reexport_project(ALIB);
+        let source = "from alib.models.suba import Foo\n\nFoo()\n";
+        let fixed = rule
+            .fix(&ctx_in(&dir, "alib/models/other.py", source), &empty_cfg())
+            .unwrap()
+            .unwrap();
+        assert_eq!(fixed, "from alib.models import suba\n\nsuba.Foo()\n");
+    }
+
+    #[test]
+    fn importing_from_the_reexporting_package_already_fixes_to_it() {
+        let (dir, rule) = reexport_project(ALIB);
+        let source = "from alib.models import Foo, bar\n\nFoo()\nbar()\n";
+        let fixed = rule
+            .fix(&ctx_in(&dir, "app.py", source), &empty_cfg())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fixed,
+            "from alib import models\n\nmodels.Foo()\nmodels.bar()\n"
         );
     }
 }

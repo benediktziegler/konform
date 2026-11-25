@@ -70,7 +70,7 @@ print(join("a", "b"))
 $ konform check app.py
 error[KIS001][*]: Import 'join' from 'os.path' is not a module.
   --> app.py:1:1
-  help: Use only module imports, see: https://google.github.io/styleguide/pyguide.html#22-imports
+  help: Use only module imports, see: https://google.github.io/styleguide/pyguide.html#22-imports -- use `import os.path` and `os.path.join`
 
 Found 1 error.
 [*] 1 fixable with the `--fix` option.

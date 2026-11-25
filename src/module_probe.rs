@@ -214,6 +214,21 @@ fn store_info(file: &Path, key: u64, info: &InterpreterInfo) {
     }
 }
 
+/// `path` with symlinks resolved; for a path that doesn't exist, its
+/// nearest existing ancestor is resolved and the rest appended. Falls back to
+/// `path` unchanged.
+fn resolve_path(path: &Path) -> PathBuf {
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return resolved;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+            resolve_path(parent).join(name)
+        }
+        _ => path.to_path_buf(),
+    }
+}
+
 /// The public surface of one package, read from its `__init__.py`.
 ///
 /// See [`ModuleProbe::package_exports`].
@@ -789,13 +804,17 @@ impl ModuleProbe {
 
     /// `true` when `file` lies inside the directory of `package` in any
     /// `sys_path` entry, i.e. the file is part of that package itself.
+    ///
+    /// Compares both the paths as given and their resolved forms, so
+    /// symlinks (macOS's `/var` -> `/private/var`) and files not yet on
+    /// disk (an unsaved editor buffer) still match.
     pub fn file_in_package(&self, file: &Path, package: &str) -> bool {
-        let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+        let files = [file.to_path_buf(), resolve_path(file)];
         let package_dir = package.replace('.', "/");
         self.sys_path.iter().any(|base| {
             let dir = base.join(&package_dir);
-            let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
-            file.starts_with(&dir)
+            let dirs = [resolve_path(&dir), dir];
+            files.iter().any(|f| dirs.iter().any(|d| f.starts_with(d)))
         })
     }
 }
@@ -1512,5 +1531,20 @@ mod tests {
         assert!(probe.file_in_package(&root.join("alib/models/__init__.py"), "alib.models"));
         assert!(!probe.file_in_package(&root.join("alib/views.py"), "alib.models"));
         assert!(!probe.file_in_package(Path::new("test.py"), "alib.models"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_in_package_sees_through_symlinks_for_unsaved_files() {
+        let tmp = tree(&[("real/alib/models/__init__.py", "")]);
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(tmp.path().join("real"), &link).unwrap();
+        // sys_path names the symlink; the file is named via the real path
+        // and doesn't exist yet.
+        let probe = probe_for(&link);
+        let unsaved = tmp.path().join("real/alib/models/new.py");
+        assert!(probe.file_in_package(&unsaved, "alib.models"));
+        let probe = probe_for(&tmp.path().join("real"));
+        assert!(probe.file_in_package(&link.join("alib/models/new.py"), "alib.models"));
     }
 }

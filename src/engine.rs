@@ -274,6 +274,12 @@ pub fn run_fix(
         MAX_FIX_PASSES
     };
 
+    // The parsed context for the current `src`, reused by every rule until
+    // one of them changes the source: clones share the parse, the scope
+    // index and the other per-file data, so a rule that has nothing to fix
+    // costs no re-parse.
+    let mut base_ctx: Option<FileContext> = None;
+
     for _pass in 0..max_passes {
         let mut pass_changed = false;
 
@@ -286,7 +292,11 @@ pub fn run_fix(
             (unsafe_fixes || !r.is_unsafe_fix())
                 && (r.gates_per_violation() || fix_selection.is_enabled(r.code()))
         }) {
-            let mut ctx = FileContext::from_source(input.path.to_path_buf(), src.clone());
+            let mut ctx = base_ctx
+                .get_or_insert_with(|| {
+                    FileContext::from_source(input.path.to_path_buf(), src.clone())
+                })
+                .clone();
             ctx.ignore_noqa = input.ignore_noqa || config.ignore_noqa;
             ctx.noqa_aliases = config.noqa_aliases();
             ctx.selection = config.selection();
@@ -311,6 +321,7 @@ pub fn run_fix(
                     continue;
                 }
                 src = fixed;
+                base_ctx = None;
                 changed = true;
                 pass_changed = true;
             }
